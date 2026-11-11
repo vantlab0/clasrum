@@ -1,0 +1,38 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+backend/dev.db
+backend/*.db
+backend/*.db-journal
+
+# --- Flutter / Dart -------------------------------------------------------
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/build/
+app/.packages
+app/pubspec.lock.bak
+app/ios/Pods/
+app/ios/.symlinks/
+app/android/.gradle/
+app/android/local.properties
+app/**/GeneratedPluginRegistrant.*
+
+# --- env / secrets --------------------------------------------------------
+.env
+.env.local
+*.pem
+*.key
+secrets/
+
+# --- misc -----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.log
+.pytest-tmp/

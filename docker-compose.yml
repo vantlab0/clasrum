@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: classroom
+      POSTGRES_PASSWORD: classroom
+      POSTGRES_DB: classroom
+    ports:
+      - "5432:5432"
+    volumes:
+      - classroom_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U classroom -d classroom"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://classroom:classroom@postgres:5432/classroom
+      ENVIRONMENT: production
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-0123456789abcdef}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_FAKE_MODE: ${QWEN_FAKE_MODE:-false}
+      NOTES_API_KEY: ${NOTES_API_KEY:-}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  classroom_pg:
