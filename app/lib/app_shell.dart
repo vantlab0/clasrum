@@ -34,15 +34,10 @@ class _AppShellState extends State<AppShell> {
     super.dispose();
   }
 
-  RealtimeClient _client() {
-    if (_realtimeClient == null) {
-      _realtimeClient = RealtimeClient(
+  RealtimeClient _client() => _realtimeClient ??= RealtimeClient(
         config: widget.config,
         storage: widget.storage,
       );
-    }
-    return _realtimeClient!;
-  }
 
   @override
   Widget build(BuildContext context) {
