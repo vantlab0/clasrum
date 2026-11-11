@@ -113,7 +113,6 @@
     "session.end",
     "board.request_snapshot",
     "board.backfill",
-    "question.text",
     "ping"
   ]
 }

@@ -1,0 +1,56 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: 'Backend API base URL (e.g. http://192.168.1.50:8000)'
+        required: false
+        default: 'http://10.0.2.2:8000'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: 'stable'
+
+      - name: Get Flutter dependencies
+        working-directory: ./app
+        run: flutter pub get
+
+      - name: Analyze Flutter code
+        working-directory: ./app
+        run: flutter analyze lib/
+
+      - name: Build APK
+        working-directory: ./app
+        run: |
+          flutter build apk --release \
+            --dart-define=API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000' }}
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-classroom-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+      - name: Show APK path
+        run: echo "APK available at app/build/app/outputs/flutter-apk/app-release.apk"

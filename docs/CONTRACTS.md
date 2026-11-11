@@ -349,8 +349,43 @@ Client→server:
 | `session.end` | `{reason?}` |
 | `board.request_snapshot` | `{}` |
 | `board.backfill` | `{after_sequence}` |
-| `question.text` | `{text}` — typed fallback question |
 | `ping` | `{}` |
+
+Typed questions are **not** part of the realtime contract: Qwen-Omni realtime
+accepts audio (and image) input only — there is no text turn, so a typed
+question cannot be answered by the live tutor. The Live screen therefore
+requires a working microphone for the AI teacher (with a clear permission/error
+state), and typed input is limited to the topic field on Home.
+
+### Qwen Realtime wire facts (verified against DashScope)
+
+* Endpoint: `wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=<model>`,
+  headers `Authorization: Bearer <key>` and
+  `X-DashScope-DataInspection: disable`.
+* `session.update` shape:
+  ```json
+  {"type":"session.update","session":{
+    "instructions":"...", "modalities":["audio","text"], "voice":"Cherry",
+    "input_audio_format":"pcm", "output_audio_format":"pcm",
+    "turn_detection":{"type":"server_vad","threshold":0.5,"silence_duration_ms":800},
+    "input_audio_transcription":{"model":"qwen3-asr-flash-realtime"},
+    "tools":[...]}}
+  ```
+  Readiness is signalled by a `session.updated` frame (timeout ≈15 s).
+* Client events: `input_audio_buffer.append` (base64 PCM16 16 kHz mono),
+  `input_audio_buffer.commit`, `response.create`, `response.cancel`,
+  `conversation.item.create` with `{"type":"function_call_output","call_id",...}`.
+* Server events consumed: `response.created`, `response.audio.delta` (base64
+  PCM16 24 kHz), `response.audio_transcript.delta`, `response.done`,
+  `input_audio_buffer.speech_started/stopped`,
+  `conversation.item.input_audio_transcription.completed`,
+  `response.output_item.added` (function_call name), 
+  `response.function_call_arguments.delta/done`, `error`.
+* **No `conversation.item.truncate` support** on this API. Barge-in is handled
+  by `response.cancel` plus a client-side playback flush; `audio.truncated` is a
+  backend→client instruction with the client-measured `played_ms`, not a Qwen
+  call.
+* The API key never leaves the backend.
 
 Reliability:
 * `audio.delta.sequence` is the Qwen audio chunk order; client may drop late

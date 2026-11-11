@@ -146,3 +146,4 @@ indexes may evolve with Alembic migrations.
 * The Qwen API key stays in the backend; clients only get lesson-scoped JWTs.
 * `DELETE /api/v1/me/data` removes the student's lessons, transcripts, board
   history, notes and learning memory.
+\"# clasrum\"  
