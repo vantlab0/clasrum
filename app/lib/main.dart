@@ -27,7 +27,6 @@ class AiClassroomApp extends StatelessWidget {
           primary: Color(0xFFF2F0E8),
           secondary: Color(0xFFE8D58C),
           surface: Color(0xFF171A1F),
-          background: Color(0xFF101215),
         ),
       ),
       home: AppShell(config: config, storage: storage),

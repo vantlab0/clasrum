@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:record/record.dart';
 
@@ -73,7 +75,7 @@ class _LiveScreenState extends State<LiveScreen> {
 
   @override
   void dispose() {
-    _stopMic();
+    unawaited(_stopMic());
     super.dispose();
   }
 
@@ -90,7 +92,7 @@ class _LiveScreenState extends State<LiveScreen> {
     try {
       await _recorder.start(const RecordConfig(), path: 'classroom.m4a');
       setState(() => _micOpen = true);
-      widget.client.audioStart();
+      unawaited(widget.client.audioStart());
       _captureLoop();
     } catch (e) {
       setState(() => _error = 'Microphone access failed.');
@@ -102,7 +104,7 @@ class _LiveScreenState extends State<LiveScreen> {
       await _recorder.stop();
     } catch (_) {}
     setState(() => _micOpen = false);
-    widget.client.audioStop();
+    await widget.client.audioStop();
   }
 
   void _captureLoop() async {
