@@ -175,7 +175,7 @@ class RealtimeClient extends ChangeNotifier {
   /// Close the socket cleanly.
   Future<void> disconnect() async {
     _stopHeartbeat();
-    _subscription?.cancel();
+    await _subscription?.cancel();
     _subscription = null;
     await _channel?.sink.close();
     _channel = null;
@@ -394,7 +394,7 @@ class RealtimeClient extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _stopHeartbeat();
-    _subscription?.cancel();
+    unawaited(_subscription?.cancel());
     _subscription = null;
     _channel?.sink.close();
     _channel = null;
@@ -411,8 +411,8 @@ class RealtimeClientScope extends InheritedNotifier<RealtimeClient> {
   const RealtimeClientScope({
     super.key,
     required RealtimeClient notifier,
-    required Widget child,
-  }) : super(notifier: notifier, child: child);
+    required super.child,
+  }) : super(notifier: notifier);
 
   static RealtimeClient of(BuildContext context) {
     final scope =
