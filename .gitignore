@@ -21,6 +21,8 @@ app/pubspec.lock.bak
 app/ios/Pods/
 app/ios/.symlinks/
 app/android/.gradle/
+app/android/.kotlin/
+app/android/build/
 app/android/local.properties
 app/**/GeneratedPluginRegistrant.*
 
