@@ -73,7 +73,7 @@ String clockDuration(int seconds) {
   final hours = safe ~/ 3600;
   final minutes = (safe % 3600) ~/ 60;
   final secs = safe % 60;
-  final two = (int value) => value.toString().padLeft(2, '0');
+  String two(int value) => value.toString().padLeft(2, '0');
   if (hours > 0) {
     return '$hours:${two(minutes)}:${two(secs)}';
   }

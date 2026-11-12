@@ -69,7 +69,7 @@ class SectionDivider extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
       child: Row(
         children: <Widget>[
-          Expanded(
+          const Expanded(
             child: Divider(color: AppColors.outlineSoft),
           ),
           Padding(
@@ -79,7 +79,7 @@ class SectionDivider extends StatelessWidget {
               style: Theme.of(context).textTheme.labelMedium,
             ),
           ),
-          Expanded(
+          const Expanded(
             child: Divider(color: AppColors.outlineSoft),
           ),
         ],

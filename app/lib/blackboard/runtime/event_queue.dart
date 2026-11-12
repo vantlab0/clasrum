@@ -56,7 +56,7 @@ class BoardEventQueue {
   final List<String> _warnings = <String>[];
 
   int _appliedSequence = 0;
-  bool _paused = false;
+  bool paused = false;
   bool _gapActive = false;
 
   /// Fired once per gap episode when an out-of-order sequence arrives.
@@ -89,13 +89,6 @@ class BoardEventQueue {
 
   bool get isEmpty => _buffered.isEmpty;
 
-  bool get paused => _paused;
-
-  /// Pause delivery (used while a reveal animation is running).
-  set paused(bool value) {
-    _paused = value;
-  }
-
   /// Recent non-fatal queue warnings (bounded, newest last).
   List<String> get warnings => List<String>.unmodifiable(_warnings);
 
@@ -111,7 +104,7 @@ class BoardEventQueue {
     _warnings.clear();
     _appliedSequence = appliedSequence < 0 ? 0 : appliedSequence;
     _gapActive = false;
-    _paused = false;
+    paused = false;
   }
 
   /// Enqueues one event. Returns true when it was newly buffered/accepted.
@@ -161,7 +154,7 @@ class BoardEventQueue {
   /// The next contiguous, dependency-satisfied event, or null when paused,
   /// empty, or waiting on a gap. Does not mutate the queue.
   BoardEvent? peekNext() {
-    if (_paused) return null;
+    if (paused) return null;
     final head = _buffered[_appliedSequence + 1];
     if (head == null) return null;
     if (head.dependsOn.isEmpty) return head;

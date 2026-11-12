@@ -140,11 +140,11 @@ class _HomeScreenState extends State<HomeScreen> {
             children: <Widget>[
               Expanded(
                 child: DropdownButtonFormField<String>(
-                  value: _level,
+                  initialValue: _level,
                   decoration: const InputDecoration(labelText: 'Level'),
                   items: learningLevels
-                      .map((l) =>
-                          DropdownMenuItem(value: l, child: Text(levelLabel(l))))
+                      .map((l) => DropdownMenuItem(
+                          value: l, child: Text(levelLabel(l))))
                       .toList(),
                   onChanged: (v) => setState(() => _level = v!),
                 ),
@@ -153,11 +153,11 @@ class _HomeScreenState extends State<HomeScreen> {
               SizedBox(
                 width: 110,
                 child: DropdownButtonFormField<int>(
-                  value: _duration,
+                  initialValue: _duration,
                   decoration: const InputDecoration(labelText: 'Minutes'),
                   items: supportedDurations
-                      .map((d) =>
-                          DropdownMenuItem(value: d, child: Text(durationLabel(d))))
+                      .map((d) => DropdownMenuItem(
+                          value: d, child: Text(durationLabel(d))))
                       .toList(),
                   onChanged: (v) => setState(() => _duration = v!),
                 ),

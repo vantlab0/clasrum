@@ -11,6 +11,10 @@ analyzer:
     unused_local_variable: warning
     unused_field: warning
     dead_code: warning
+    # These lints currently flag existing library directives / test helpers.
+    directives_ordering: ignore
+    prefer_const_constructors: ignore
+    invalid_use_of_visible_for_testing_member: ignore
   exclude:
     - build/**
     - .dart_tool/**
