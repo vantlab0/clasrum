@@ -1,0 +1,82 @@
+# Production Systemd Service for AI Personal Classroom Backend
+# ==============================================================
+# Place on VPS at: /etc/systemd/system/ai-classroom.service
+# Manage with: systemctl {start|stop|restart|enable|disable} ai-classroom
+# View logs with: journalctl -u ai-classroom -f
+
+[Unit]
+Description=AI Personal Classroom Backend Service
+After=network.target postgresql.service
+Wants=postgresql.service
+# Optional: Redis if you add caching
+# After=redis.service
+# Wants=redis.service
+
+[Service]
+Type=simple
+# Change to a dedicated system user for security
+User=administrator
+# Could also use: User=ai-classroom
+
+# Working directory
+WorkingDirectory=/opt/ai-classroom/backend
+
+# Environment configuration
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/ai-classroom/backend/.env
+
+# Secure the runtime
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ai-classroom/backend/data /opt/ai-classroom/backend/logs /tmp
+PrivateTmp=true
+
+# Resource limits (prevent resource exhaustion)
+MemoryMax=512M
+CPUQuota=80%
+# Timeout for graceful shutdown
+TimeoutStopSec=10
+
+# Restart configuration
+Restart=always
+RestartSec=5
+
+# Security hardening
+# No journald access
+ExecStart=/opt/ai-classroom/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Capabilities (remove unnecessary ones)
+# AmbientCapabilities=
+# Limit CORE dump size
+LimitCORE=0
+
+# Time to wait before killing process
+SendSIGKILL=yes
+
+[Install]
+WantedBy=multi-user.target
+
+# =============================================================================
+# QUICK START COMMANDS (run on VPS):
+# =============================================================================
+#
+# 1. Reload systemd daemon
+#    sudo systemctl daemon-reload
+#
+# 2. Enable service to start on boot
+#    sudo systemctl enable ai-classroom
+#
+# 3. Start the service
+#    sudo systemctl start ai-classroom
+#
+# 4. Check status
+#    sudo systemctl status ai-classroom
+#
+# 5. View real-time logs
+#    sudo journalctl -u ai-classroom -f
+#
+# 6. View last 50 log lines
+#    sudo journalctl -u ai-classroom -n 50
+#
+# =============================================================================

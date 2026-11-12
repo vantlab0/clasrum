@@ -109,9 +109,13 @@ class QwenSession(Protocol):
         ...
 
 
-@dataclass
+@dataclass(eq=False)
 class LessonSocket:
-    """One live client socket for a lesson."""
+    """One live client socket for a lesson.
+
+    ``eq=False`` keeps identity equality/hash semantics: sockets are stored in
+    sets inside the hub, and the dataclass must stay hashable.
+    """
 
     websocket: WebSocket
     lesson_id: str
@@ -260,7 +264,7 @@ class LessonRealtimeHub:
             async with session_scope() as db:
                 lesson = await db.get(Lesson, lesson_id)
                 assert lesson is not None
-                detail = await lessons_service.build_lesson_detail(db, lesson)
+                detail = _detail_dict(await lessons_service.build_lesson_detail(db, lesson))
                 board_envelope = await get_board_snapshot(db, lesson, include_events=False)
                 cursor = await get_transcript_cursor(db, lesson.id)
 
@@ -268,10 +272,27 @@ class LessonRealtimeHub:
             settings = get_settings()
             qwen = self._qwen_factory() if self._qwen_factory else _FakeQwenSession()
             socket.qwen = qwen
-            await qwen.connect(
-                instructions=_teacher_instructions(detail),
-                tools=_openai_tools(),
-            )
+            try:
+                await qwen.connect(
+                    instructions=_teacher_instructions(detail),
+                    tools=_openai_tools(),
+                )
+            except Exception:
+                logger.exception("Qwen realtime connect failed lesson=%s", lesson_id)
+                async with self._lock:
+                    self._sockets.pop(lesson_id, None)
+                    self._all.get(lesson_id, set()).discard(socket)
+                await _send_error(
+                    socket,
+                    "qwen_unavailable",
+                    "The tutor voice service is unavailable right now. Please try again shortly.",
+                    retryable=True,
+                )
+                try:
+                    await socket.websocket.close(code=CLOSE_QWEN_UNAVAILABLE)
+                except Exception:  # pragma: no cover - best effort
+                    pass
+                return
 
             # Send session.ready per §6.
             await socket.websocket.send_json(
@@ -280,8 +301,8 @@ class LessonRealtimeHub:
                     "lesson_id": lesson_id,
                     "student_id": student.id,
                     "lease_id": socket.lease_id,
-                    "board": board_envelope,
-                    "transcript_cursor": cursor,
+                    "board": _jsonable(board_envelope),
+                    "transcript_cursor": _jsonable(cursor),
                     "lesson": detail,
                     "audio": {
                         "input_sample_rate": settings.qwen_input_sample_rate,
@@ -420,7 +441,7 @@ class LessonRealtimeHub:
                         fresh_db, lesson, include_events=False
                     )
                 await socket.websocket.send_json(
-                    {MSG_TYPE: MSG_BOARD_SNAPSHOT, "board": envelope_board}
+                    {MSG_TYPE: MSG_BOARD_SNAPSHOT, "board": _jsonable(envelope_board)}
                 )
             except Exception as exc:  # pragma: no cover
                 logger.debug("snapshot request failed lesson=%s", lesson_id, exc_info=True)
@@ -437,7 +458,7 @@ class LessonRealtimeHub:
                 await socket.websocket.send_json(
                     {
                         MSG_TYPE: MSG_BOARD_EVENTS,
-                        "events": events,
+                        "events": _jsonable(events),
                         "from_sequence": after_sequence + 1,
                         "to_sequence": after_sequence + len(events),
                     }
@@ -562,7 +583,7 @@ class LessonRealtimeHub:
                 if lesson is None:
                     return
                 lesson = await graph_service.finish_lesson(fresh_db, lesson_id, reason)
-                detail = await lessons_service.build_lesson_detail(fresh_db, lesson)
+                detail = _detail_dict(await lessons_service.build_lesson_detail(fresh_db, lesson))
                 board_envelope = await get_board_snapshot(
                     fresh_db, lesson, include_events=False
                 )
@@ -572,7 +593,7 @@ class LessonRealtimeHub:
                     "reason": reason,
                     "needs_notes_prompt": True,
                     "lesson": detail,
-                    "board": board_envelope,
+                    "board": _jsonable(board_envelope),
                 }
             )
         except Exception as exc:  # pragma: no cover
@@ -665,20 +686,41 @@ def _http_code_to_error(status: int) -> str:
     return mapping.get(status, "internal_error")
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert DTOs/dataclasses to JSON-safe structures for ``send_json``."""
+    from fastapi.encoders import jsonable_encoder
+
+    return jsonable_encoder(value)
+
+
+def _detail_dict(detail: Any) -> dict[str, Any]:
+    """Normalise a lesson-detail DTO (Pydantic model or mapping) to a plain dict."""
+    if detail is None:
+        return {}
+    if isinstance(detail, Mapping):
+        return dict(detail)
+    dump = getattr(detail, "model_dump", None)
+    if callable(dump):
+        return dump(mode="json")
+    return {}
+
+
 async def _lesson_detail(lesson_id: str) -> dict[str, Any]:
     async with session_scope() as db:
         lesson = await db.get(Lesson, lesson_id)
         if lesson is None:
             return {}
-        return await lessons_service.build_lesson_detail(db, lesson)
+        return _detail_dict(await lessons_service.build_lesson_detail(db, lesson))
 
 
-def _teacher_instructions(detail: Mapping[str, Any]) -> str:
+def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
     """Build the Qwen teacher instructions from the lesson plan/state."""
+    detail = _detail_dict(detail)
     topic = str(detail.get("topic") or "the topic")
     subject = str(detail.get("subject") or "General Studies")
     level = str(detail.get("learning_level") or "beginner")
-    concepts = detail.get("plan", {}).get("concepts", []) if isinstance(detail.get("plan"), dict) else []
+    plan = detail.get("plan")
+    concepts = plan.get("concepts", []) if isinstance(plan, Mapping) else []
     concept_list = ", ".join(str(c.get("title", "")) for c in concepts) if concepts else "the lesson concepts"
     return (
         f"You are a patient, encouraging private tutor teaching '{topic}' ({subject}) "

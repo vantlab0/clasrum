@@ -23,7 +23,7 @@ from app.realtime.qwen_adapter import FakeQwenSession, QwenRealtimeSession
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["realtime"])
+router = APIRouter(prefix="/ws", tags=["realtime"])
 
 # Module-level hub singleton shared by the router and the board service.
 _hub: LessonRealtimeHub | None = None
@@ -67,13 +67,25 @@ async def lessons_ws(
         try:
             student = await resolve_student(db, token)
         except errors.ApiError:
+            logger.warning(
+                "realtime auth rejected lesson=%s token_present=%s",
+                lesson_id,
+                bool(token),
+            )
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
         lesson = await db.get(Lesson, lesson_id)
         if lesson is None:
+            logger.warning("realtime lesson not found lesson=%s", lesson_id)
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
         if lesson.student_id != student.id:
+            logger.warning(
+                "realtime ownership mismatch lesson=%s student=%s owner=%s",
+                lesson_id,
+                student.id,
+                lesson.student_id,
+            )
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
 

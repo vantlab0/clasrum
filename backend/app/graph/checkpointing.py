@@ -77,8 +77,30 @@ def configured_kind(settings: Settings | None = None) -> str:
     return MEMORY_KIND
 
 
+def _ensure_aiosqlite_is_alive() -> None:
+    """Shim for ``langgraph-checkpoint-sqlite`` <= 2.0.11.
+
+    That release calls ``aiosqlite.Connection.is_alive()`` in ``setup()``, a
+    helper aiosqlite never shipped. Without it every SQLite checkpoint run
+    raises ``'Connection' object has no attribute 'is_alive'`` and silently
+    falls back to volatile in-memory persistence. The connection has already
+    been opened by ``from_conn_string`` before ``setup()`` runs, so reporting
+    it alive is accurate.
+    """
+    import aiosqlite
+
+    if not hasattr(aiosqlite.Connection, "is_alive"):
+        aiosqlite.Connection.is_alive = lambda self: True  # type: ignore[attr-defined]
+
+
 def _sqlite_path(database_url: str) -> str:
-    """Extract the filesystem path from a ``sqlite+aiosqlite://`` DSN."""
+    """Pick a *separate* SQLite file for LangGraph checkpoints.
+
+    The application database is written inside an open SQLAlchemy transaction
+    during a graph run, so sharing the same file makes the checkpointer fail
+    with ``database is locked``. Sibling file (<db>-checkpoints.db) keeps the
+    WAL writers apart while staying next to the data it belongs to.
+    """
     from sqlalchemy.engine import make_url
 
     try:
@@ -89,7 +111,10 @@ def _sqlite_path(database_url: str) -> str:
         return "checkpoints.db"
     if not database or database == ":memory:":
         return ":memory:"
-    return database
+    stem, dot, ext = database.rpartition(".")
+    if not dot:
+        return f"{database}-checkpoints.db"
+    return f"{stem}-checkpoints.{ext}"
 
 
 def _postgres_dsn(database_url: str) -> str:
@@ -161,6 +186,7 @@ async def lesson_persistence(
             return
 
     if kind == SQLITE_KIND:
+        _ensure_aiosqlite_is_alive()
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         from langgraph.store.memory import InMemoryStore
 
