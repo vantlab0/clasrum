@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "com.example.ai_classroom"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_pcm_sound and its AndroidX dependencies require API 34 at compile time.
+    compileSdk = maxOf(flutter.compileSdkVersion, 34)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -22,7 +23,7 @@ android {
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
-        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
+        // is added automatically by Flutter. (https://flutter.dev/to/review-gradle-config).
         // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
         // flag during build.
         versionCode = flutter.versionCode
