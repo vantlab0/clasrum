@@ -35,6 +35,18 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["*"]
 
+    # --- Supabase (optional compatibility auth) ---------------------------
+    # When configured, backend can accept Supabase-issued access tokens and
+    # map them to local users for existing ownership/data flows.
+    supabase_url: str = ""
+    supabase_publishable_key: str = ""
+    supabase_anon_key: str = ""
+    supabase_secret_key: str = ""  # server-side only; never expose to clients
+    supabase_jwt_secret: str = ""  # Project JWT secret (legacy HS256 verification)
+    supabase_jwks_url: str = ""  # Preferred for asymmetric JWT verification
+    supabase_jwt_audience: str = "authenticated"
+    supabase_db_password: str = ""  # for admin/migration tooling; server-side only
+
     # --- Qwen Realtime ----------------------------------------------------
     qwen_api_key: str = ""
     qwen_realtime_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"

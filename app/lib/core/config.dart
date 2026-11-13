@@ -2,10 +2,13 @@ import 'dart:core';
 
 /// Runtime configuration for the AI Personal Classroom app.
 ///
-/// The API origin is injected at build time:
+/// The API origin and Supabase credentials are injected at build time:
 ///
 /// ```sh
-/// flutter run --dart-define=API_BASE_URL=http://192.168.1.20:8000
+/// flutter run \
+///   --dart-define=API_BASE_URL=http://192.168.1.20:8000 \
+///   --dart-define=SUPABASE_URL=https://<project>.supabase.co \
+///   --dart-define=SUPABASE_ANON_KEY=<anon-or-publishable-key>
 /// ```
 ///
 /// Defaults to the Android emulator loopback alias (`10.0.2.2`) because that is
@@ -13,26 +16,58 @@ import 'dart:core';
 /// `http://localhost:8000`, and a physical device needs the host LAN address —
 /// both are supplied through `--dart-define`.
 class AppConfig {
-  AppConfig({required String apiBaseUrl})
-      : apiBaseUrl = _normalize(apiBaseUrl),
+  AppConfig({
+    required String apiBaseUrl,
+    required this.supabaseUrl,
+    required this.supabaseAnonKey,
+  })  : apiBaseUrl = _normalize(apiBaseUrl),
         _baseUri = Uri.parse(_normalize(apiBaseUrl));
 
-  /// Android emulator → host machine mapping. Kept as a compile-time default so
-  /// a plain `flutter run` works on an emulator without extra flags.
-  static const String defaultApiBaseUrl = 'http://10.0.2.2:8000';
+  /// Production backend. Can be overridden at build/run time with:
+  /// `--dart-define=API_BASE_URL=https://realtime.avelut.xyz`
+  static const String defaultApiBaseUrl = 'https://realtime.avelut.xyz';
 
-  /// Constructs the configuration from `--dart-define=API_BASE_URL=...`.
+  /// Constructs the configuration from build-time environment values.
   factory AppConfig.fromEnvironment() {
     const raw = String.fromEnvironment(
       'API_BASE_URL',
       defaultValue: defaultApiBaseUrl,
     );
-    return AppConfig(apiBaseUrl: raw);
+    const supabaseUrl = String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+    // Accept either SUPABASE_ANON_KEY or SUPABASE_PUBLISHABLE_KEY.
+    const anon = String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
+    const publishable =
+        String.fromEnvironment('SUPABASE_PUBLISHABLE_KEY', defaultValue: '');
+    return AppConfig(
+      apiBaseUrl: raw,
+      supabaseUrl: supabaseUrl.trim(),
+      supabaseAnonKey: (anon.isNotEmpty ? anon : publishable).trim(),
+    );
   }
 
   /// Normalized REST origin, e.g. `http://10.0.2.2:8000`.
   final String apiBaseUrl;
   final Uri _baseUri;
+
+  /// Supabase project URL (e.g. https://xxxx.supabase.co).
+  final String supabaseUrl;
+
+  /// Supabase publishable/anon key (never a service-role key).
+  final String supabaseAnonKey;
+
+  bool get hasSupabaseConfig =>
+      supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty;
+
+  String? get supabaseConfigError {
+    if (hasSupabaseConfig) return null;
+    final missing = <String>[];
+    if (supabaseUrl.isEmpty) missing.add('SUPABASE_URL');
+    if (supabaseAnonKey.isEmpty) {
+      missing.add('SUPABASE_ANON_KEY or SUPABASE_PUBLISHABLE_KEY');
+    }
+    return 'Supabase is not configured. Missing: ${missing.join(', ')}. '
+        'Provide them via --dart-define at build/run time.';
+  }
 
   Uri get baseUri => _baseUri;
 

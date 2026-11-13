@@ -422,4 +422,10 @@ class RealtimeClientScope extends InheritedNotifier<RealtimeClient> {
     }
     return scope.notifier!;
   }
+
+  static RealtimeClient? maybeOf(BuildContext context) {
+    return context
+        .dependOnInheritedWidgetOfExactType<RealtimeClientScope>()
+        ?.notifier;
+  }
 }

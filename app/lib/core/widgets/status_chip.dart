@@ -61,14 +61,18 @@ class LessonStatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (String label, Color color, IconData icon) = switch (status) {
-      'live' => ('Live', AppColors.green, Icons.radio_button_checked_rounded),
-      'paused' => ('Paused', AppColors.yellow, Icons.pause_circle_outline_rounded),
-      'completed' => ('Completed', AppColors.blue, Icons.check_circle_outline_rounded),
+      'live' => ('Live', AppColors.blue, Icons.radio_button_checked_rounded),
+      'paused' => ('Paused', AppColors.muted, Icons.pause_circle_outline_rounded),
+      'completed' => (
+          'Completed',
+          AppColors.muted,
+          Icons.check_circle_outline_rounded
+        ),
       'error' => ('Needs attention', AppColors.red, Icons.error_outline_rounded),
-      'created' => ('Ready', AppColors.chalkMuted, Icons.bolt_rounded),
+      'created' => ('Ready', AppColors.blue, Icons.bolt_rounded),
       _ => (
           status.isEmpty ? 'Draft' : status,
-          AppColors.chalkMuted,
+          AppColors.muted,
           Icons.circle_outlined,
         ),
     };
@@ -86,10 +90,10 @@ class NoteStatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (String label, Color color, IconData icon) = switch (status) {
-      'ready' => ('Ready', AppColors.green, Icons.check_rounded),
-      'pending' => ('Preparing', AppColors.yellow, Icons.hourglass_top_rounded),
+      'ready' => ('Ready', AppColors.blue, Icons.check_rounded),
+      'pending' => ('Preparing', AppColors.muted, Icons.hourglass_top_rounded),
       'failed' => ('Failed', AppColors.red, Icons.error_outline_rounded),
-      _ => ('Draft', AppColors.chalkMuted, Icons.notes_rounded),
+      _ => ('Draft', AppColors.muted, Icons.notes_rounded),
     };
     return StatusChip(label: label, color: color, icon: icon, dense: dense);
   }

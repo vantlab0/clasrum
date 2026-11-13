@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import errors
 from app.core.security import decode_access_token
+from app.core.supabase_auth import (
+    decode_supabase_access_token,
+    get_or_create_user_for_supabase_payload,
+)
 from app.db.models import Lesson, User
 from app.db.session import get_db
 
@@ -21,16 +25,29 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def resolve_student(db: AsyncSession, token: str | None) -> User:
-    """Resolve a raw bearer token to an active user or raise 401."""
+    """Resolve a raw bearer token to an active user or raise 401.
+
+    Supports existing locally-issued tokens and, when configured, Supabase-issued
+    access tokens mapped to local users for backend compatibility.
+    """
     if not token:
         raise errors.unauthorized("Missing bearer token")
+
+    # 1) Existing local/backend-issued token path (unchanged behavior).
     student_id = decode_access_token(token)
-    if not student_id:
-        raise errors.unauthorized("Invalid or expired token")
-    student = await db.get(User, student_id)
-    if student is None or not student.is_active:
-        raise errors.unauthorized("Account not found or inactive")
-    return student
+    if student_id:
+        student = await db.get(User, student_id)
+        if student is not None and student.is_active:
+            return student
+
+    # 2) Optional Supabase compatibility path.
+    payload = decode_supabase_access_token(token)
+    if payload is not None:
+        student = await get_or_create_user_for_supabase_payload(db, payload)
+        if student is not None and student.is_active:
+            return student
+
+    raise errors.unauthorized("Invalid or expired token")
 
 
 async def get_current_student(credentials: BearerCredentials, db: DbSession) -> User:

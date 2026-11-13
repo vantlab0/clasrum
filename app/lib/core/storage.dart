@@ -85,4 +85,14 @@ class AppStorage {
     await _prefs.remove(_tokenKey);
     await _prefs.remove(_lastLessonKey);
   }
+
+  /// Clears all user-scoped local state/caches (including preferences) so data
+  /// does not leak between accounts on the same device.
+  /// Does not delete persistent cloud data.
+  Future<void> clearUserScopedData() async {
+    await _prefs.remove(_tokenKey);
+    await _prefs.remove(_lastLessonKey);
+    await _prefs.remove(_levelKey);
+    await _prefs.remove(_durationKey);
+  }
 }

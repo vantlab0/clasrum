@@ -1,27 +1,27 @@
 import 'package:flutter/material.dart';
 
-/// Fixed chalk palette shared with the blackboard renderer (CONTRACTS §1).
+/// Clasrum premium UI palette — strict design system.
+/// Blackboard/chalk rendering uses its own palette in `blackboard/model`.
 abstract final class AppColors {
-  static const Color background = Color(0xFF101215);
-  static const Color surface = Color(0xFF171A1F);
-  static const Color surfaceRaised = Color(0xFF1E2229);
-  static const Color surfaceHigh = Color(0xFF262C35);
-  static const Color outline = Color(0xFF3C434E);
-  static const Color outlineSoft = Color(0xFF2B3039);
+  // Required system colors
+  static const Color blue = Color(0xFF1677FF); // primary actions / selected
+  static const Color background = Color(0xFF080A0E); // main background
+  static const Color surface = Color(0xFF12161D); // solid dark surface
+  static const Color white = Color(0xFFFFFFFF); // primary text/icons
+  static const Color muted = Color(0xFFA1AAB8); // secondary text
+  static const Color border = Color(0xFF303743); // subtle borders
 
-  /// Default chalk cream — primary text and primary action.
-  static const Color chalk = Color(0xFFF2F0E8);
+  // Compatibility aliases used across the app
+  static const Color chalk = white;
+  static const Color chalkMuted = muted;
+  static const Color outline = border;
+  static const Color outlineSoft = border;
+  static const Color surfaceRaised = surface;
+  static const Color surfaceHigh = Color(0xFF171C24);
+  static const Color board = Color(0xFF171817);
 
-  /// Muted chalk — secondary text.
-  static const Color chalkMuted = Color(0xFFA8A79E);
-
-  static const Color yellow = Color(0xFFE8D58C);
-  static const Color blue = Color(0xFF9CC9E3);
-  static const Color green = Color(0xFFA9D3A0);
-  static const Color red = Color(0xFFE39C9C);
-  static const Color violet = Color(0xFFC9B8E8);
-
-  static const Color board = Color(0xFF14171B);
+  // Kept for existing status/error usages (use sparingly)
+  static const Color red = Color(0xFFE05555);
 }
 
 abstract final class AppSpacing {
@@ -43,68 +43,53 @@ abstract final class AppRadius {
 abstract final class AppTheme {
   static ThemeData dark() {
     final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
-    final scheme = ColorScheme.fromSeed(
-      seedColor: AppColors.yellow,
-      brightness: Brightness.dark,
-    ).copyWith(
-      primary: AppColors.chalk,
-      onPrimary: const Color(0xFF15171B),
-      primaryContainer: AppColors.surfaceHigh,
-      onPrimaryContainer: AppColors.chalk,
-      secondary: AppColors.yellow,
-      onSecondary: const Color(0xFF201D12),
-      tertiary: AppColors.blue,
-      onTertiary: const Color(0xFF10202A),
-      error: AppColors.red,
-      onError: const Color(0xFF2A1515),
+    const scheme = ColorScheme.dark(
+      primary: AppColors.blue,
+      onPrimary: AppColors.white,
+      secondary: AppColors.blue,
+      onSecondary: AppColors.white,
       surface: AppColors.background,
-      onSurface: AppColors.chalk,
-      onSurfaceVariant: AppColors.chalkMuted,
-      surfaceContainerLowest: AppColors.background,
-      surfaceContainerLow: AppColors.surface,
-      surfaceContainer: AppColors.surface,
-      surfaceContainerHigh: AppColors.surfaceRaised,
-      surfaceContainerHighest: AppColors.surfaceHigh,
-      outline: AppColors.outline,
-      outlineVariant: AppColors.outlineSoft,
-      inverseSurface: AppColors.chalk,
-      onInverseSurface: const Color(0xFF15171B),
+      onSurface: AppColors.white,
+      onSurfaceVariant: AppColors.muted,
+      outline: AppColors.border,
+      outlineVariant: AppColors.border,
+      error: AppColors.red,
+      onError: AppColors.white,
     );
 
-    final textTheme = base.textTheme.copyWith(
-      displaySmall: _display(34),
-      headlineLarge: _display(30),
-      headlineMedium: _display(26),
-      headlineSmall: _chalk(22, FontWeight.w600),
-      titleLarge: _chalk(19, FontWeight.w600),
-      titleMedium: _chalk(16, FontWeight.w600),
-      titleSmall: _chalk(14, FontWeight.w600),
-      bodyLarge: _body(16),
-      bodyMedium: _body(14),
-      bodySmall: _body(12, AppColors.chalkMuted),
-      labelLarge: const TextStyle(
-        fontSize: 14,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.2,
-      ),
-      labelMedium: _body(12, AppColors.chalkMuted),
-    ).apply(
-      bodyColor: AppColors.chalk,
-      displayColor: AppColors.chalk,
-    );
+    final textTheme = base.textTheme
+        .copyWith(
+          displaySmall: _display(32),
+          headlineLarge: _display(28),
+          headlineMedium: _display(24),
+          headlineSmall: _title(22, FontWeight.w600),
+          titleLarge: _title(19, FontWeight.w600),
+          titleMedium: _title(16, FontWeight.w600),
+          titleSmall: _title(14, FontWeight.w600),
+          bodyLarge: _body(16),
+          bodyMedium: _body(14),
+          bodySmall: _body(12, AppColors.muted),
+          labelLarge: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.2,
+          ),
+          labelMedium: _body(12, AppColors.muted),
+        )
+        .apply(bodyColor: AppColors.white, displayColor: AppColors.white);
 
-    const inputBorder = OutlineInputBorder(
-      borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
-      borderSide: BorderSide(color: AppColors.outlineSoft),
+    final inputBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.circular(AppRadius.lg),
+      borderSide: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
     );
 
     return base.copyWith(
       colorScheme: scheme,
       scaffoldBackgroundColor: AppColors.background,
-      textTheme: textTheme,
       canvasColor: AppColors.surface,
-      dividerTheme: const DividerThemeData(
-        color: AppColors.outlineSoft,
+      textTheme: textTheme,
+      dividerTheme: DividerThemeData(
+        color: AppColors.border.withValues(alpha: 0.6),
         thickness: 1,
         space: AppSpacing.lg,
       ),
@@ -114,36 +99,34 @@ abstract final class AppTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
-        foregroundColor: AppColors.chalk,
+        foregroundColor: AppColors.white,
         titleTextStyle: textTheme.titleLarge,
-        iconTheme: const IconThemeData(color: AppColors.chalk),
+        iconTheme: const IconThemeData(color: AppColors.white, size: 22),
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: CardThemeData(
         color: AppColors.surface,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(AppRadius.lg)),
-          side: BorderSide(color: AppColors.outlineSoft),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          side: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
         ),
       ),
       inputDecorationTheme: InputDecorationThemeData(
         filled: true,
-        fillColor: AppColors.surfaceRaised,
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.lg,
-          vertical: AppSpacing.lg,
-        ),
-        hintStyle: textTheme.bodyMedium?.copyWith(
-          color: AppColors.chalkMuted.withValues(alpha: 0.8),
-        ),
-        prefixIconColor: AppColors.chalkMuted,
-        suffixIconColor: AppColors.chalkMuted,
+        fillColor: AppColors.surface.withValues(alpha: 0.65),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+        hintStyle:
+            textTheme.bodyMedium?.copyWith(color: AppColors.muted.withValues(alpha: 0.9)),
+        labelStyle: textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+        prefixIconColor: AppColors.muted,
+        suffixIconColor: AppColors.muted,
         border: inputBorder,
         enabledBorder: inputBorder,
         focusedBorder: inputBorder.copyWith(
-          borderSide: const BorderSide(color: AppColors.chalk, width: 1.4),
+          borderSide: const BorderSide(color: AppColors.blue, width: 1.4),
         ),
         errorBorder: inputBorder.copyWith(
           borderSide: const BorderSide(color: AppColors.red),
@@ -155,106 +138,99 @@ abstract final class AppTheme {
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          backgroundColor: AppColors.chalk,
-          foregroundColor: const Color(0xFF15171B),
-          minimumSize: const Size(64, 52),
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+          backgroundColor: AppColors.blue,
+          foregroundColor: AppColors.white,
+          minimumSize: const Size(64, 48),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           textStyle: const TextStyle(
-            fontSize: 15,
+            fontSize: 14,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.2,
           ),
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.md),
           ),
+          elevation: 0,
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          foregroundColor: AppColors.chalk,
-          minimumSize: const Size(64, 48),
-          side: const BorderSide(color: AppColors.outline),
-          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
+          foregroundColor: AppColors.white,
+          minimumSize: const Size(64, 44),
+          side: BorderSide(color: AppColors.border.withValues(alpha: 0.8)),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(AppRadius.md),
           ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          foregroundColor: AppColors.yellow,
-          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          foregroundColor: AppColors.white,
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
         ),
       ),
-      navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: AppColors.surface,
-        surfaceTintColor: Colors.transparent,
-        indicatorColor: AppColors.chalk.withValues(alpha: 0.14),
-        height: 68,
-        labelTextStyle: const WidgetStatePropertyAll<TextStyle>(
-          TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      iconButtonTheme: IconButtonThemeData(
+        style: IconButton.styleFrom(
+          foregroundColor: AppColors.white,
+          iconSize: 22,
         ),
-        iconTheme: WidgetStateProperty.resolveWith<IconThemeData>((states) {
-          final selected = states.contains(WidgetState.selected);
-          return IconThemeData(
-            size: 24,
-            color: selected ? AppColors.chalk : AppColors.chalkMuted,
-          );
-        }),
       ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: AppColors.surfaceHigh,
         contentTextStyle: textTheme.bodyMedium,
         behavior: SnackBarBehavior.floating,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          side: BorderSide(color: AppColors.border.withValues(alpha: 0.6)),
         ),
-        actionTextColor: AppColors.yellow,
+        actionTextColor: AppColors.blue,
       ),
       dialogTheme: DialogThemeData(
-        backgroundColor: AppColors.surfaceRaised,
+        backgroundColor: AppColors.surface,
         surfaceTintColor: Colors.transparent,
         titleTextStyle: textTheme.titleLarge,
-        contentTextStyle: textTheme.bodyMedium,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(AppRadius.lg)),
-          side: BorderSide(color: AppColors.outlineSoft),
+        contentTextStyle:
+            textTheme.bodyMedium?.copyWith(color: AppColors.muted, height: 1.5),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          side: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
         ),
       ),
-      bottomSheetTheme: const BottomSheetThemeData(
+      bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: AppColors.surface,
         modalBackgroundColor: AppColors.surface,
         surfaceTintColor: Colors.transparent,
         showDragHandle: true,
-        dragHandleColor: AppColors.outline,
-        shape: RoundedRectangleBorder(
+        dragHandleColor: AppColors.border,
+        shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
         ),
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(
-        color: AppColors.yellow,
+        color: AppColors.blue,
         linearTrackColor: AppColors.surfaceHigh,
         circularTrackColor: AppColors.surfaceHigh,
       ),
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.selected)) return const Color(0xFF15171B);
-          return AppColors.chalkMuted;
+          if (states.contains(WidgetState.selected)) return AppColors.white;
+          return AppColors.muted;
         }),
         trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.selected)) return AppColors.yellow;
+          if (states.contains(WidgetState.selected)) return AppColors.blue;
           return AppColors.surfaceHigh;
         }),
-        trackOutlineColor: const WidgetStatePropertyAll<Color>(Colors.transparent),
+        trackOutlineColor:
+            const WidgetStatePropertyAll<Color>(Colors.transparent),
       ),
       chipTheme: ChipThemeData(
-        backgroundColor: AppColors.surfaceRaised,
-        selectedColor: AppColors.chalk.withValues(alpha: 0.16),
-        side: const BorderSide(color: AppColors.outlineSoft),
-        labelStyle: textTheme.bodySmall?.copyWith(color: AppColors.chalk),
-        secondaryLabelStyle: textTheme.bodySmall?.copyWith(
-          color: AppColors.chalk,
-        ),
+        backgroundColor: AppColors.surface.withValues(alpha: 0.7),
+        selectedColor: AppColors.blue.withValues(alpha: 0.18),
+        side: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
+        labelStyle: textTheme.bodySmall?.copyWith(color: AppColors.white),
+        secondaryLabelStyle:
+            textTheme.bodySmall?.copyWith(color: AppColors.white),
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.md,
           vertical: AppSpacing.sm,
@@ -268,37 +244,38 @@ abstract final class AppTheme {
         decoration: BoxDecoration(
           color: AppColors.surfaceHigh,
           borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: AppColors.outlineSoft),
+          border: Border.all(color: AppColors.border.withValues(alpha: 0.7)),
         ),
         textStyle: textTheme.bodySmall,
         waitDuration: const Duration(milliseconds: 500),
       ),
+      listTileTheme: const ListTileThemeData(
+        iconColor: AppColors.muted,
+        textColor: AppColors.white,
+      ),
     );
   }
 
-  /// Handwritten display face (bundled chalk font, falls back to the platform
-  /// font if the asset is unavailable).
   static TextStyle _display(double size) => TextStyle(
-        fontFamily: 'Chalkboard',
         fontSize: size,
-        height: 1.12,
-        fontWeight: FontWeight.w400,
-        letterSpacing: 0.2,
-        color: AppColors.chalk,
+        height: 1.15,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -0.3,
+        color: AppColors.white,
       );
 
-  static TextStyle _chalk(double size, FontWeight weight) => TextStyle(
-        fontFamily: 'Chalkboard',
+  static TextStyle _title(double size, FontWeight weight) => TextStyle(
         fontSize: size,
-        height: 1.2,
+        height: 1.25,
         fontWeight: weight,
-        color: AppColors.chalk,
+        letterSpacing: -0.1,
+        color: AppColors.white,
       );
 
-  static TextStyle _body(double size, [Color color = AppColors.chalk]) =>
+  static TextStyle _body(double size, [Color color = AppColors.white]) =>
       TextStyle(
         fontSize: size,
-        height: 1.45,
+        height: 1.5,
         color: color,
       );
 }

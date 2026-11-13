@@ -28,7 +28,7 @@ class ProgressTrack extends StatelessWidget {
         value: normalized,
         minHeight: height,
         backgroundColor: AppColors.surfaceHigh,
-        valueColor: AlwaysStoppedAnimation<Color>(color ?? AppColors.yellow),
+        valueColor: AlwaysStoppedAnimation<Color>(color ?? AppColors.blue),
       ),
     );
     if (!showLabel) return track;
@@ -42,7 +42,7 @@ class ProgressTrack extends StatelessWidget {
             percentLabel(normalized),
             textAlign: TextAlign.right,
             style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: AppColors.chalk,
+                  color: AppColors.white,
                 ),
           ),
         ),

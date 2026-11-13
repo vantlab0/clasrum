@@ -28,7 +28,11 @@ app/**/GeneratedPluginRegistrant.*
 
 # --- env / secrets --------------------------------------------------------
 .env
-.env.local
+.env.*
+!.env.example
+backend/.env
+app/.env
+production.env
 *.pem
 *.key
 secrets/
