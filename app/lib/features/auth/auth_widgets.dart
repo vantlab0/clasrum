@@ -8,26 +8,29 @@ import '../../core/widgets/glass_widgets.dart';
 
 export '../../core/widgets/glass_widgets.dart';
 
-/// Smooth, restrained route transition for premium auth flow.
+/// Smooth, premium route transition for auth flow (slowed for visibility).
 PageRoute<T> authRoute<T>(Widget page) {
   return PageRouteBuilder<T>(
-    transitionDuration: const Duration(milliseconds: 320),
-    reverseTransitionDuration: const Duration(milliseconds: 260),
+    transitionDuration: const Duration(milliseconds: 700),
+    reverseTransitionDuration: const Duration(milliseconds: 520),
     pageBuilder: (context, animation, secondaryAnimation) => page,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       final curved = CurvedAnimation(
         parent: animation,
-        curve: Curves.easeOutCubic,
-        reverseCurve: Curves.easeInCubic,
+        curve: Curves.easeInOutCubic,
+        reverseCurve: Curves.easeInOutCubic,
       );
       return FadeTransition(
         opacity: curved,
         child: SlideTransition(
           position: Tween<Offset>(
-            begin: const Offset(0, 0.03),
+            begin: const Offset(0, 0.05),
             end: Offset.zero,
           ).animate(curved),
-          child: child,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.985, end: 1.0).animate(curved),
+            child: child,
+          ),
         ),
       );
     },
@@ -77,8 +80,8 @@ class AuthScreenScaffold extends StatelessWidget {
             child: LayoutBuilder(
               builder: (context, constraints) {
                 return AnimatedPadding(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
+                  duration: const Duration(milliseconds: 420),
+                  curve: Curves.easeOutCubic,
                   padding: EdgeInsets.only(bottom: bottomInset > 0 ? 8 : 0),
                   child: SingleChildScrollView(
                     physics: const BouncingScrollPhysics(
@@ -409,7 +412,7 @@ class AuthMessage extends StatelessWidget {
   }
 }
 
-class AuthPrimaryButton extends StatelessWidget {
+class AuthPrimaryButton extends StatefulWidget {
   const AuthPrimaryButton({
     super.key,
     required this.label,
@@ -422,28 +425,92 @@ class AuthPrimaryButton extends StatelessWidget {
   final bool loading;
 
   @override
+  State<AuthPrimaryButton> createState() => _AuthPrimaryButtonState();
+}
+
+class _AuthPrimaryButtonState extends State<AuthPrimaryButton> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
-    return FilledButton(
-      onPressed: loading ? null : onPressed,
-      style: FilledButton.styleFrom(
-        backgroundColor: AppColors.blue,
-        foregroundColor: AppColors.white,
-        minimumSize: const Size.fromHeight(48),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      ),
-      child: loading
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: AppColors.white,
-              ),
-            )
-          : Text(
-              label,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+    final active = widget.loading || _pressed;
+    return GestureDetector(
+      onTapDown: widget.loading ? null : (_) => setState(() => _pressed = true),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTapUp: (_) => setState(() => _pressed = false),
+      child: AnimatedScale(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        scale: active ? 0.985 : 1.0,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: widget.loading
+                ? [
+                    BoxShadow(
+                      color: AppColors.blue.withValues(alpha: 0.22),
+                      blurRadius: 18,
+                      spreadRadius: 0.5,
+                    ),
+                  ]
+                : const [],
+          ),
+          child: FilledButton(
+            onPressed: widget.loading ? null : widget.onPressed,
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.blue,
+              foregroundColor: AppColors.white,
+              disabledBackgroundColor: AppColors.blue.withValues(alpha: 0.75),
+              disabledForegroundColor: AppColors.white,
+              minimumSize: const Size.fromHeight(48),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14)),
             ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 420),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) => FadeTransition(
+                opacity: animation,
+                child: ScaleTransition(
+                  scale: Tween<double>(begin: 0.96, end: 1.0).animate(animation),
+                  child: child,
+                ),
+              ),
+              child: widget.loading
+                  ? Row(
+                      key: const ValueKey<String>('loading'),
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: const <Widget>[
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: AppColors.white,
+                          ),
+                        ),
+                        SizedBox(width: 10),
+                        Text(
+                          'Please wait…',
+                          style: TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    )
+                  : Text(
+                      widget.label,
+                      key: ValueKey<String>('label-${widget.label}'),
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w600),
+                    ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

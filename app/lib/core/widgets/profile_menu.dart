@@ -49,8 +49,8 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 220),
-      reverseDuration: const Duration(milliseconds: 170),
+      duration: const Duration(milliseconds: 480),
+      reverseDuration: const Duration(milliseconds: 360),
     );
     final curved = CurvedAnimation(
       parent: _controller,

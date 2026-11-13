@@ -51,13 +51,18 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
 
     setState(() => _loading = true);
     try {
-      final auth = AuthScope.of(context).authService;
-      await auth.resetPassword(email: _emailController.text);
-      if (!mounted) return;
-      setState(() {
-        _success =
-            'If an account exists for this email, a password reset link has been sent.';
-      });
+      final auth = AuthScope.maybeOf(context)?.authService;
+      if (auth == null) {
+        if (!mounted) return;
+        setState(() => _error = 'Authentication is unavailable. Please try again.');
+      } else {
+        await auth.resetPassword(email: _emailController.text);
+        if (!mounted) return;
+        setState(() {
+          _success =
+              'If an account exists for this email, a password reset link has been sent.';
+        });
+      }
     } on AuthException catch (e) {
       if (!mounted) return;
       setState(() => _error = friendlyAuthError(e));

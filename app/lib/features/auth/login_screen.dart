@@ -33,7 +33,7 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _error;
   String? _info;
 
-  AuthService get _auth => AuthScope.of(context).authService;
+  AuthService? get _auth => AuthScope.maybeOf(context)?.authService;
 
   @override
   void initState() {
@@ -59,7 +59,13 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
     try {
-      final response = await _auth.signInWithPassword(
+      final auth = _auth;
+      if (auth == null) {
+        if (!mounted) return;
+        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        return;
+      }
+      final response = await auth.signInWithPassword(
         email: _emailController.text,
         password: _passwordController.text,
       );

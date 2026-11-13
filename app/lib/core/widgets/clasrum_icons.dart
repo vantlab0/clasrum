@@ -579,15 +579,15 @@ class AnimatedClasrumNavIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedScale(
-      duration: const Duration(milliseconds: 240),
+      duration: const Duration(milliseconds: 420),
       curve: Curves.easeOutCubic,
-      scale: selected ? 1.0 : 0.96,
+      scale: selected ? 1.0 : 0.94,
       child: AnimatedSlide(
-        duration: const Duration(milliseconds: 240),
+        duration: const Duration(milliseconds: 420),
         curve: Curves.easeOutCubic,
-        offset: selected ? Offset.zero : const Offset(0, 0.02),
+        offset: selected ? Offset.zero : const Offset(0, 0.03),
         child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
+          duration: const Duration(milliseconds: 360),
           opacity: 1.0,
           child: ClasrumIcon(kind, size: size, color: color),
         ),

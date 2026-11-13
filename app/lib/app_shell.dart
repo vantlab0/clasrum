@@ -151,7 +151,7 @@ class _FloatingNavBar extends StatelessWidget {
                   children: <Widget>[
                     // Moving active pill background
                     AnimatedPositioned(
-                      duration: const Duration(milliseconds: 320),
+                      duration: const Duration(milliseconds: 520),
                       curve: Curves.easeInOutCubic,
                       left: leftFor(selectedIndex),
                       top: 0,
@@ -169,7 +169,7 @@ class _FloatingNavBar extends StatelessWidget {
                         final selected = i == selectedIndex;
                         final width = selected ? 1.5 * unit : 0.75 * unit;
                         return AnimatedContainer(
-                          duration: const Duration(milliseconds: 320),
+                          duration: const Duration(milliseconds: 520),
                           curve: Curves.easeInOutCubic,
                           width: width,
                           height: double.infinity,
@@ -216,17 +216,17 @@ class _NavButton extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(999),
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 320),
+            duration: const Duration(milliseconds: 520),
             curve: Curves.easeInOutCubic,
             alignment: Alignment.center,
             child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 220),
+              duration: const Duration(milliseconds: 420),
               switchInCurve: Curves.easeOutCubic,
               switchOutCurve: Curves.easeInCubic,
               transitionBuilder: (child, animation) => FadeTransition(
                 opacity: animation,
                 child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.96, end: 1.0).animate(animation),
+                  scale: Tween<double>(begin: 0.94, end: 1.0).animate(animation),
                   child: child,
                 ),
               ),

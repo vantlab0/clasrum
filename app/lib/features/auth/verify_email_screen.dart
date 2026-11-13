@@ -56,7 +56,12 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
       _info = null;
     });
     try {
-      final auth = AuthScope.of(context).authService;
+      final auth = AuthScope.maybeOf(context)?.authService;
+      if (auth == null) {
+        if (!mounted) return;
+        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        return;
+      }
       await auth.resendSignupVerificationEmail(email: widget.email);
       if (!mounted) return;
       setState(() {
@@ -182,30 +187,55 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                 ),
                 const SizedBox(height: 10),
                 OutlinedButton(
-                  onPressed: (_resending || _cooldownSeconds > 0) ? null : _resend,
+                  onPressed:
+                      (_resending || _cooldownSeconds > 0) ? null : _resend,
                   style: OutlinedButton.styleFrom(
                     foregroundColor: AppColors.white,
+                    disabledForegroundColor: AppColors.white.withValues(alpha: 0.8),
                     minimumSize: const Size.fromHeight(46),
-                    side: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
+                    side: BorderSide(
+                        color: AppColors.border.withValues(alpha: 0.7)),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  child: _resending
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Text(
-                          _cooldownSeconds > 0
-                              ? 'Resend email in ${_cooldownSeconds}s'
-                              : 'Resend verification email',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 420),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: _resending
+                        ? Row(
+                            key: const ValueKey<String>('resending'),
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            mainAxisSize: MainAxisSize.min,
+                            children: const <Widget>[
+                              SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                              SizedBox(width: 10),
+                              Text(
+                                'Sending…',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          )
+                        : Text(
+                            _cooldownSeconds > 0
+                                ? 'Resend email in ${_cooldownSeconds}s'
+                                : 'Resend verification email',
+                            key: ValueKey<String>(
+                                'resend-${_cooldownSeconds > 0}'),
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
-                        ),
+                  ),
                 ),
               ],
             ),

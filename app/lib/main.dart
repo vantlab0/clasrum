@@ -46,17 +46,20 @@ class AiClassroomApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final initError = SupabaseBootstrap.initError;
-    return MaterialApp(
-      title: 'AI Personal Classroom',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.dark(),
-      home: initError != null
-          ? _ConfigurationErrorScreen(message: initError)
-          : AuthScope(
-              authService: authService,
-              profileService: profileService,
-              child: AuthGate(config: config, storage: storage),
-            ),
+    // Provide AuthScope above the Navigator so all routes (including pushed
+    // auth routes) can access auth/profile services. This is required for the
+    // authentication flow to function correctly without changing app logic.
+    return AuthScope(
+      authService: authService,
+      profileService: profileService,
+      child: MaterialApp(
+        title: 'AI Personal Classroom',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.dark(),
+        home: initError != null
+            ? _ConfigurationErrorScreen(message: initError)
+            : AuthGate(config: config, storage: storage),
+      ),
     );
   }
 }

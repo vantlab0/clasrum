@@ -76,7 +76,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
     setState(() => _error = null);
     if (!_formKey.currentState!.validate()) return;
 
-    final scope = AuthScope.of(context);
+    final scope = AuthScope.maybeOf(context);
+    if (scope == null) {
+      if (mounted) {
+        setState(() => _error = 'Authentication is unavailable. Please try again.');
+      }
+      return;
+    }
     final auth = scope.authService;
     final profileService = scope.profileService;
     final email = _emailController.text.trim();
