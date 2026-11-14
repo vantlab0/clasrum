@@ -6,7 +6,7 @@ If code and this document disagree, fix the code (or raise the discrepancy to th
 Lead and update this document in the same commit). Do not invent parallel
 schemas.
 
-Repository root: `ai-classroom/`
+Repository root: `pwony/`
 
 ```
 backend/   Python 3.12 + FastAPI + LangGraph          (owner: backend-core / backend-ai)
@@ -485,7 +485,7 @@ Mastery is updated only from evidence (answer evaluation, explicit revisit), wit
 
 ## 10. Flutter app contract (Dart API surface)
 
-Package name: `ai_classroom`. Entry `lib/main.dart`.
+Package name: `pwony`. Entry `lib/main.dart`.
 
 Blackboard module (`lib/blackboard/`) — owner flutter-board, public barrel
 `lib/blackboard/blackboard.dart` must export exactly:

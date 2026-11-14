@@ -63,7 +63,7 @@ def main():
 
         # Step 5: Create deployment directory
         print("\n=== Step 5: Create deploy directory ===")
-        out, err = run_cmd(client, "mkdir -p /opt/ai-classroom && chown administrator:administrator /opt/ai-classroom", use_sudo=True)
+        out, err = run_cmd(client, "mkdir -p /opt/pwony && chown administrator:administrator /opt/pwony", use_sudo=True)
         print(out.strip())
         if err.strip():
             print(f"STDERR: {err.strip()}")
@@ -71,7 +71,7 @@ def main():
         print("\n=== Basic setup complete ===")
         print(f"Server: {USER}@{HOST}:{PORT}")
         print(f"Domain: {DOMAIN}")
-        print(f"Deploy dir: /opt/ai-classroom")
+        print(f"Deploy dir: /opt/pwony")
 
     finally:
         client.close()

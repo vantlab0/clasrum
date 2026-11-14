@@ -2,9 +2,9 @@ import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
-/// Clasrum custom icon set — consistent geometric, rounded-stroke glyphs.
+/// Pwony custom icon set — consistent geometric, rounded-stroke glyphs.
 /// Do not use Material Icons or emoji as substitutes for product UI icons.
-enum ClasrumIconKind {
+enum PwonyIconKind {
   home,
   notes,
   profile,
@@ -39,8 +39,8 @@ enum ClasrumIconKind {
 }
 
 /// Reusable custom icon widget with consistent sizing and optical alignment.
-class ClasrumIcon extends StatelessWidget {
-  const ClasrumIcon(
+class PwonyIcon extends StatelessWidget {
+  const PwonyIcon(
     this.kind, {
     super.key,
     this.size = 22,
@@ -48,7 +48,7 @@ class ClasrumIcon extends StatelessWidget {
     this.strokeWidth,
   });
 
-  final ClasrumIconKind kind;
+  final PwonyIconKind kind;
   final double size;
   final Color? color;
   final double? strokeWidth;
@@ -61,7 +61,7 @@ class ClasrumIcon extends StatelessWidget {
       width: size,
       height: size,
       child: CustomPaint(
-        painter: _ClasrumIconPainter(
+        painter: _PwonyIconPainter(
           kind: kind,
           color: iconColor,
           strokeWidth: sw,
@@ -71,14 +71,14 @@ class ClasrumIcon extends StatelessWidget {
   }
 }
 
-class _ClasrumIconPainter extends CustomPainter {
-  const _ClasrumIconPainter({
+class _PwonyIconPainter extends CustomPainter {
+  const _PwonyIconPainter({
     required this.kind,
     required this.color,
     required this.strokeWidth,
   });
 
-  final ClasrumIconKind kind;
+  final PwonyIconKind kind;
   final Color color;
   final double strokeWidth;
 
@@ -101,28 +101,28 @@ class _ClasrumIconPainter extends CustomPainter {
     canvas.save();
     // Subtle optical adjustments per glyph.
     switch (kind) {
-      case ClasrumIconKind.home:
+      case PwonyIconKind.home:
         canvas.translate(0, 0.2);
         break;
-      case ClasrumIconKind.notes:
+      case PwonyIconKind.notes:
         canvas.translate(0.2, 0);
         break;
-      case ClasrumIconKind.profile:
+      case PwonyIconKind.profile:
         canvas.translate(0, 0.2);
         break;
-      case ClasrumIconKind.back:
+      case PwonyIconKind.back:
         canvas.translate(0.6, 0);
         break;
-      case ClasrumIconKind.search:
+      case PwonyIconKind.search:
         canvas.translate(-0.2, -0.2);
         break;
-      case ClasrumIconKind.startLearning:
+      case PwonyIconKind.startLearning:
         canvas.translate(0.4, 0);
         break;
-      case ClasrumIconKind.microphone:
+      case PwonyIconKind.microphone:
         canvas.translate(0, -0.2);
         break;
-      case ClasrumIconKind.endLesson:
+      case PwonyIconKind.endLesson:
         canvas.translate(0, 0.2);
         break;
       default:
@@ -130,94 +130,94 @@ class _ClasrumIconPainter extends CustomPainter {
     }
 
     switch (kind) {
-      case ClasrumIconKind.home:
+      case PwonyIconKind.home:
         _home(canvas, s, stroke);
         break;
-      case ClasrumIconKind.notes:
+      case PwonyIconKind.notes:
         _notes(canvas, s, stroke);
         break;
-      case ClasrumIconKind.profile:
+      case PwonyIconKind.profile:
         _profile(canvas, s, stroke);
         break;
-      case ClasrumIconKind.back:
+      case PwonyIconKind.back:
         _back(canvas, s, stroke);
         break;
-      case ClasrumIconKind.search:
+      case PwonyIconKind.search:
         _search(canvas, s, stroke);
         break;
-      case ClasrumIconKind.startLearning:
+      case PwonyIconKind.startLearning:
         _startLearning(canvas, s, stroke, fill);
         break;
-      case ClasrumIconKind.microphone:
+      case PwonyIconKind.microphone:
         _microphone(canvas, s, stroke);
         break;
-      case ClasrumIconKind.pause:
+      case PwonyIconKind.pause:
         _pause(canvas, s, stroke);
         break;
-      case ClasrumIconKind.resume:
+      case PwonyIconKind.resume:
         _resume(canvas, s, stroke, fill);
         break;
-      case ClasrumIconKind.play:
+      case PwonyIconKind.play:
         _resume(canvas, s, stroke, fill);
         break;
-      case ClasrumIconKind.camera:
+      case PwonyIconKind.camera:
         _camera(canvas, s, stroke);
         break;
-      case ClasrumIconKind.endLesson:
+      case PwonyIconKind.endLesson:
         _endLesson(canvas, s, stroke);
         break;
-      case ClasrumIconKind.settings:
+      case PwonyIconKind.settings:
         _settings(canvas, s, stroke, c);
         break;
-      case ClasrumIconKind.upgradePro:
+      case PwonyIconKind.upgradePro:
         _upgradePro(canvas, s, stroke);
         break;
-      case ClasrumIconKind.logout:
+      case PwonyIconKind.logout:
         _logout(canvas, s, stroke);
         break;
-      case ClasrumIconKind.editProfile:
+      case PwonyIconKind.editProfile:
         _editProfile(canvas, s, stroke);
         break;
-      case ClasrumIconKind.notifications:
+      case PwonyIconKind.notifications:
         _notifications(canvas, s, stroke);
         break;
-      case ClasrumIconKind.passwordSecurity:
+      case PwonyIconKind.passwordSecurity:
         _passwordSecurity(canvas, s, stroke);
         break;
-      case ClasrumIconKind.close:
+      case PwonyIconKind.close:
         _close(canvas, s, stroke);
         break;
-      case ClasrumIconKind.moreOptions:
+      case PwonyIconKind.moreOptions:
         _moreOptions(canvas, s, fill);
         break;
-      case ClasrumIconKind.chevronDown:
+      case PwonyIconKind.chevronDown:
         _chevronDown(canvas, s, stroke);
         break;
-      case ClasrumIconKind.chevronRight:
+      case PwonyIconKind.chevronRight:
         _chevronRight(canvas, s, stroke);
         break;
-      case ClasrumIconKind.email:
+      case PwonyIconKind.email:
         _email(canvas, s, stroke);
         break;
-      case ClasrumIconKind.lock:
+      case PwonyIconKind.lock:
         _passwordSecurity(canvas, s, stroke);
         break;
-      case ClasrumIconKind.visibility:
+      case PwonyIconKind.visibility:
         _visibility(canvas, s, stroke);
         break;
-      case ClasrumIconKind.visibilityOff:
+      case PwonyIconKind.visibilityOff:
         _visibilityOff(canvas, s, stroke);
         break;
-      case ClasrumIconKind.info:
+      case PwonyIconKind.info:
         _info(canvas, s, stroke, fill);
         break;
-      case ClasrumIconKind.delete:
+      case PwonyIconKind.delete:
         _delete(canvas, s, stroke);
         break;
-      case ClasrumIconKind.transcript:
+      case PwonyIconKind.transcript:
         _transcript(canvas, s, stroke);
         break;
-      case ClasrumIconKind.interrupt:
+      case PwonyIconKind.interrupt:
         _interrupt(canvas, s, stroke);
         break;
     }
@@ -577,7 +577,7 @@ class _ClasrumIconPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _ClasrumIconPainter oldDelegate) {
+  bool shouldRepaint(covariant _PwonyIconPainter oldDelegate) {
     return oldDelegate.kind != kind ||
         oldDelegate.color != color ||
         oldDelegate.strokeWidth != strokeWidth;
@@ -585,8 +585,8 @@ class _ClasrumIconPainter extends CustomPainter {
 }
 
 /// Animated nav icon wrapper: subtle scale/slide/fade on selection changes.
-class AnimatedClasrumNavIcon extends StatelessWidget {
-  const AnimatedClasrumNavIcon({
+class AnimatedPwonyNavIcon extends StatelessWidget {
+  const AnimatedPwonyNavIcon({
     super.key,
     required this.kind,
     required this.selected,
@@ -594,7 +594,7 @@ class AnimatedClasrumNavIcon extends StatelessWidget {
     this.size = 22,
   });
 
-  final ClasrumIconKind kind;
+  final PwonyIconKind kind;
   final bool selected;
   final Color color;
   final double size;
@@ -612,7 +612,7 @@ class AnimatedClasrumNavIcon extends StatelessWidget {
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 360),
           opacity: 1.0,
-          child: ClasrumIcon(kind, size: size, color: color),
+          child: PwonyIcon(kind, size: size, color: color),
         ),
       ),
     );

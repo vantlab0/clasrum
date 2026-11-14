@@ -1,1 +1,1 @@
-sudo -n journalctl -u ai-classroom --since "5 min ago" --no-pager | tail -60
+sudo -n journalctl -u pwony --since "5 min ago" --no-pager | tail -60

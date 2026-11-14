@@ -30,7 +30,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 # --- environment MUST be configured before app.config is imported ------------
-_TMP_DIR = Path(tempfile.mkdtemp(prefix="ai-classroom-tests-"))
+_TMP_DIR = Path(tempfile.mkdtemp(prefix="pwony-tests-"))
 _DB_PATH = _TMP_DIR / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"
 os.environ["ENVIRONMENT"] = "test"

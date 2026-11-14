@@ -1,2 +1,2 @@
 @echo off
-"C:\Users\ThankGod Tec\Desktop\tutr\ai-classroom\.venv\Scripts\pip.exe" install paramiko
+"C:\Users\ThankGod Tec\Desktop\tutr\pwony\.venv\Scripts\pip.exe" install paramiko

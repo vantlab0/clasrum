@@ -8,7 +8,7 @@ import '../../core/errors.dart';
 import '../../core/formatters.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../main.dart';
 import '../../services/realtime_client.dart';
@@ -149,7 +149,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       appBar: AppBar(
         leading: IconButton(
           onPressed: () => Navigator.of(context).maybePop(),
-          icon: const ClasrumIcon(ClasrumIconKind.back, size: 20),
+          icon: const PwonyIcon(PwonyIconKind.back, size: 20),
           tooltip: 'Back',
         ),
         title: const Text('Settings'),
@@ -169,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
-                          const ClasrumIcon(ClasrumIconKind.info,
+                          const PwonyIcon(PwonyIconKind.info,
                               size: 16, color: AppColors.blue),
                           const SizedBox(width: 8),
                           Expanded(
@@ -203,7 +203,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _infoRow('Email', _student?['email'] as String? ?? '—'),
                       _divider(),
                       _actionRow(
-                        icon: ClasrumIconKind.passwordSecurity,
+                        icon: PwonyIconKind.passwordSecurity,
                         label: _sendingReset
                             ? 'Sending reset email…'
                             : 'Password & security',
@@ -215,7 +215,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 height: 16,
                                 child: CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : const ClasrumIcon(ClasrumIconKind.chevronRight,
+                            : const PwonyIcon(PwonyIconKind.chevronRight,
                                 size: 18, color: AppColors.muted),
                       ),
                     ],
@@ -340,7 +340,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: DropdownButton<T>(
               value: value,
               dropdownColor: AppColors.surface,
-              icon: const ClasrumIcon(ClasrumIconKind.chevronDown,
+              icon: const PwonyIcon(PwonyIconKind.chevronDown,
                   size: 16, color: AppColors.muted),
               style: const TextStyle(
                 color: AppColors.white,
@@ -362,7 +362,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _actionRow({
-    required ClasrumIconKind icon,
+    required PwonyIconKind icon,
     required String label,
     String? subtitle,
     VoidCallback? onTap,
@@ -378,7 +378,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              ClasrumIcon(icon, size: 20, color: AppColors.muted),
+              PwonyIcon(icon, size: 20, color: AppColors.muted),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(

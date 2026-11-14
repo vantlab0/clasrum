@@ -3,7 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-import 'clasrum_icons.dart';
+import 'pwony_icons.dart';
 
 /// Translucent glass surface with controlled blur and subtle border.
 class GlassContainer extends StatelessWidget {
@@ -79,7 +79,7 @@ class GlassIconButton extends StatelessWidget {
     this.iconColor = AppColors.white,
   });
 
-  final ClasrumIconKind icon;
+  final PwonyIconKind icon;
   final VoidCallback? onPressed;
   final double size;
   final double iconSize;
@@ -106,7 +106,7 @@ class GlassIconButton extends StatelessWidget {
             onTap: onPressed,
             customBorder: const CircleBorder(),
             child: Center(
-              child: ClasrumIcon(icon, size: iconSize, color: iconColor),
+              child: PwonyIcon(icon, size: iconSize, color: iconColor),
             ),
           ),
         ),
@@ -168,7 +168,7 @@ class PrimaryActionButton extends StatelessWidget {
 
   final VoidCallback? onPressed;
   final String label;
-  final ClasrumIconKind? icon;
+  final PwonyIconKind? icon;
   final bool compact;
 
   @override
@@ -197,7 +197,7 @@ class PrimaryActionButton extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            ClasrumIcon(icon!, size: compact ? 16 : 18, color: AppColors.white),
+            PwonyIcon(icon!, size: compact ? 16 : 18, color: AppColors.white),
             const SizedBox(width: 8),
             Text(label),
           ],
@@ -220,7 +220,7 @@ class SecondaryActionButton extends StatelessWidget {
 
   final VoidCallback? onPressed;
   final String label;
-  final ClasrumIconKind? icon;
+  final PwonyIconKind? icon;
   final bool compact;
 
   @override
@@ -249,7 +249,7 @@ class SecondaryActionButton extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            ClasrumIcon(icon!, size: compact ? 16 : 18, color: AppColors.white),
+            PwonyIcon(icon!, size: compact ? 16 : 18, color: AppColors.white),
             const SizedBox(width: 8),
             Text(label),
           ],

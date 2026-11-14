@@ -4,7 +4,7 @@ import 'core/config.dart';
 import 'core/storage.dart';
 import 'core/supabase_bootstrap.dart';
 import 'core/theme.dart';
-import 'core/widgets/clasrum_icons.dart';
+import 'core/widgets/pwony_icons.dart';
 import 'features/auth/auth_gate.dart';
 import 'services/auth_service.dart';
 import 'services/profile_service.dart';
@@ -21,7 +21,7 @@ void main() async {
   // AuthGate can route without flashing an incorrect screen.
   await authService.restoreSession();
 
-  runApp(AiClassroomApp(
+  runApp(PwonyApp(
     config: config,
     storage: storage,
     authService: authService,
@@ -29,8 +29,8 @@ void main() async {
   ));
 }
 
-class AiClassroomApp extends StatelessWidget {
-  const AiClassroomApp({
+class PwonyApp extends StatelessWidget {
+  const PwonyApp({
     super.key,
     required this.config,
     required this.storage,
@@ -123,7 +123,7 @@ class _ConfigurationErrorScreen extends StatelessWidget {
                   children: [
                     const Row(
                       children: [
-                        ClasrumIcon(ClasrumIconKind.info, color: Colors.white, size: 22),
+                        PwonyIcon(PwonyIconKind.info, color: Colors.white, size: 22),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(

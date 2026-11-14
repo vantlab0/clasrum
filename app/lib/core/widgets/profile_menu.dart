@@ -9,7 +9,7 @@ import '../../features/settings/settings_screen.dart';
 import '../../features/upgrade/upgrade_screen.dart';
 import '../../main.dart';
 import '../../services/realtime_client.dart';
-import 'clasrum_icons.dart';
+import 'pwony_icons.dart';
 
 /// Small circular profile control that opens an anchored glass account menu.
 class ProfileMenuButton extends StatefulWidget {
@@ -331,15 +331,15 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
                                 width: widget.size,
                                 height: widget.size,
                                 fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => ClasrumIcon(
-                                  ClasrumIconKind.profile,
+                                errorBuilder: (_, __, ___) => PwonyIcon(
+                                  PwonyIconKind.profile,
                                   size: widget.size * 0.5,
                                   color: AppColors.muted,
                                 ),
                               ),
                             )
-                          : ClasrumIcon(
-                              ClasrumIconKind.profile,
+                          : PwonyIcon(
+                              PwonyIconKind.profile,
                               size: widget.size * 0.5,
                               color: AppColors.muted,
                             ),
@@ -391,12 +391,12 @@ class _AccountDropdownMenu extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
               _MenuItem(
-                icon: ClasrumIconKind.settings,
+                icon: PwonyIconKind.settings,
                 label: 'Settings',
                 onTap: onSettings,
               ),
               _MenuItem(
-                icon: ClasrumIconKind.upgradePro,
+                icon: PwonyIconKind.upgradePro,
                 label: 'Upgrade to Pro',
                 onTap: onUpgrade,
               ),
@@ -409,7 +409,7 @@ class _AccountDropdownMenu extends StatelessWidget {
                 ),
               ),
               _MenuItem(
-                icon: ClasrumIconKind.logout,
+                icon: PwonyIconKind.logout,
                 label: 'Logout',
                 onTap: onLogout,
               ),
@@ -428,7 +428,7 @@ class _MenuItem extends StatefulWidget {
     required this.onTap,
   });
 
-  final ClasrumIconKind icon;
+  final PwonyIconKind icon;
   final String label;
   final VoidCallback onTap;
 
@@ -467,7 +467,7 @@ class _MenuItemState extends State<_MenuItem> {
             ),
             child: Row(
               children: <Widget>[
-                ClasrumIcon(widget.icon, size: 18, color: AppColors.white),
+                PwonyIcon(widget.icon, size: 18, color: AppColors.white),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(

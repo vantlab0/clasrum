@@ -1,6 +1,6 @@
 uptime
 echo "--- services"
-systemctl is-active ai-classroom nginx
+systemctl is-active pwony nginx
 echo "--- listeners"
 sudo -n ss -tlnp | grep -E ':(80|8000|10000|10001) ' || true
 echo "--- pm2"

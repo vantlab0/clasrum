@@ -8,7 +8,7 @@ import '../../core/errors.dart';
 import '../../core/formatters.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../core/widgets/profile_menu.dart';
 import '../../main.dart';
@@ -483,7 +483,7 @@ class _HomeScreenState extends State<HomeScreen> {
           value: value,
           isDense: true,
           dropdownColor: AppColors.surface,
-          icon: const ClasrumIcon(ClasrumIconKind.chevronDown,
+          icon: const PwonyIcon(PwonyIconKind.chevronDown,
               size: 16, color: AppColors.muted),
           style: const TextStyle(
             color: AppColors.muted,
@@ -627,7 +627,7 @@ class _StartButton extends StatelessWidget {
                     style:
                         TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                 SizedBox(width: 4),
-                ClasrumIcon(ClasrumIconKind.startLearning, size: 16, color: AppColors.white),
+                PwonyIcon(PwonyIconKind.startLearning, size: 16, color: AppColors.white),
               ],
             ),
     );
@@ -668,8 +668,8 @@ class _RecentSessionCard extends StatelessWidget {
                 errorBuilder: (context, error, stackTrace) => Container(
                   color: AppColors.surfaceHigh,
                   alignment: Alignment.center,
-                  child: const ClasrumIcon(
-                    ClasrumIconKind.notes,
+                  child: const PwonyIcon(
+                    PwonyIconKind.notes,
                     size: 28,
                     color: AppColors.muted,
                   ),
@@ -712,8 +712,8 @@ class _RecentSessionCard extends StatelessWidget {
                   shape: const CircleBorder(),
                   child: PopupMenuButton<_SessionMenuAction>(
                     tooltip: 'Session options',
-                    icon: const ClasrumIcon(
-                      ClasrumIconKind.moreOptions,
+                    icon: const PwonyIcon(
+                      PwonyIconKind.moreOptions,
                       size: 18,
                       color: AppColors.white,
                     ),
@@ -775,8 +775,8 @@ class _RecentSessionCard extends StatelessWidget {
                       const SizedBox(width: 6),
                       const Padding(
                         padding: EdgeInsets.only(bottom: 2),
-                        child: ClasrumIcon(
-                          ClasrumIconKind.chevronRight,
+                        child: PwonyIcon(
+                          PwonyIconKind.chevronRight,
                           size: 16,
                           color: AppColors.white,
                         ),

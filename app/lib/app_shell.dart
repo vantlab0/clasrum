@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'core/config.dart';
 import 'core/storage.dart';
 import 'core/theme.dart';
-import 'core/widgets/clasrum_icons.dart';
+import 'core/widgets/pwony_icons.dart';
 import 'features/home/home_screen.dart';
 import 'features/live/live_screen.dart';
 import 'features/notes/notes_screen.dart';
@@ -105,9 +105,9 @@ class _FloatingNavBar extends StatelessWidget {
   final ValueChanged<int> onSelected;
 
   static const _items = <_NavItem>[
-    _NavItem('Home', ClasrumIconKind.home),
-    _NavItem('Notes', ClasrumIconKind.notes),
-    _NavItem('Profile', ClasrumIconKind.profile),
+    _NavItem('Home', PwonyIconKind.home),
+    _NavItem('Notes', PwonyIconKind.notes),
+    _NavItem('Profile', PwonyIconKind.profile),
   ];
 
   @override
@@ -236,7 +236,7 @@ class _NavButton extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        AnimatedClasrumNavIcon(
+                        AnimatedPwonyNavIcon(
                           kind: item.icon,
                           selected: true,
                           color: color,
@@ -260,7 +260,7 @@ class _NavButton extends StatelessWidget {
                     )
                   : Center(
                       key: ValueKey<String>('unsel-${item.label}'),
-                      child: AnimatedClasrumNavIcon(
+                      child: AnimatedPwonyNavIcon(
                         kind: item.icon,
                         selected: false,
                         color: color,
@@ -278,5 +278,5 @@ class _NavButton extends StatelessWidget {
 class _NavItem {
   const _NavItem(this.label, this.icon);
   final String label;
-  final ClasrumIconKind icon;
+  final PwonyIconKind icon;
 }

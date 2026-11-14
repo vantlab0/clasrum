@@ -12,7 +12,7 @@ import '../../blackboard/model/board_document.dart';
 import '../../blackboard/model/board_event.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../services/realtime_client.dart';
 import 'ai_audio_playback.dart';
@@ -682,8 +682,8 @@ class _LiveScreenState extends State<LiveScreen>
               onPressed: _confirmExit,
               background: AppColors.surface.withValues(alpha: 0.45),
               borderColor: AppColors.border.withValues(alpha: 0.55),
-              child: const ClasrumIcon(
-                ClasrumIconKind.close,
+              child: const PwonyIcon(
+                PwonyIconKind.close,
                 size: 18,
                 color: AppColors.white,
               ),
@@ -746,7 +746,7 @@ class _TopErrorBanner extends StatelessWidget {
       borderColor: AppColors.red.withValues(alpha: 0.45),
       child: Row(
         children: <Widget>[
-          const ClasrumIcon(ClasrumIconKind.info, size: 16, color: AppColors.muted),
+          const PwonyIcon(PwonyIconKind.info, size: 16, color: AppColors.muted),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -760,7 +760,7 @@ class _TopErrorBanner extends StatelessWidget {
             behavior: HitTestBehavior.opaque,
             child: const Padding(
               padding: EdgeInsets.all(4),
-              child: ClasrumIcon(ClasrumIconKind.close, size: 16, color: AppColors.muted),
+              child: PwonyIcon(PwonyIconKind.close, size: 16, color: AppColors.muted),
             ),
           ),
         ],
@@ -852,8 +852,8 @@ class _BottomControls extends StatelessWidget {
           borderColor: paused
               ? AppColors.red.withValues(alpha: 0.7)
               : AppColors.border.withValues(alpha: 0.55),
-          child: ClasrumIcon(
-            paused ? ClasrumIconKind.play : ClasrumIconKind.pause,
+          child: PwonyIcon(
+            paused ? PwonyIconKind.play : PwonyIconKind.pause,
             size: 20,
             color: AppColors.white,
           ),
@@ -872,8 +872,8 @@ class _BottomControls extends StatelessWidget {
           onPressed: micPhase == _MicPhase.listening ? null : onCameraPressed,
           background: AppColors.surface.withValues(alpha: 0.45),
           borderColor: AppColors.border.withValues(alpha: 0.55),
-          child: const ClasrumIcon(
-            ClasrumIconKind.camera,
+          child: const PwonyIcon(
+            PwonyIconKind.camera,
             size: 20,
             color: AppColors.white,
           ),
@@ -1009,9 +1009,9 @@ class _MicControl extends StatelessWidget {
                                     color: AppColors.white.withValues(alpha: 0.95),
                                   ),
                                 )
-                              : const ClasrumIcon(
+                              : const PwonyIcon(
                                   key: ValueKey<String>('mic'),
-                                  ClasrumIconKind.microphone,
+                                  PwonyIconKind.microphone,
                                   size: 22,
                                   color: AppColors.white,
                                 ),
@@ -1154,8 +1154,8 @@ class _CameraOverlay extends StatelessWidget {
                               size: 34,
                               background: AppColors.surface.withValues(alpha: 0.55),
                               borderColor: AppColors.border.withValues(alpha: 0.55),
-                              child: const ClasrumIcon(
-                                ClasrumIconKind.close,
+                              child: const PwonyIcon(
+                                PwonyIconKind.close,
                                 size: 16,
                                 color: AppColors.white,
                               ),

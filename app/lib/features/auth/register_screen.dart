@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../main.dart';
 import 'auth_widgets.dart';
 import 'login_screen.dart';
@@ -159,7 +159,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     controller: _nameController,
                     label: 'Full name',
                     hint: 'Your name',
-                    prefixIcon: ClasrumIconKind.profile,
+                    prefixIcon: PwonyIconKind.profile,
                     textInputAction: TextInputAction.next,
                     autofillHints: const [AutofillHints.name],
                     validator: _validateName,
@@ -170,7 +170,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     controller: _emailController,
                     label: 'Email',
                     hint: 'name@example.com',
-                    prefixIcon: ClasrumIconKind.email,
+                    prefixIcon: PwonyIconKind.email,
                     keyboardType: TextInputType.emailAddress,
                     textInputAction: TextInputAction.next,
                     autofillHints: const [AutofillHints.email],
@@ -182,7 +182,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     controller: _passwordController,
                     label: 'Password',
                     hint: 'At least 8 characters',
-                    prefixIcon: ClasrumIconKind.lock,
+                    prefixIcon: PwonyIconKind.lock,
                     obscureText: _obscurePassword,
                     textInputAction: TextInputAction.next,
                     autofillHints: const [AutofillHints.newPassword],
@@ -193,10 +193,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ? null
                           : () => setState(
                               () => _obscurePassword = !_obscurePassword),
-                      icon: ClasrumIcon(
+                      icon: PwonyIcon(
                         _obscurePassword
-                            ? ClasrumIconKind.visibility
-                            : ClasrumIconKind.visibilityOff,
+                            ? PwonyIconKind.visibility
+                            : PwonyIconKind.visibilityOff,
                         size: 18,
                         color: Colors.white70,
                       ),
@@ -209,7 +209,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     controller: _confirmController,
                     label: 'Confirm password',
                     hint: 'Re-enter your password',
-                    prefixIcon: ClasrumIconKind.lock,
+                    prefixIcon: PwonyIconKind.lock,
                     obscureText: _obscureConfirm,
                     textInputAction: TextInputAction.done,
                     autofillHints: const [AutofillHints.newPassword],
@@ -221,10 +221,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           ? null
                           : () => setState(
                               () => _obscureConfirm = !_obscureConfirm),
-                      icon: ClasrumIcon(
+                      icon: PwonyIcon(
                         _obscureConfirm
-                            ? ClasrumIconKind.visibility
-                            : ClasrumIconKind.visibilityOff,
+                            ? PwonyIconKind.visibility
+                            : PwonyIconKind.visibilityOff,
                         size: 18,
                         color: Colors.white70,
                       ),

@@ -1,4 +1,4 @@
--- Clasrum: public.profiles for authenticated user identity (Supabase source of truth)
+-- Pwony: public.profiles for authenticated user identity (Supabase source of truth)
 -- Apply with Supabase CLI (`supabase db push` / migration workflow) or in the
 -- Supabase SQL editor for the target project.
 

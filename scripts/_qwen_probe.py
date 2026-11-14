@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import websockets
 
 env = {}
-for line in open("/opt/ai-classroom/backend/.env", encoding="utf-8"):
+for line in open("/opt/pwony/backend/.env", encoding="utf-8"):
     line = line.strip()
     if "=" in line and not line.startswith("#"):
         k, v = line.split("=", 1)

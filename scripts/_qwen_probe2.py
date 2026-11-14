@@ -19,7 +19,7 @@ def load_env(path):
     return env
 
 
-classroom = load_env("/opt/ai-classroom/backend/.env")
+classroom = load_env("/opt/pwony/backend/.env")
 proxy = load_env("/opt/avelut-realtime-proxy/.env")
 
 keys = {

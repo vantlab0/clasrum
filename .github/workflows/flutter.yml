@@ -58,7 +58,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ai-classroom-apk
+          name: pwony-apk
           path: app/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
 

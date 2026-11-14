@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme.dart';
-import 'clasrum_icons.dart';
+import 'pwony_icons.dart';
 
 /// Friendly empty state for lists that genuinely have nothing yet.
 class EmptyState extends StatelessWidget {
@@ -14,7 +14,7 @@ class EmptyState extends StatelessWidget {
     this.onAction,
   });
 
-  final ClasrumIconKind icon;
+  final PwonyIconKind icon;
   final String title;
   final String message;
   final String? actionLabel;
@@ -41,7 +41,7 @@ class EmptyState extends StatelessWidget {
                 border: Border.all(color: AppColors.outlineSoft),
               ),
               child: Center(
-                child: ClasrumIcon(icon, size: 28, color: AppColors.chalkMuted),
+                child: PwonyIcon(icon, size: 28, color: AppColors.chalkMuted),
               ),
             ),
             const SizedBox(height: AppSpacing.lg),

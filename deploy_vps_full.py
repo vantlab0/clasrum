@@ -59,7 +59,7 @@ def main():
     try:
         # Step 1: Create deploy directory with sudo
         print("\n=== Step 1: Deploy directory ===")
-        out, err = run_sudo(client, "mkdir -p /opt/ai-classroom/backend && chown -R administrator:administrator /opt/ai-classroom")
+        out, err = run_sudo(client, "mkdir -p /opt/pwony/backend && chown -R administrator:administrator /opt/pwony")
         print(out.strip() if out else "(done)")
         if err.strip():
             print(f"STDERR: {err.strip()[-200:]}")
@@ -67,13 +67,13 @@ def main():
         # Step 2: Upload backend code via SFTP
         print("\n=== Step 2: Upload backend code ===")
         sftp = client.open_sftp()
-        sftp_put_dir(sftp, LOCAL_BACKEND, "/opt/ai-classroom/backend")
+        sftp_put_dir(sftp, LOCAL_BACKEND, "/opt/pwony/backend")
         sftp.close()
         print("Upload complete.")
 
         # Step 3: Set up Python venv and install dependencies
         print("\n=== Step 3: Python venv + dependencies ===")
-        out, err = run_cmd(client, "cd /opt/ai-classroom/backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt", timeout=300)
+        out, err = run_cmd(client, "cd /opt/pwony/backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt", timeout=300)
         print(out.strip()[-500:] if out else "(empty)")
         if err.strip():
             print(f"STDERR: {err.strip()[-500:]}")
@@ -83,7 +83,7 @@ def main():
         env_content = f"""APP_NAME="AI Personal Classroom"
 ENVIRONMENT=production
 DEBUG=false
-DATABASE_URL=sqlite+aiosqlite:////opt/ai-classroom/backend/data/prod.db
+DATABASE_URL=sqlite+aiosqlite:////opt/pwony/backend/data/prod.db
 DB_ECHO=false
 JWT_SECRET=change-me-in-production-please-0123456789abcdef
 JWT_EXPIRES_MINUTES=20160
@@ -102,19 +102,19 @@ NOTES_API_KEY=
 BOARD_SNAPSHOT_INTERVAL_EVENTS=40
 BOARD_SNAPSHOT_KEEP=5
 """
-        stdin, stdout, stderr = run_cmd(client, "sudo -S tee /opt/ai-classroom/backend/.env > /dev/null", timeout=30)
+        stdin, stdout, stderr = run_cmd(client, "sudo -S tee /opt/pwony/backend/.env > /dev/null", timeout=30)
         # Note: run_cmd doesn't handle sudo password. Let me use run_sudo instead.
         # Actually, let me use a different approach - write via sftp
         print("Writing .env via SFTP...")
         sftp = client.open_sftp()
-        with sftp.file("/opt/ai-classroom/backend/.env", "w") as f:
+        with sftp.file("/opt/pwony/backend/.env", "w") as f:
             f.write(env_content)
         sftp.close()
         print(".env written.")
 
         # Step 5: Initialize database and run migrations
         print("\n=== Step 5: Initialize database ===")
-        out, err = run_cmd(client, "cd /opt/ai-classroom/backend && .venv/bin/python -m alembic upgrade head", timeout=120)
+        out, err = run_cmd(client, "cd /opt/pwony/backend && .venv/bin/python -m alembic upgrade head", timeout=120)
         print(out.strip()[-500:] if out else "(empty)")
         if err.strip():
             print(f"STDERR: {err.strip()[-500:]}")
@@ -128,10 +128,10 @@ After=network.target
 [Service]
 Type=simple
 User=administrator
-WorkingDirectory=/opt/ai-classroom/backend
+WorkingDirectory=/opt/pwony/backend
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/opt/ai-classroom/backend/.env
-ExecStart=/opt/ai-classroom/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+EnvironmentFile=/opt/pwony/backend/.env
+ExecStart=/opt/pwony/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 
@@ -139,11 +139,11 @@ RestartSec=5
 WantedBy=multi-user.target
 """
         sftp = client.open_sftp()
-        with sftp.file("/tmp/ai-classroom.service", "w") as f:
+        with sftp.file("/tmp/pwony.service", "w") as f:
             f.write(service_content)
         sftp.close()
         
-        out, err = run_sudo(client, "cp /tmp/ai-classroom.service /etc/systemd/system/ai-classroom.service && systemctl daemon-reload && systemctl enable ai-classroom && systemctl start ai-classroom")
+        out, err = run_sudo(client, "cp /tmp/pwony.service /etc/systemd/system/pwony.service && systemctl daemon-reload && systemctl enable pwony && systemctl start pwony")
         print(out.strip() if out else "(done)")
         if err.strip():
             print(f"STDERR: {err.strip()[-200:]}")
@@ -169,11 +169,11 @@ WantedBy=multi-user.target
 }}
 """
         sftp = client.open_sftp()
-        with sftp.file("/tmp/ai-classroom", "w") as f:
+        with sftp.file("/tmp/pwony", "w") as f:
             f.write(nginx_content)
         sftp.close()
         
-        out, err = run_sudo(client, "cp /tmp/ai-classroom /etc/nginx/sites-available/ai-classroom && ln -sf /etc/nginx/sites-available/ai-classroom /etc/nginx/sites-enabled/ai-classroom && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl restart nginx")
+        out, err = run_sudo(client, "cp /tmp/pwony /etc/nginx/sites-available/pwony && ln -sf /etc/nginx/sites-available/pwony /etc/nginx/sites-enabled/pwony && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl restart nginx")
         print(out.strip() if out else "(done)")
         if err.strip():
             print(f"STDERR: {err.strip()[-200:]}")

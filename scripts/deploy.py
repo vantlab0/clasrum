@@ -22,10 +22,10 @@ USER = "administrator"
 PASSWORD = "7ma6w@ehZc"
 
 DOMAIN = "realtime.avelut.xyz"
-REMOTE_ROOT = "/opt/ai-classroom"
+REMOTE_ROOT = "/opt/pwony"
 REMOTE_BACKEND = REMOTE_ROOT + "/backend"
 REMOTE_DATA = REMOTE_ROOT + "/data"
-UPLOAD_TMP = "/tmp/ai-classroom-backend.tar.gz"
+UPLOAD_TMP = "/tmp/pwony-backend.tar.gz"
 
 LOCAL_BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 
@@ -176,10 +176,10 @@ Wants=network-online.target
 Type=simple
 User=administrator
 Group=administrator
-WorkingDirectory=/opt/ai-classroom/backend
+WorkingDirectory=/opt/pwony/backend
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/opt/ai-classroom/backend/.env
-ExecStart=/opt/ai-classroom/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+EnvironmentFile=/opt/pwony/backend/.env
+ExecStart=/opt/pwony/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=always
 RestartSec=3
 TimeoutStartSec=120
@@ -188,21 +188,21 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 """
-        with sftp.file("/tmp/ai-classroom.service", "w") as f:
+        with sftp.file("/tmp/pwony.service", "w") as f:
             f.write(unit)
         run(
             client,
-            "cp /tmp/ai-classroom.service /etc/systemd/system/ai-classroom.service "
-            "&& rm -f /tmp/ai-classroom.service "
-            "&& systemctl daemon-reload && systemctl enable --now ai-classroom "
-            "&& systemctl restart ai-classroom",
+            "cp /tmp/pwony.service /etc/systemd/system/pwony.service "
+            "&& rm -f /tmp/pwony.service "
+            "&& systemctl daemon-reload && systemctl enable --now pwony "
+            "&& systemctl restart pwony",
             sudo=True,
             timeout=180,
         )
         print("    service started")
 
         print("==> Configuring nginx (path-scoped; existing proxy kept at /)")
-        nginx = f"""# Managed by AI Classroom deploy script.
+        nginx = f"""# Managed by Pwony deploy script.
 # The hosting panel maps realtime.avelut.xyz -> this VM's port 10000, so nginx
 # listens there and splits traffic: /api, /healthz and docs go to the FastAPI
 # backend, everything else (the LiveTeacher websocket proxy) stays on Node.
@@ -276,12 +276,12 @@ server {{
             sudo=True,
         )
         print("    backup: " + backup.strip().splitlines()[-1])
-        with sftp.file("/tmp/ai-classroom-nginx.conf", "w") as f:
+        with sftp.file("/tmp/pwony-nginx.conf", "w") as f:
             f.write(nginx)
         run(
             client,
-            "cp /tmp/ai-classroom-nginx.conf /etc/nginx/sites-available/realtime "
-            "&& rm -f /tmp/ai-classroom-nginx.conf "
+            "cp /tmp/pwony-nginx.conf /etc/nginx/sites-available/realtime "
+            "&& rm -f /tmp/pwony-nginx.conf "
             "&& ln -sf /etc/nginx/sites-available/realtime /etc/nginx/sites-enabled/realtime "
             "&& nginx -t && systemctl reload nginx",
             sudo=True,
@@ -293,7 +293,7 @@ server {{
         time.sleep(3)
         local_health = run(client, "curl -sS -m 10 http://127.0.0.1:8000/healthz", check=False)
         proxy_health = run(client, "curl -sS -m 10 -H 'Host: realtime.avelut.xyz' http://127.0.0.1/healthz", check=False)
-        status = run(client, "systemctl is-active ai-classroom", check=False).strip()
+        status = run(client, "systemctl is-active pwony", check=False).strip()
         print(f"    service: {status}")
         print(f"    direct:  {local_health.strip()[:200]}")
         print(f"    via nginx: {proxy_health.strip()[:200]}")

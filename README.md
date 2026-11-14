@@ -44,7 +44,7 @@ FastAPI is the control plane, and the blackboard is rendered natively in Flutter
 Python 3.11+ (the repo was developed on 3.12).
 
 ```powershell
-cd ai-classroom
+cd pwony
 python -m venv .venv
 .\.venv\Scripts\pip install -r backend\requirements.txt
 copy .env.example .env            # edit JWT_SECRET / QWEN_API_KEY as needed
@@ -68,7 +68,7 @@ Production: `docker compose up --build` (PostgreSQL 16 + backend with
 Flutter 3.24+ with an Android emulator or iOS simulator.
 
 ```powershell
-cd ai-classroom\app
+cd pwony\app
 flutter pub get
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8000   # Android emulator
 # iOS simulator: --dart-define=API_BASE_URL=http://127.0.0.1:8000
@@ -146,4 +146,4 @@ indexes may evolve with Alembic migrations.
 * The Qwen API key stays in the backend; clients only get lesson-scoped JWTs.
 * `DELETE /api/v1/me/data` removes the student's lessons, transcripts, board
   history, notes and learning memory.
-\"# clasrum\"  
+\"# pwony\"  

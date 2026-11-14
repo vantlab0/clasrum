@@ -1,5 +1,5 @@
 [project]
-name = "ai-classroom-backend"
+name = "pwony-backend"
 version = "0.1.0"
 description = "AI Personal Classroom backend: FastAPI + Qwen Realtime + LangGraph"
 requires-python = ">=3.11"

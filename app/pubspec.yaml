@@ -1,7 +1,7 @@
-name: ai_classroom
+name: pwony
 description: >-
-  AI Personal Classroom — a premium private classroom where a realtime AI tutor
-  teaches live on a chalk blackboard.
+  Pwony — a premium private classroom where a realtime AI tutor teaches live on a
+  chalk blackboard.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -33,6 +33,7 @@ flutter:
 
   assets:
     - assets/fonts/
+    - assets/brand/
 
   fonts:
     - family: Chalkboard

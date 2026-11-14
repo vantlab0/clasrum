@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 
 /// Smooth, premium route transition for auth flow (slowed for visibility).
 PageRoute<T> authRoute<T>(Widget page) {
@@ -83,8 +83,8 @@ class AuthScreenScaffold extends StatelessWidget {
                             Align(
                               alignment: Alignment.centerLeft,
                               child: IconButton(
-                                icon: const ClasrumIcon(
-                                  ClasrumIconKind.back,
+                                icon: const PwonyIcon(
+                                  PwonyIconKind.back,
                                   size: 20,
                                   color: Colors.white,
                                 ),
@@ -125,66 +125,18 @@ class _AuthBrandMark extends StatelessWidget {
     return Column(
       children: [
         Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            color: Colors.black,
-            border: Border.all(color: Colors.white24, width: 1),
-          ),
-          child: Center(
-            child: CustomPaint(
-              size: const Size(24, 24),
-              painter: _ClasrumMarkPainter(),
-            ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        const Text(
-          'Clasrum',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.6,
+          constraints: const BoxConstraints(maxWidth: 220, maxHeight: 96),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Image.asset(
+            'assets/brand/pwony_full_logo.png',
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+            semanticLabel: 'Pwony',
           ),
         ),
       ],
     );
   }
-}
-
-/// Minimal custom brand glyph (no external assets, refined geometric mark).
-class _ClasrumMarkPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final stroke = Paint()
-      ..color = AppColors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.6
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    final accent = Paint()
-      ..color = AppColors.blue
-      ..style = PaintingStyle.fill;
-
-    final w = size.width;
-    final h = size.height;
-    // Stylized "C" arc frame
-    final rect = Rect.fromLTWH(2, 2, w - 4, h - 4);
-    canvas.drawArc(rect, -2.35, 4.2, false, stroke);
-    // Inner learning node
-    canvas.drawCircle(Offset(w * 0.56, h * 0.5), 2.4, accent);
-    // Subtle stem
-    canvas.drawLine(
-      Offset(w * 0.56, h * 0.5),
-      Offset(w * 0.82, h * 0.36),
-      stroke..color = AppColors.white.withValues(alpha: 0.85),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class AuthHeading extends StatelessWidget {
@@ -254,7 +206,7 @@ class AuthGlassField extends StatelessWidget {
   final String? Function(String?)? validator;
   final Iterable<String>? autofillHints;
   final Widget? suffixIcon;
-  final ClasrumIconKind? prefixIcon;
+  final PwonyIconKind? prefixIcon;
   final bool enabled;
 
   @override
@@ -291,7 +243,7 @@ class AuthGlassField extends StatelessWidget {
                 ? null
                 : Padding(
                     padding: const EdgeInsetsDirectional.only(start: 12, end: 8),
-                    child: ClasrumIcon(
+                    child: PwonyIcon(
                       prefixIcon!,
                       size: 18,
                       color: Colors.white70,
@@ -350,8 +302,8 @@ class AuthMessage extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ClasrumIcon(
-            isError ? ClasrumIconKind.info : ClasrumIconKind.resume,
+          PwonyIcon(
+            isError ? PwonyIconKind.info : PwonyIconKind.resume,
             size: 16,
             color: Colors.white70,
           ),

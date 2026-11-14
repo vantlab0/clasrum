@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 
 /// Premium upgrade screen.
@@ -19,7 +19,7 @@ class UpgradeScreen extends StatelessWidget {
       appBar: AppBar(
         leading: IconButton(
           onPressed: () => Navigator.of(context).maybePop(),
-          icon: const ClasrumIcon(ClasrumIconKind.back, size: 20),
+          icon: const PwonyIcon(PwonyIconKind.back, size: 20),
           tooltip: 'Back',
         ),
         title: const Text('Upgrade to Pro'),
@@ -47,8 +47,8 @@ class UpgradeScreen extends StatelessWidget {
                       ),
                     ),
                     child: const Center(
-                      child: ClasrumIcon(
-                        ClasrumIconKind.upgradePro,
+                      child: PwonyIcon(
+                        PwonyIconKind.upgradePro,
                         size: 22,
                         color: AppColors.white,
                       ),
@@ -56,7 +56,7 @@ class UpgradeScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   const Text(
-                    'Clasrum Pro',
+                    'Pwony Pro',
                     style: TextStyle(
                       color: AppColors.white,
                       fontSize: 22,
@@ -86,7 +86,7 @@ class UpgradeScreen extends StatelessWidget {
                 children: <Widget>[
                   Row(
                     children: <Widget>[
-                      ClasrumIcon(ClasrumIconKind.info,
+                      PwonyIcon(PwonyIconKind.info,
                           size: 18, color: AppColors.blue),
                       SizedBox(width: 8),
                       Expanded(

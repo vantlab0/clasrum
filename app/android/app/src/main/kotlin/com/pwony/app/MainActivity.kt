@@ -1,4 +1,4 @@
-package com.example.ai_classroom
+package com.pwony.app
 
 import io.flutter.embedding.android.FlutterActivity
 

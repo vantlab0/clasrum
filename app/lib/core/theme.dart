@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Clasrum premium UI palette — strict design system.
+/// Pwony premium UI palette — strict design system.
 /// Blackboard/chalk rendering uses its own palette in `blackboard/model`.
 abstract final class AppColors {
   // Required system colors

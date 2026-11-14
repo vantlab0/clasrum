@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
 import 'auth_widgets.dart';
@@ -137,7 +137,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: _emailController,
                     label: 'Email',
                     hint: 'name@example.com',
-                    prefixIcon: ClasrumIconKind.email,
+                    prefixIcon: PwonyIconKind.email,
                     keyboardType: TextInputType.emailAddress,
                     textInputAction: TextInputAction.next,
                     autofillHints: const [AutofillHints.email],
@@ -149,7 +149,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     controller: _passwordController,
                     label: 'Password',
                     hint: 'Enter your password',
-                    prefixIcon: ClasrumIconKind.lock,
+                    prefixIcon: PwonyIconKind.lock,
                     obscureText: _obscure,
                     textInputAction: TextInputAction.done,
                     autofillHints: const [AutofillHints.password],
@@ -160,10 +160,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       onPressed: _loading
                           ? null
                           : () => setState(() => _obscure = !_obscure),
-                      icon: ClasrumIcon(
+                      icon: PwonyIcon(
                         _obscure
-                            ? ClasrumIconKind.visibility
-                            : ClasrumIconKind.visibilityOff,
+                            ? PwonyIconKind.visibility
+                            : PwonyIconKind.visibilityOff,
                         size: 18,
                         color: Colors.white70,
                       ),
@@ -203,7 +203,7 @@ class _LoginScreenState extends State<LoginScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Text(
-                  'New to Clasrum? ',
+                  'New to Pwony? ',
                   style: TextStyle(color: Colors.white70, fontSize: 13),
                 ),
                 AuthTextLink(

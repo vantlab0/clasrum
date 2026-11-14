@@ -8,7 +8,7 @@ import '../../core/errors.dart';
 import '../../core/formatters.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../core/widgets/profile_menu.dart';
 import '../../main.dart';
@@ -476,7 +476,7 @@ class _NotesScreenState extends State<NotesScreen> {
                   _generateNotes(lessonId);
                 }
               },
-              icon: ClasrumIconKind.notes,
+              icon: PwonyIconKind.notes,
               label: note != null ? 'View notes' : 'Generate notes',
             ),
           ),
@@ -493,7 +493,7 @@ class _NotesScreenState extends State<NotesScreen> {
                       if (mounted) setState(() {});
                       widget.onContinueLesson!(lessonId);
                     },
-              icon: ClasrumIconKind.resume,
+              icon: PwonyIconKind.resume,
               label: 'Continue Live Session',
             ),
           ),
@@ -568,7 +568,7 @@ class _NotesScreenState extends State<NotesScreen> {
                           hintText: 'Search',
                           prefixIcon: Padding(
                             padding: EdgeInsets.only(left: 4, right: 4),
-                            child: ClasrumIcon(ClasrumIconKind.search,
+                            child: PwonyIcon(PwonyIconKind.search,
                                 size: 18, color: AppColors.muted),
                           ),
                           prefixIconConstraints:
@@ -733,8 +733,8 @@ class _ImageCard extends StatelessWidget {
                 errorBuilder: (context, error, stackTrace) => Container(
                   color: AppColors.surfaceHigh,
                   alignment: Alignment.center,
-                  child: const ClasrumIcon(
-                    ClasrumIconKind.notes,
+                  child: const PwonyIcon(
+                    PwonyIconKind.notes,
                     size: 28,
                     color: AppColors.muted,
                   ),
@@ -775,8 +775,8 @@ class _ImageCard extends StatelessWidget {
                   shape: const CircleBorder(),
                   child: PopupMenuButton<_CardMenuAction>(
                     tooltip: 'Options',
-                    icon: const ClasrumIcon(
-                      ClasrumIconKind.moreOptions,
+                    icon: const PwonyIcon(
+                      PwonyIconKind.moreOptions,
                       size: 18,
                       color: AppColors.white,
                     ),
@@ -839,8 +839,8 @@ class _ImageCard extends StatelessWidget {
                       const SizedBox(width: 6),
                       const Padding(
                         padding: EdgeInsets.only(bottom: 2),
-                        child: ClasrumIcon(
-                          ClasrumIconKind.chevronRight,
+                        child: PwonyIcon(
+                          PwonyIconKind.chevronRight,
                           size: 16,
                           color: AppColors.white,
                         ),

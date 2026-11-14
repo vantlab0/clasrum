@@ -8,7 +8,7 @@ import '../../core/errors.dart';
 import '../../core/formatters.dart';
 import '../../core/storage.dart';
 import '../../core/theme.dart';
-import '../../core/widgets/clasrum_icons.dart';
+import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../main.dart';
 import '../../services/realtime_client.dart';
@@ -266,13 +266,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       title: 'Account actions',
                       children: <Widget>[
                         _actionRow(
-                          icon: ClasrumIconKind.logout,
+                          icon: PwonyIconKind.logout,
                           label: 'Sign out',
                           onTap: _signOut,
                         ),
                         _divider(),
                         _actionRow(
-                          icon: ClasrumIconKind.delete,
+                          icon: PwonyIconKind.delete,
                           label: _deleting ? 'Deleting data…' : 'Delete all my data',
                           subtitle:
                               'Removes lessons, transcripts, board history, notes and memory.',
@@ -315,7 +315,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             color: AppColors.surface.withValues(alpha: 0.6),
             border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
           ),
-          child: const ClasrumIcon(ClasrumIconKind.profile,
+          child: const PwonyIcon(PwonyIconKind.profile,
               color: AppColors.muted, size: 22),
         ),
         const SizedBox(width: 14),
@@ -420,7 +420,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Widget _actionRow({
-    required ClasrumIconKind icon,
+    required PwonyIconKind icon,
     required String label,
     String? subtitle,
     VoidCallback? onTap,
@@ -437,7 +437,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: <Widget>[
-              ClasrumIcon(icon, size: 20, color: AppColors.muted),
+              PwonyIcon(icon, size: 20, color: AppColors.muted),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -462,7 +462,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               if (trailing != null)
                 trailing
               else if (showChevron)
-                const ClasrumIcon(ClasrumIconKind.chevronRight,
+                const PwonyIcon(PwonyIconKind.chevronRight,
                     size: 18, color: AppColors.muted),
             ],
           ),
