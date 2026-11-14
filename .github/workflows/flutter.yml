@@ -45,9 +45,10 @@ jobs:
 
       - name: Build APK (release)
         env:
-          API_BASE_URL: ${{ github.event.inputs.api_base_url || secrets.API_BASE_URL || 'https://realtime.avelut.xyz' }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || secrets.SUPABASE_PUBLISHABLE_KEY || '' }}
+          API_BASE_URL: ${{ github.event.inputs.api_base_url || 'https://realtime.avelut.xyz' }}
+          # DEMO ONLY: hardcoded for temporary debug APK builds. Revert and remove.
+          SUPABASE_URL: https://sazpockqjxeuthewdtku.supabase.co
+          SUPABASE_ANON_KEY: sb_publishable_08eKb2lUGqluBUsG5Kb4Tg_cL9alEO-
         run: |
           flutter build apk --release \
             --dart-define=API_BASE_URL="$API_BASE_URL" \
