@@ -31,6 +31,8 @@ class NotesScreen extends StatefulWidget {
   State<NotesScreen> createState() => _NotesScreenState();
 }
 
+enum _CardMenuAction { rename, delete, share }
+
 class _NotesScreenState extends State<NotesScreen> {
   List<Map<String, dynamic>> _lessons = const [];
   List<Map<String, dynamic>> _notes = const [];
@@ -122,20 +124,31 @@ class _NotesScreenState extends State<NotesScreen> {
   String get _query => _searchController.text.trim().toLowerCase();
 
   List<Map<String, dynamic>> get _filteredLessons {
-    if (_query.isEmpty) return _lessons;
-    return _lessons.where((l) {
-      final topic = (l['topic'] as String? ?? '').toLowerCase();
+    final base = _lessons.where((l) {
+      final id = l['id'] as String? ?? '';
+      return !widget.storage.isLessonHidden(id);
+    }).toList();
+    if (_query.isEmpty) return base;
+    return base.where((l) {
+      final topic = _lessonTitle(l).toLowerCase();
       final subject = (l['subject'] as String? ?? '').toLowerCase();
       return topic.contains(_query) || subject.contains(_query);
     }).toList();
   }
 
   List<Map<String, dynamic>> get _filteredNotes {
-    if (_query.isEmpty) return _notes;
-    return _notes.where((n) {
-      final title = (n['title'] as String? ?? '').toLowerCase();
+    final base = _notes.where((n) {
+      final id = n['id'] as String? ?? '';
+      return !widget.storage.isNoteHidden(id);
+    }).toList();
+    if (_query.isEmpty) return base;
+    return base.where((n) {
+      final title = _noteTitle(n).toLowerCase();
       final subject = (n['subject'] as String? ?? '').toLowerCase();
-      return title.contains(_query) || subject.contains(_query);
+      final topic = (n['topic'] as String? ?? '').toLowerCase();
+      return title.contains(_query) ||
+          subject.contains(_query) ||
+          topic.contains(_query);
     }).toList();
   }
 
@@ -144,6 +157,223 @@ class _NotesScreenState extends State<NotesScreen> {
       if (n['lesson_id'] == lessonId) return n;
     }
     return null;
+  }
+
+  String _lessonTitle(Map<String, dynamic> lesson) {
+    final id = lesson['id'] as String? ?? '';
+    return widget.storage.lessonTitleOverride(id) ??
+        (lesson['topic'] as String? ?? 'Untitled session');
+  }
+
+  String _noteTitle(Map<String, dynamic> note) {
+    final id = note['id'] as String? ?? '';
+    return widget.storage.noteTitleOverride(id) ??
+        (note['title'] as String? ?? 'Untitled note');
+  }
+
+  DateTime? _lessonDisplayTime(Map<String, dynamic> lesson) {
+    final id = lesson['id'] as String? ?? '';
+    return widget.storage.lessonLastOpened(id) ??
+        _parseDate(lesson['updated_at'] ?? lesson['created_at']);
+  }
+
+  DateTime? _noteDisplayTime(Map<String, dynamic> note) {
+    final id = note['id'] as String? ?? '';
+    return widget.storage.noteLastOpened(id) ??
+        _parseDate(note['updated_at'] ?? note['created_at']);
+  }
+
+  String _unsplashPreviewUrl({required String id, required String topic}) {
+    final query = Uri.encodeComponent(
+      topic.trim().isEmpty ? 'education learning notes' : topic.trim(),
+    );
+    final sig = (id.isNotEmpty ? id : topic).hashCode.abs();
+    return 'https://source.unsplash.com/800x600/?$query&sig=$sig';
+  }
+
+  void _showComingSoonShare() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Sharing will be available soon.')),
+    );
+  }
+
+  Future<void> _renameLesson(Map<String, dynamic> lesson) async {
+    final id = lesson['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final controller = TextEditingController(text: _lessonTitle(lesson));
+    final result = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.55),
+      builder: (context) => GlassModal(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Rename session',
+              style: TextStyle(
+                  color: AppColors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.white),
+              decoration: const InputDecoration(hintText: 'Session title'),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: SecondaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    label: 'Cancel',
+                    compact: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: PrimaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(controller.text),
+                    label: 'Save',
+                    compact: true,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (result == null) return;
+    await widget.storage.renameLesson(id, result);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteLesson(Map<String, dynamic> lesson) async {
+    final id = lesson['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final confirmed = await _confirmDelete('Delete session?',
+        'This will remove the session from this device.');
+    if (!confirmed) return;
+    await widget.storage.hideLesson(id);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _renameNote(Map<String, dynamic> note) async {
+    final id = note['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final controller = TextEditingController(text: _noteTitle(note));
+    final result = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.55),
+      builder: (context) => GlassModal(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Rename note',
+              style: TextStyle(
+                  color: AppColors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.white),
+              decoration: const InputDecoration(hintText: 'Note title'),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: SecondaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    label: 'Cancel',
+                    compact: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: PrimaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(controller.text),
+                    label: 'Save',
+                    compact: true,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (result == null) return;
+    await widget.storage.renameNote(id, result);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteNote(Map<String, dynamic> note) async {
+    final id = note['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final confirmed = await _confirmDelete(
+        'Delete note?', 'This will remove the note from this device.');
+    if (!confirmed) return;
+    await widget.storage.hideNote(id);
+    if (mounted) setState(() {});
+  }
+
+  Future<bool> _confirmDelete(String title, String message) async {
+    return await showDialog<bool>(
+          context: context,
+          barrierColor: Colors.black.withValues(alpha: 0.55),
+          builder: (context) => GlassModal(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  title,
+                  style: const TextStyle(
+                      color: AppColors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 10),
+                Text(message,
+                    style:
+                        const TextStyle(color: AppColors.muted, fontSize: 14)),
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: SecondaryActionButton(
+                        onPressed: () => Navigator.of(context).pop(false),
+                        label: 'Cancel',
+                        compact: true,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: PrimaryActionButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        label: 'Delete',
+                        compact: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
   }
 
   Future<void> _generateNotes(String lessonId) async {
@@ -218,7 +448,7 @@ class _NotesScreenState extends State<NotesScreen> {
   void _showSessionModal(Map<String, dynamic> lesson) {
     final lessonId = lesson['id'] as String? ?? '';
     if (lessonId.isEmpty) return;
-    final topic = lesson['topic'] as String? ?? 'Session';
+    final topic = _lessonTitle(lesson);
     final note = _noteForLesson(lessonId);
     final noteId = note?['id'] as String?;
 
@@ -241,7 +471,7 @@ class _NotesScreenState extends State<NotesScreen> {
               onPressed: () {
                 Navigator.of(context).pop();
                 if (noteId != null) {
-                  _openNote(noteId, title: note?['title'] as String?);
+                  _openNote(noteId, title: _noteTitle(note!));
                 } else {
                   _generateNotes(lessonId);
                 }
@@ -256,9 +486,11 @@ class _NotesScreenState extends State<NotesScreen> {
             child: SecondaryActionButton(
               onPressed: widget.onContinueLesson == null
                   ? null
-                  : () {
+                  : () async {
                       Navigator.of(context).pop();
-                      widget.storage.setLastLessonId(lessonId);
+                      await widget.storage.setLastLessonId(lessonId);
+                      await widget.storage.markLessonOpened(lessonId);
+                      if (mounted) setState(() {});
                       widget.onContinueLesson!(lessonId);
                     },
               icon: ClasrumIconKind.resume,
@@ -270,7 +502,11 @@ class _NotesScreenState extends State<NotesScreen> {
     );
   }
 
-  void _openNote(String noteId, {String? title}) {
+  Future<void> _openNote(String noteId, {String? title}) async {
+    if (noteId.isEmpty) return;
+    await widget.storage.markNoteOpened(noteId);
+    if (mounted) setState(() {});
+    if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute<void>(
@@ -332,7 +568,8 @@ class _NotesScreenState extends State<NotesScreen> {
                           hintText: 'Search',
                           prefixIcon: Padding(
                             padding: EdgeInsets.only(left: 4, right: 4),
-                            child: ClasrumIcon(ClasrumIconKind.search, size: 18, color: AppColors.muted),
+                            child: ClasrumIcon(ClasrumIconKind.search,
+                                size: 18, color: AppColors.muted),
                           ),
                           prefixIconConstraints:
                               BoxConstraints(minWidth: 34, minHeight: 40),
@@ -351,18 +588,94 @@ class _NotesScreenState extends State<NotesScreen> {
                     if (lessons.isEmpty)
                       _emptyText('No recent sessions.')
                     else
-                      ...lessons.take(12).map(_sessionTile),
+                      _cardGrid(
+                        itemCount: lessons.take(12).length,
+                        itemBuilder: (context, index) {
+                          final lesson = lessons[index];
+                          final title = _lessonTitle(lesson);
+                          final displayTime = _lessonDisplayTime(lesson);
+                          final timestamp =
+                              displayTime != null ? relativeTime(displayTime) : '—';
+                          final id = lesson['id'] as String? ?? '';
+                          return _ImageCard(
+                            imageUrl: _unsplashPreviewUrl(id: id, topic: title),
+                            title: title,
+                            timestamp: timestamp,
+                            onTap: () => _showSessionModal(lesson),
+                            onMenuSelected: (action) {
+                              switch (action) {
+                                case _CardMenuAction.rename:
+                                  _renameLesson(lesson);
+                                  break;
+                                case _CardMenuAction.delete:
+                                  _deleteLesson(lesson);
+                                  break;
+                                case _CardMenuAction.share:
+                                  _showComingSoonShare();
+                                  break;
+                              }
+                            },
+                          );
+                        },
+                      ),
                     const SizedBox(height: 24),
                     _sectionHeading('Saved notes'),
                     const SizedBox(height: 10),
                     if (notes.isEmpty)
                       _emptyText('No saved notes yet.')
                     else
-                      ...notes.map(_noteTile),
+                      _cardGrid(
+                        itemCount: notes.length,
+                        itemBuilder: (context, index) {
+                          final note = notes[index];
+                          final title = _noteTitle(note);
+                          final displayTime = _noteDisplayTime(note);
+                          final timestamp =
+                              displayTime != null ? relativeTime(displayTime) : '—';
+                          final id = note['id'] as String? ?? '';
+                          return _ImageCard(
+                            imageUrl: _unsplashPreviewUrl(id: id, topic: title),
+                            title: title,
+                            timestamp: timestamp,
+                            onTap: () => _openNote(id, title: title),
+                            onMenuSelected: (action) {
+                              switch (action) {
+                                case _CardMenuAction.rename:
+                                  _renameNote(note);
+                                  break;
+                                case _CardMenuAction.delete:
+                                  _deleteNote(note);
+                                  break;
+                                case _CardMenuAction.share:
+                                  _showComingSoonShare();
+                                  break;
+                              }
+                            },
+                          );
+                        },
+                      ),
                   ],
                 ),
               ),
       ),
+    );
+  }
+
+  Widget _cardGrid({
+    required int itemCount,
+    required Widget Function(BuildContext, int) itemBuilder,
+  }) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        childAspectRatio: 0.78,
+      ),
+      itemCount: itemCount,
+      itemBuilder: itemBuilder,
     );
   }
 
@@ -382,105 +695,165 @@ class _NotesScreenState extends State<NotesScreen> {
             style: const TextStyle(color: AppColors.muted, fontSize: 14)),
       );
 
-  Widget _sessionTile(Map<String, dynamic> lesson) {
-    final title = lesson['topic'] as String? ?? 'Untitled session';
-    final updatedAt = _parseDate(lesson['updated_at'] ?? lesson['created_at']);
-    final meta = <String>[
-      if (updatedAt != null) relativeTime(updatedAt),
-      lessonStatusLabel(lesson['status'] as String? ?? ''),
-    ].where((s) => s.isNotEmpty).join(' · ');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: GlassContainer(
-        radius: 16,
-        padding: EdgeInsets.zero,
-        blurSigma: 6,
-        backgroundOpacity: 0.28,
-        child: Material(
-          type: MaterialType.transparency,
-          child: ListTile(
-            dense: true,
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            title: Text(title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    color: AppColors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600)),
-            subtitle: Text(meta,
-                style: const TextStyle(color: AppColors.muted, fontSize: 12)),
-            trailing: const ClasrumIcon(ClasrumIconKind.moreOptions, color: AppColors.muted, size: 20),
-            onTap: () => _showSessionModal(lesson),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _noteTile(Map<String, dynamic> note) {
-    final noteId = note['id'] as String? ?? '';
-    final title = note['title'] as String? ?? 'Untitled note';
-    final subject = note['subject'] as String? ?? note['topic'] as String?;
-    final createdAt = _parseDate(note['created_at'] ?? note['updated_at']);
-    final status = note['status'] as String? ?? '';
-    final meta = <String>[
-      if (subject != null && subject.isNotEmpty) subject,
-      if (createdAt != null) dateLabel(createdAt),
-    ].join(' · ');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: GlassContainer(
-        radius: 16,
-        padding: EdgeInsets.zero,
-        blurSigma: 6,
-        backgroundOpacity: 0.28,
-        child: Material(
-          type: MaterialType.transparency,
-          child: ListTile(
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-            title: Text(title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    color: AppColors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600)),
-            subtitle: Text(meta.isEmpty ? 'Saved note' : meta,
-                style: const TextStyle(color: AppColors.muted, fontSize: 12)),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                        color: AppColors.border.withValues(alpha: 0.5)),
-                  ),
-                  child: Text(
-                    status == 'ready' ? 'Note' : noteStatusLabel(status),
-                    style:
-                        const TextStyle(color: AppColors.muted, fontSize: 11),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                const ClasrumIcon(ClasrumIconKind.chevronRight, color: AppColors.muted, size: 18),
-              ],
-            ),
-            onTap: noteId.isEmpty ? null : () => _openNote(noteId, title: title),
-          ),
-        ),
-      ),
-    );
-  }
-
   DateTime? _parseDate(dynamic value) {
     if (value is String && value.isNotEmpty) return DateTime.tryParse(value);
     return null;
+  }
+}
+
+class _ImageCard extends StatelessWidget {
+  const _ImageCard({
+    required this.imageUrl,
+    required this.title,
+    required this.timestamp,
+    required this.onTap,
+    required this.onMenuSelected,
+  });
+
+  final String imageUrl;
+  final String title;
+  final String timestamp;
+  final VoidCallback? onTap;
+  final ValueChanged<_CardMenuAction> onMenuSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Material(
+        color: AppColors.surface,
+        child: InkWell(
+          onTap: onTap,
+          child: Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  color: AppColors.surfaceHigh,
+                  alignment: Alignment.center,
+                  child: const ClasrumIcon(
+                    ClasrumIconKind.notes,
+                    size: 28,
+                    color: AppColors.muted,
+                  ),
+                ),
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
+                    color: AppColors.surfaceHigh,
+                    alignment: Alignment.center,
+                    child: const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  );
+                },
+              ),
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    stops: const <double>[0.0, 0.45, 0.7, 1.0],
+                    colors: <Color>[
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.10),
+                      Colors.black.withValues(alpha: 0.55),
+                      Colors.black.withValues(alpha: 0.85),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.25),
+                  shape: const CircleBorder(),
+                  child: PopupMenuButton<_CardMenuAction>(
+                    tooltip: 'Options',
+                    icon: const ClasrumIcon(
+                      ClasrumIconKind.moreOptions,
+                      size: 18,
+                      color: AppColors.white,
+                    ),
+                    onSelected: onMenuSelected,
+                    color: AppColors.surfaceHigh,
+                    itemBuilder: (context) =>
+                        const <PopupMenuEntry<_CardMenuAction>>[
+                      PopupMenuItem<_CardMenuAction>(
+                        value: _CardMenuAction.rename,
+                        child: Text('Rename'),
+                      ),
+                      PopupMenuItem<_CardMenuAction>(
+                        value: _CardMenuAction.delete,
+                        child: Text('Delete'),
+                      ),
+                      PopupMenuItem<_CardMenuAction>(
+                        value: _CardMenuAction.share,
+                        child: Text('Share'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                height: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              timestamp,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: AppColors.white.withValues(alpha: 0.85),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 2),
+                        child: ClasrumIcon(
+                          ClasrumIconKind.chevronRight,
+                          size: 16,
+                          color: AppColors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

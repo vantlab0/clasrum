@@ -163,6 +163,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final data = convert.jsonDecode(response.body) as Map<String, dynamic>;
         final id = data['id'] as String;
         await widget.storage.setLastLessonId(id);
+        await widget.storage.markLessonOpened(id);
         widget.onStartLesson(id);
       } else {
         Map<String, dynamic> body = const <String, dynamic>{};
@@ -189,6 +190,143 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _creating = false);
     }
+  }
+
+  String _lessonTitle(Map<String, dynamic> lesson) {
+    final id = lesson['id'] as String? ?? '';
+    return widget.storage.lessonTitleOverride(id) ??
+        (lesson['topic'] as String? ?? 'Untitled lesson');
+  }
+
+  DateTime? _lessonDisplayTime(Map<String, dynamic> lesson) {
+    final id = lesson['id'] as String? ?? '';
+    return widget.storage.lessonLastOpened(id) ??
+        _parseDate(lesson['updated_at'] ?? lesson['created_at']);
+  }
+
+  Future<void> _openLesson(String id) async {
+    if (id.isEmpty) return;
+    await widget.storage.setLastLessonId(id);
+    await widget.storage.markLessonOpened(id);
+    if (mounted) setState(() {});
+    widget.onStartLesson(id);
+  }
+
+  Future<void> _renameLessonDialog(Map<String, dynamic> lesson) async {
+    final id = lesson['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final controller = TextEditingController(text: _lessonTitle(lesson));
+    final result = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.55),
+      builder: (context) => GlassModal(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              'Rename session',
+              style: TextStyle(
+                color: AppColors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.white),
+              decoration: const InputDecoration(hintText: 'Session title'),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: SecondaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    label: 'Cancel',
+                    compact: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: PrimaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(controller.text),
+                    label: 'Save',
+                    compact: true,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (result == null) return;
+    await widget.storage.renameLesson(id, result);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteLesson(Map<String, dynamic> lesson) async {
+    final id = lesson['id'] as String? ?? '';
+    if (id.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+          context: context,
+          barrierColor: Colors.black.withValues(alpha: 0.55),
+          builder: (context) => GlassModal(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Delete session?',
+                  style: TextStyle(
+                    color: AppColors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'This will remove the session from this device.',
+                  style: TextStyle(color: AppColors.muted, fontSize: 14),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: SecondaryActionButton(
+                        onPressed: () => Navigator.of(context).pop(false),
+                        label: 'Cancel',
+                        compact: true,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: PrimaryActionButton(
+                        onPressed: () => Navigator.of(context).pop(true),
+                        label: 'Delete',
+                        compact: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+    await widget.storage.hideLesson(id);
+    if (mounted) setState(() {});
+  }
+
+  void _shareLessonComingSoon() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Sharing will be available soon.')),
+    );
   }
 
   @override
@@ -377,7 +515,11 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
-    if (_lessons.isEmpty) {
+    final lessons = _lessons
+        .where((l) => !widget.storage.isLessonHidden(l['id'] as String? ?? ''))
+        .take(12)
+        .toList();
+    if (lessons.isEmpty) {
       return Padding(
         padding: const EdgeInsets.only(top: 8),
         child: GlassContainer(
@@ -393,45 +535,54 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
-    return Column(
-      children: _lessons.take(8).map((lesson) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        childAspectRatio: 0.78,
+      ),
+      itemCount: lessons.length,
+      itemBuilder: (context, index) {
+        final lesson = lessons[index];
         final id = lesson['id'] as String? ?? '';
-        final topic = lesson['topic'] as String? ?? 'Untitled lesson';
-        final updatedAt = _parseDate(lesson['updated_at'] ?? lesson['created_at']);
-        final timestamp = updatedAt != null ? relativeTime(updatedAt) : '—';
-        final imageUrl = _unsplashPreviewUrl(id: id, topic: topic);
-
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 14),
-          child: _RecentSessionCard(
-            imageUrl: imageUrl,
-            title: topic,
-            timestamp: timestamp,
-            onTap: id.isEmpty
-                ? null
-                : () {
-                    widget.storage.setLastLessonId(id);
-                    widget.onStartLesson(id);
-                  },
-          ),
+        final title = _lessonTitle(lesson);
+        final displayTime = _lessonDisplayTime(lesson);
+        final timestamp = displayTime != null ? relativeTime(displayTime) : '—';
+        final imageUrl = _unsplashPreviewUrl(id: id, topic: title);
+        return _RecentSessionCard(
+          imageUrl: imageUrl,
+          title: title,
+          timestamp: timestamp,
+          onTap: id.isEmpty ? null : () => _openLesson(id),
+          onMenuSelected: (value) {
+            switch (value) {
+              case _SessionMenuAction.rename:
+                _renameLessonDialog(lesson);
+                break;
+              case _SessionMenuAction.delete:
+                _deleteLesson(lesson);
+                break;
+              case _SessionMenuAction.share:
+                _shareLessonComingSoon();
+                break;
+            }
+          },
         );
-      }).toList(),
+      },
     );
   }
 
   String _unsplashPreviewUrl({required String id, required String topic}) {
-    const photos = <String>[
-      'https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1513258496099-48168024aec0?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1434030216411-0b793f4b4173?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
-      'https://images.unsplash.com/photo-1509062522246-3755977927d7?auto=format&fit=crop&w=1200&q=80',
-    ];
-    final seed = (id.isNotEmpty ? id : topic).hashCode.abs();
-    return photos[seed % photos.length];
+    final query = Uri.encodeComponent(
+      topic.trim().isEmpty ? 'education learning' : topic.trim(),
+    );
+    final sig = (id.isNotEmpty ? id : topic).hashCode.abs();
+    // Unsplash source endpoint with topic query and unique sig to reflect title
+    // and avoid repeating the same image across sessions.
+    return 'https://source.unsplash.com/800x600/?$query&sig=$sig';
   }
 
   DateTime? _parseDate(dynamic value) {
@@ -483,18 +634,22 @@ class _StartButton extends StatelessWidget {
   }
 }
 
+enum _SessionMenuAction { rename, delete, share }
+
 class _RecentSessionCard extends StatelessWidget {
   const _RecentSessionCard({
     required this.imageUrl,
     required this.title,
     required this.timestamp,
     required this.onTap,
+    required this.onMenuSelected,
   });
 
   final String imageUrl;
   final String title;
   final String timestamp;
   final VoidCallback? onTap;
+  final ValueChanged<_SessionMenuAction> onMenuSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -504,107 +659,133 @@ class _RecentSessionCard extends StatelessWidget {
         color: AppColors.surface,
         child: InkWell(
           onTap: onTap,
-          child: AspectRatio(
-            aspectRatio: 16 / 10,
-            child: Stack(
-              fit: StackFit.expand,
-              children: <Widget>[
-                Image.network(
-                  imageUrl,
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => Container(
+          child: Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  color: AppColors.surfaceHigh,
+                  alignment: Alignment.center,
+                  child: const ClasrumIcon(
+                    ClasrumIconKind.notes,
+                    size: 28,
+                    color: AppColors.muted,
+                  ),
+                ),
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
                     color: AppColors.surfaceHigh,
                     alignment: Alignment.center,
-                    child: const ClasrumIcon(
-                      ClasrumIconKind.notes,
-                      size: 28,
-                      color: AppColors.muted,
+                    child: const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
                     ),
+                  );
+                },
+              ),
+              // From mid-card downwards: transparent to very dark,
+              // making the bottom ~30% noticeably darker.
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    stops: const <double>[0.0, 0.45, 0.7, 1.0],
+                    colors: <Color>[
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.10),
+                      Colors.black.withValues(alpha: 0.55),
+                      Colors.black.withValues(alpha: 0.85),
+                    ],
                   ),
-                  loadingBuilder: (context, child, loadingProgress) {
-                    if (loadingProgress == null) return child;
-                    return Container(
-                      color: AppColors.surfaceHigh,
-                      alignment: Alignment.center,
-                      child: const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Material(
+                  color: Colors.black.withValues(alpha: 0.25),
+                  shape: const CircleBorder(),
+                  child: PopupMenuButton<_SessionMenuAction>(
+                    tooltip: 'Session options',
+                    icon: const ClasrumIcon(
+                      ClasrumIconKind.moreOptions,
+                      size: 18,
+                      color: AppColors.white,
+                    ),
+                    onSelected: onMenuSelected,
+                    color: AppColors.surfaceHigh,
+                    itemBuilder: (context) => const <PopupMenuEntry<_SessionMenuAction>>[
+                      PopupMenuItem<_SessionMenuAction>(
+                        value: _SessionMenuAction.rename,
+                        child: Text('Rename'),
                       ),
-                    );
-                  },
-                ),
-                Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: <Color>[
-                        Colors.black.withValues(alpha: 0.05),
-                        Colors.black.withValues(alpha: 0.20),
-                        Colors.black.withValues(alpha: 0.55),
-                      ],
-                    ),
+                      PopupMenuItem<_SessionMenuAction>(
+                        value: _SessionMenuAction.delete,
+                        child: Text('Delete'),
+                      ),
+                      PopupMenuItem<_SessionMenuAction>(
+                        value: _SessionMenuAction.share,
+                        child: Text('Share'),
+                      ),
+                    ],
                   ),
                 ),
-                Align(
-                  alignment: Alignment.bottomCenter,
-                  child: FractionallySizedBox(
-                    heightFactor: 0.2,
-                    widthFactor: 1,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.45),
-                        border: Border(
-                          top: BorderSide(
-                            color: AppColors.border.withValues(alpha: 0.20),
-                          ),
+              ),
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                height: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              timestamp,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: AppColors.white.withValues(alpha: 0.85),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      child: Row(
-                        children: <Widget>[
-                          Expanded(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                Text(
-                                  title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: AppColors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  timestamp,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: AppColors.muted,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          const ClasrumIcon(
-                            ClasrumIconKind.chevronRight,
-                            size: 16,
-                            color: AppColors.white,
-                          ),
-                        ],
+                      const SizedBox(width: 6),
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 2),
+                        child: ClasrumIcon(
+                          ClasrumIconKind.chevronRight,
+                          size: 16,
+                          color: AppColors.white,
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
