@@ -14,6 +14,8 @@ enum ClasrumIconKind {
   microphone,
   pause,
   resume,
+  play,
+  camera,
   endLesson,
   settings,
   upgradePro,
@@ -154,6 +156,12 @@ class _ClasrumIconPainter extends CustomPainter {
         break;
       case ClasrumIconKind.resume:
         _resume(canvas, s, stroke, fill);
+        break;
+      case ClasrumIconKind.play:
+        _resume(canvas, s, stroke, fill);
+        break;
+      case ClasrumIconKind.camera:
+        _camera(canvas, s, stroke);
         break;
       case ClasrumIconKind.endLesson:
         _endLesson(canvas, s, stroke);
@@ -551,6 +559,21 @@ class _ClasrumIconPainter extends CustomPainter {
     for (final x in [0.38, 0.48, 0.58]) {
       canvas.drawLine(Offset(s * x, s * 0.4), Offset(s * x, s * 0.26), p);
     }
+  }
+
+  void _camera(Canvas canvas, double s, Paint p) {
+    final body = RRect.fromRectAndRadius(
+      Rect.fromLTWH(s * 0.18, s * 0.32, s * 0.64, s * 0.42),
+      Radius.circular(s * 0.08),
+    );
+    canvas.drawRRect(body, p);
+    final hump = Path()
+      ..moveTo(s * 0.36, s * 0.32)
+      ..lineTo(s * 0.42, s * 0.24)
+      ..lineTo(s * 0.58, s * 0.24)
+      ..lineTo(s * 0.64, s * 0.32);
+    canvas.drawPath(hump, p);
+    canvas.drawCircle(Offset(s * 0.5, s * 0.53), s * 0.12, p);
   }
 
   @override

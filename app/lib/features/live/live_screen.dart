@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:record/record.dart';
 
@@ -7,13 +11,13 @@ import '../../blackboard/blackboard_view.dart';
 import '../../blackboard/model/board_document.dart';
 import '../../blackboard/model/board_event.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
-import '../../core/formatters.dart';
 import '../../core/theme.dart';
 import '../../core/widgets/clasrum_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../services/realtime_client.dart';
+import 'ai_audio_playback.dart';
 
-/// Live classroom screen: premium realtime teaching surface.
+/// Live classroom screen: immersive full-screen blackboard experience.
 class LiveScreen extends StatefulWidget {
   const LiveScreen({super.key, required this.client});
 
@@ -23,32 +27,74 @@ class LiveScreen extends StatefulWidget {
   State<LiveScreen> createState() => _LiveScreenState();
 }
 
-class _LiveScreenState extends State<LiveScreen> {
+enum _MicPhase { idle, listening, submitting }
+
+class _LiveScreenState extends State<LiveScreen>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   String? _lessonId;
-  bool _micOpen = false;
   bool _connecting = false;
   String? _error;
-  Map<String, dynamic>? _lessonDetail;
 
   final AudioRecorder _recorder = AudioRecorder();
-  final List<Map<String, dynamic>> _transcript = [];
-  bool _showTranscript = false;
+  StreamSubscription<Uint8List>? _audioStreamSub;
+  StreamSubscription<Amplitude>? _amplitudeSub;
+  bool _speechDetected = false;
+  bool _submittingTurn = false;
+  DateTime? _speechStartedAt;
+  DateTime? _lastVoiceAt;
+  int _capturedBytes = 0;
+  Timer? _vadTimer;
+  final List<double> _waveLevels = List<double>.filled(18, 0.08);
+
+  bool _paused = false;
+  _MicPhase _micPhase = _MicPhase.idle;
+
+  bool _cameraOpening = false;
+  bool _cameraActive = false;
+  bool _imageSubmitting = false;
+  CameraController? _cameraController;
+  String? _cameraError;
 
   late final BlackboardController _boardController;
+  late final AnimationController _pulseController;
+  late final AnimationController _connectingController;
+  late final AiAudioPlaybackController _audioPlayback;
 
   StreamSubscription<ConnectionState>? _connSub;
   StreamSubscription<String>? _errSub;
   StreamSubscription<RealtimeMessage>? _msgSub;
 
+  static const Duration _silenceThreshold = Duration(milliseconds: 1200);
+  static const Duration _maxListeningDuration = Duration(seconds: 20);
+  static const double _speechDbThreshold = -38;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _boardController = BlackboardController();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _connectingController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+    _audioPlayback = AiAudioPlaybackController();
     _lessonId = widget.client.lessonId;
     _connecting = widget.client.state == ConnectionState.connecting;
 
     _connSub = widget.client.connectionState.listen((state) {
       if (!mounted) return;
+      if (state == ConnectionState.disconnected ||
+          state == ConnectionState.error ||
+          state == ConnectionState.interrupted) {
+        unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
+        if (state != ConnectionState.interrupted) {
+          _paused = false;
+        }
+      }
       setState(() {
         _lessonId ??= widget.client.lessonId;
         switch (state) {
@@ -74,6 +120,45 @@ class _LiveScreenState extends State<LiveScreen> {
     _msgSub = widget.client.messages.listen(_handleMessage);
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _vadTimer?.cancel();
+    unawaited(_connSub?.cancel());
+    unawaited(_errSub?.cancel());
+    unawaited(_msgSub?.cancel());
+    unawaited(_stopMic(discard: true, silent: true));
+    unawaited(_disposeCamera());
+    unawaited(_audioPlayback.reset(endState: AiPlaybackState.idle));
+    _audioPlayback.dispose();
+    _pulseController.dispose();
+    _connectingController.dispose();
+    _boardController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      // Keep session/board intact; stop mic capture to avoid leaving it active.
+      if (_micPhase == _MicPhase.listening) {
+        unawaited(_stopMic(discard: true, silent: true));
+      }
+      // Avoid background playback surprises; preserve board/session/realtime state.
+      if (_audioPlayback.state == AiPlaybackState.playing ||
+          _audioPlayback.state == AiPlaybackState.buffering) {
+        unawaited(_audioPlayback.pause());
+        if (mounted) {
+          setState(() => _paused = true);
+        } else {
+          _paused = true;
+        }
+      }
+    }
+  }
+
   void _handleMessage(RealtimeMessage message) {
     if (!mounted) return;
     setState(() {
@@ -92,29 +177,35 @@ class _LiveScreenState extends State<LiveScreen> {
       case RealtimeMessageType.boardEvents:
         _applyBoardEvents(message.payload);
         break;
-      case RealtimeMessageType.transcriptEntry:
-        if (!mounted) return;
-        setState(() {
-          final entry = message.payload['entry'] ?? message.payload;
-          if (entry is Map) {
-            _transcript.insert(0, Map<String, dynamic>.from(entry));
-          }
-        });
-        break;
       case RealtimeMessageType.lessonState:
-        if (!mounted) return;
-        setState(() {
-          final lesson = message.payload['lesson'];
-          if (lesson is Map<String, dynamic>) {
-            _lessonDetail = lesson;
-          } else if (lesson is Map) {
-            _lessonDetail = Map<String, dynamic>.from(lesson);
-          }
-        });
+        // Lesson metadata updates are ignored by the minimal classroom UI.
+        break;
+      case RealtimeMessageType.teacherState:
+        // Teacher state is reflected implicitly by streamed audio/playback.
+        break;
+      case RealtimeMessageType.audioDelta:
+        _handleAudioDelta(message);
+        break;
+      case RealtimeMessageType.audioDone:
+        _audioPlayback.markDone(
+          responseId: _responseIdFromPayload(message.payload),
+        );
+        break;
+      case RealtimeMessageType.audioTruncated:
+        unawaited(_audioPlayback.interrupt(
+          interruptedResponseId: _responseIdFromPayload(message.payload),
+          keepNewer: true,
+        ));
         break;
       case RealtimeMessageType.sessionEnded:
-        if (!mounted) return;
-        setState(() => _error = 'Lesson ended.');
+        unawaited(_audioPlayback.reset(endState: AiPlaybackState.completed));
+        setState(() {
+          _error = 'Lesson ended.';
+        });
+        break;
+      case RealtimeMessageType.sessionInterrupted:
+        unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
+        unawaited(_stopMic(discard: true, silent: true));
         break;
       default:
         break;
@@ -122,10 +213,6 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   void _applySessionReady(Map<String, dynamic> payload) {
-    final lesson = payload['lesson'];
-    if (lesson is Map) {
-      setState(() => _lessonDetail = Map<String, dynamic>.from(lesson));
-    }
     final board = payload['board'];
     if (board is Map<String, dynamic>) {
       _applyBoardEnvelope(board);
@@ -174,186 +261,715 @@ class _LiveScreenState extends State<LiveScreen> {
     if (events.isNotEmpty) _boardController.enqueueAll(events);
   }
 
-  @override
-  void dispose() {
-    unawaited(_connSub?.cancel());
-    unawaited(_errSub?.cancel());
-    unawaited(_msgSub?.cancel());
-    unawaited(_stopMic());
-    _boardController.dispose();
-    super.dispose();
+  void _handleAudioDelta(RealtimeMessage message) {
+    // During student mic turn, ignore incoming tutor audio for the interrupted turn.
+    if (_micPhase != _MicPhase.idle) return;
+    unawaited(_enqueueAudioDelta(message));
   }
 
-  Future<void> _toggleMic() async {
-    if (_micOpen) {
-      await _stopMic();
-    } else {
-      await _startMic();
-    }
-  }
-
-  Future<void> _startMic() async {
-    if (_lessonId == null) return;
+  Future<void> _enqueueAudioDelta(RealtimeMessage message) async {
+    final data = message.audioData;
+    if (data == null || data.isEmpty) return;
     try {
-      await _recorder.start(const RecordConfig(), path: 'classroom.m4a');
-      setState(() => _micOpen = true);
-      unawaited(widget.client.audioStart());
-      _captureLoop();
+      if (!_paused) {
+        // Ensure playback is enabled for incoming stream (safe to call repeatedly).
+        await _audioPlayback.resume();
+      }
+      await _audioPlayback.enqueueDelta(
+        base64Pcm16: data,
+        sampleRate: message.audioSampleRate,
+        sequence: message.audioSequence,
+        responseId: _responseIdFromPayload(message.payload),
+      );
+      if (_paused) {
+        // Keep buffered safely while preserving playback position/state.
+        await _audioPlayback.pause();
+      }
     } catch (_) {
-      setState(() => _error = 'Microphone access failed.');
+      // Malformed frames/playback errors must not crash the classroom.
     }
   }
 
-  Future<void> _stopMic() async {
-    try {
-      await _recorder.stop();
-    } catch (_) {}
-    if (mounted) setState(() => _micOpen = false);
-    await widget.client.audioStop();
+  int? _responseIdFromPayload(Map<String, dynamic> payload) {
+    final value = payload['response_id'] ?? payload['responseId'];
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
-  void _captureLoop() async {
-    while (_micOpen && mounted) {
-      await Future<void>.delayed(const Duration(seconds: 1));
-      if (!_micOpen) break;
-    }
-  }
+  ConnectionState get _connectionState => widget.client.state;
 
-  Future<void> _endLesson() async {
-    await widget.client.endSession();
-    if (!mounted) return;
-    Navigator.of(context).maybePop(true);
-  }
-
-  String get _topic {
-    final t = _lessonDetail?['topic'] as String?;
-    if (t != null && t.trim().isNotEmpty) return t.trim();
-    return 'Live Tutorial';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      body: SafeArea(
+  Future<void> _confirmExit() async {
+    final shouldLeave = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.55),
+      builder: (context) => GlassModal(
         child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            _buildHeader(context),
-            if (_error != null) _buildErrorBanner(),
-            Expanded(child: _buildBody(context)),
+            const Text(
+              'Leave classroom?',
+              style: TextStyle(
+                color: AppColors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'You can return to this lesson later. Your board and session state stay intact.',
+              style: TextStyle(color: AppColors.muted, fontSize: 14, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: SecondaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(false),
+                    label: 'Stay',
+                    compact: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: PrimaryActionButton(
+                    onPressed: () => Navigator.of(context).pop(true),
+                    label: 'Leave',
+                    compact: true,
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
+    if (shouldLeave == true && mounted) {
+      await _stopMic(discard: true, silent: true);
+      await _audioPlayback.reset(endState: AiPlaybackState.completed);
+      await widget.client.disconnect();
+      if (mounted) Navigator.of(context).maybePop(true);
+    }
   }
 
-  Widget _buildHeader(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+  Future<void> _togglePause() async {
+    if (_micPhase == _MicPhase.listening || _submittingTurn) return;
+    final nextPaused = !_paused;
+    setState(() {
+      _paused = nextPaused;
+    });
+    if (nextPaused) {
+      await _audioPlayback.pause();
+    } else {
+      await _audioPlayback.resume();
+    }
+  }
+
+  Future<void> _onMicPressed() async {
+    if (_connecting || _submittingTurn) return;
+    if (_micPhase == _MicPhase.listening) {
+      await _stopMic(discard: true, silent: false);
+      return;
+    }
+    await _startListening();
+  }
+
+  Future<void> _startListening() async {
+    if (_lessonId == null || _micPhase != _MicPhase.idle || _submittingTurn) {
+      return;
+    }
+    if (_cameraActive || _cameraOpening) return;
+
+    try {
+      final hasPermission = await _recorder.hasPermission();
+      if (!hasPermission) {
+        if (!mounted) return;
+        setState(() => _error = 'Microphone permission is required to speak.');
+        return;
+      }
+
+      await widget.client.interrupt();
+      await _audioPlayback.interrupt(keepNewer: true);
+      setState(() {
+        _micPhase = _MicPhase.listening;
+        _speechDetected = false;
+        _capturedBytes = 0;
+        _speechStartedAt = DateTime.now();
+        _lastVoiceAt = null;
+        _error = null;
+        _paused = false;
+        for (var i = 0; i < _waveLevels.length; i++) {
+          _waveLevels[i] = 0.08;
+        }
+      });
+
+      await widget.client.audioStart();
+      final stream = await _recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 16000,
+          numChannels: 1,
+          autoGain: true,
+          echoCancel: true,
+          noiseSuppress: true,
+        ),
+      );
+      _audioStreamSub = stream.listen(
+        (chunk) {
+          if (!mounted || _micPhase != _MicPhase.listening) return;
+          _capturedBytes += chunk.length;
+          widget.client.sendAudioFrame(Uint8List.fromList(chunk));
+          _updateWaveformFromPcm(chunk);
+        },
+        onError: (_) {
+          if (!mounted) return;
+          unawaited(_stopMic(discard: true, silent: false));
+          setState(() => _error = 'Microphone capture failed.');
+        },
+        cancelOnError: true,
+      );
+
+      _amplitudeSub = _recorder
+          .onAmplitudeChanged(const Duration(milliseconds: 120))
+          .listen((amp) {
+        if (!mounted || _micPhase != _MicPhase.listening) return;
+        final now = DateTime.now();
+        final speaking = amp.current > _speechDbThreshold;
+        if (speaking) {
+          _speechDetected = true;
+          _lastVoiceAt = now;
+        }
+        _evaluateVad(now);
+      });
+
+      _vadTimer?.cancel();
+      _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (!mounted || _micPhase != _MicPhase.listening) return;
+        _evaluateVad(DateTime.now());
+      });
+    } catch (_) {
+      await _stopMic(discard: true, silent: true);
+      if (!mounted) return;
+      setState(() {
+        _micPhase = _MicPhase.idle;
+        _error = 'Microphone access failed.';
+      });
+    }
+  }
+
+  void _updateWaveformFromPcm(Uint8List chunk) {
+    if (chunk.length < 2) return;
+    var sumSq = 0.0;
+    var count = 0;
+    final byteData = chunk.buffer.asByteData();
+    for (var i = 0; i + 1 < chunk.length; i += 2) {
+      final sample = byteData.getInt16(i, Endian.little);
+      final norm = sample / 32768.0;
+      sumSq += norm * norm;
+      count++;
+      if (count > 512) break;
+    }
+    if (count == 0) return;
+    final rms = math.sqrt(sumSq / count);
+    final level = (rms * 6).clamp(0.08, 1.0);
+    if (!mounted || _micPhase != _MicPhase.listening) return;
+    setState(() {
+      _waveLevels.removeAt(0);
+      _waveLevels.add(level);
+    });
+  }
+
+  void _evaluateVad(DateTime now) {
+    if (_micPhase != _MicPhase.listening || _submittingTurn) return;
+    final started = _speechStartedAt;
+    if (started == null) return;
+
+    if (now.difference(started) >= _maxListeningDuration) {
+      unawaited(_finishListening());
+      return;
+    }
+    if (!_speechDetected) return;
+    final last = _lastVoiceAt;
+    if (last == null) return;
+    if (now.difference(last) >= _silenceThreshold) {
+      unawaited(_finishListening());
+    }
+  }
+
+  Future<void> _finishListening() async {
+    if (_micPhase != _MicPhase.listening || _submittingTurn) return;
+    if (!_speechDetected || _capturedBytes < 800) {
+      await _stopMic(discard: true, silent: false);
+      return;
+    }
+    _submittingTurn = true;
+    if (mounted) {
+      setState(() => _micPhase = _MicPhase.submitting);
+    }
+    try {
+      await _stopMic(discard: false, silent: true);
+      if (mounted) {
+        setState(() {
+          _micPhase = _MicPhase.idle;
+        });
+      }
+    } finally {
+      _submittingTurn = false;
+    }
+  }
+
+  Future<void> _stopMic({required bool discard, required bool silent}) async {
+    _vadTimer?.cancel();
+    _vadTimer = null;
+    await _audioStreamSub?.cancel();
+    _audioStreamSub = null;
+    await _amplitudeSub?.cancel();
+    _amplitudeSub = null;
+    try {
+      if (await _recorder.isRecording()) {
+        await _recorder.stop();
+      }
+    } catch (_) {}
+
+    if (_micPhase == _MicPhase.listening || _micPhase == _MicPhase.submitting) {
+      if (!discard) {
+        await widget.client.audioStop();
+      }
+    }
+
+    if (mounted && !silent) {
+      setState(() {
+        if (_micPhase != _MicPhase.submitting) {
+          _micPhase = _MicPhase.idle;
+        }
+        _speechDetected = false;
+        _capturedBytes = 0;
+        _speechStartedAt = null;
+        _lastVoiceAt = null;
+      });
+    } else {
+      _speechDetected = false;
+      _capturedBytes = 0;
+      _speechStartedAt = null;
+      _lastVoiceAt = null;
+      if (mounted && discard && _micPhase == _MicPhase.listening) {
+        setState(() => _micPhase = _MicPhase.idle);
+      }
+    }
+  }
+
+  Future<void> _openCamera() async {
+    if (_cameraOpening || _cameraActive || _imageSubmitting) return;
+    if (_micPhase == _MicPhase.listening) return;
+    setState(() {
+      _cameraOpening = true;
+      _cameraError = null;
+    });
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        throw StateError('No camera available on this device.');
+      }
+      final camera = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      final controller = CameraController(
+        camera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      await controller.initialize();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _cameraController = controller;
+        _cameraOpening = false;
+        _cameraActive = true;
+      });
+    } catch (_) {
+      await _disposeCamera();
+      if (!mounted) return;
+      setState(() {
+        _cameraOpening = false;
+        _cameraActive = false;
+        _cameraError = 'Camera is unavailable.';
+      });
+    }
+  }
+
+  Future<void> _disposeCamera() async {
+    final controller = _cameraController;
+    _cameraController = null;
+    if (controller != null) {
+      try {
+        await controller.dispose();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _closeCamera() async {
+    if (_imageSubmitting) return;
+    await _disposeCamera();
+    if (!mounted) return;
+    setState(() {
+      _cameraActive = false;
+      _cameraOpening = false;
+      _cameraError = null;
+    });
+  }
+
+  Future<void> _captureImage() async {
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized || _imageSubmitting) {
+      return;
+    }
+    try {
+      await controller.takePicture();
+      if (!mounted) return;
+      setState(() {
+        _imageSubmitting = true;
+      });
+      // No existing app/realtime image-input mechanism is available in this build.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (!mounted) return;
+      setState(() => _imageSubmitting = false);
+      await _closeCamera();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppColors.surfaceHigh,
+          content: const Text(
+            'Photo captured. Image sharing is not supported by the current lesson session.',
+            style: TextStyle(color: AppColors.white),
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _imageSubmitting = false;
+        _cameraError = 'Could not capture image.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = _connectionState == ConnectionState.connected;
+    final errored = _connectionState == ConnectionState.error;
+    final reconnecting = _connecting ||
+        _connectionState == ConnectionState.connecting ||
+        _connectionState == ConnectionState.interrupted;
+
+    return Scaffold(
+      backgroundColor: AppColors.background,
+      body: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          // Blackboard remains mounted at all times.
+          const Positioned.fill(child: ColoredBox(color: Color(0xFF171817))),
+          Positioned.fill(child: BlackboardView(controller: _boardController)),
+
+          if (_error != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              top: MediaQuery.of(context).padding.top + 64,
+              child: _TopErrorBanner(
+                message: _error!,
+                onDismiss: () => setState(() => _error = null),
+              ),
+            ),
+
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 12,
+            left: 12,
+            child: _FloatingCircleButton(
+              tooltip: 'Exit classroom',
+              onPressed: _confirmExit,
+              background: AppColors.surface.withValues(alpha: 0.45),
+              borderColor: AppColors.border.withValues(alpha: 0.55),
+              child: const ClasrumIcon(
+                ClasrumIconKind.close,
+                size: 18,
+                color: AppColors.white,
+              ),
+            ),
+          ),
+
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 12,
+            right: 12,
+            child: _ConnectionIndicator(
+              connected: connected,
+              connecting: reconnecting,
+              errored: errored || _connectionState == ConnectionState.disconnected,
+              animation: _connectingController,
+            ),
+          ),
+
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: MediaQuery.of(context).padding.bottom + 16,
+            child: IgnorePointer(
+              ignoring: _cameraOpening,
+              child: Center(
+                child: _BottomControls(
+                  paused: _paused,
+                  micPhase: _micPhase,
+                  connecting: _connecting,
+                  onPauseToggle: _togglePause,
+                  onMicPressed: _onMicPressed,
+                  onCameraPressed: _openCamera,
+                  pulse: _pulseController,
+                  waveLevels: _waveLevels,
+                ),
+              ),
+            ),
+          ),
+
+          if (_cameraOpening || _cameraActive)
+            Positioned.fill(
+              child: _CameraOverlay(
+                controller: _cameraController,
+                opening: _cameraOpening,
+                submitting: _imageSubmitting,
+                error: _cameraError,
+                onClose: _closeCamera,
+                onCapture: _captureImage,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TopErrorBanner extends StatelessWidget {
+  const _TopErrorBanner({required this.message, required this.onDismiss});
+
+  final String message;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassContainer(
+      radius: 14,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      blurSigma: 10,
+      backgroundOpacity: 0.45,
+      borderColor: AppColors.red.withValues(alpha: 0.45),
       child: Row(
         children: <Widget>[
-          GlassIconButton(
-            icon: ClasrumIconKind.back,
-            tooltip: 'Back',
-            size: 40,
-            iconSize: 18,
-            blurSigma: 8,
-            backgroundOpacity: 0.4,
-            onPressed: () => Navigator.of(context).maybePop(),
-          ),
-          const SizedBox(width: 12),
+          const ClasrumIcon(ClasrumIconKind.info, size: 16, color: AppColors.muted),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
-              _topic,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+              message,
+              style: const TextStyle(color: AppColors.white, fontSize: 12, height: 1.3),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: onDismiss,
+            behavior: HitTestBehavior.opaque,
+            child: const Padding(
+              padding: EdgeInsets.all(4),
+              child: ClasrumIcon(ClasrumIconKind.close, size: 16, color: AppColors.muted),
             ),
           ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildErrorBanner() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-      child: GlassContainer(
-        radius: 12,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        blurSigma: 6,
-        backgroundOpacity: 0.35,
-        borderColor: AppColors.red.withValues(alpha: 0.5),
-        child: Row(
-          children: <Widget>[
-            const ClasrumIcon(ClasrumIconKind.info, size: 16, color: AppColors.muted),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _error!,
-                style: const TextStyle(color: AppColors.muted, fontSize: 12),
+class _FloatingCircleButton extends StatelessWidget {
+  const _FloatingCircleButton({
+    required this.child,
+    required this.onPressed,
+    required this.tooltip,
+    required this.background,
+    required this.borderColor,
+    this.size = 40,
+  });
+
+  final Widget child;
+  final VoidCallback? onPressed;
+  final String tooltip;
+  final Color background;
+  final Color borderColor;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: ClipOval(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onPressed,
+              customBorder: const CircleBorder(),
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  color: background,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: borderColor),
+                ),
+                alignment: Alignment.center,
+                child: child,
               ),
             ),
-            GestureDetector(
-              onTap: () => setState(() => _error = null),
-              child: const ClasrumIcon(ClasrumIconKind.close, size: 16, color: AppColors.muted),
-            ),
-          ],
+          ),
         ),
       ),
     );
   }
+}
 
-  Widget _buildBody(BuildContext context) {
-    if (_connecting && _lessonId == null) {
-      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-    }
-    if (_lessonId == null) {
-      return const Center(
-        child: Text(
-          'Select a lesson from Home to start.',
-          style: TextStyle(color: AppColors.muted),
-        ),
-      );
-    }
-    return Stack(
-      children: <Widget>[
-        // Blackboard — main focus
-        Positioned.fill(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 88),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(18),
-              child: Container(
-                color: const Color(0xFF171817),
-                child: BlackboardView(controller: _boardController),
-              ),
+class _ConnectionIndicator extends StatelessWidget {
+  const _ConnectionIndicator({
+    required this.connected,
+    required this.connecting,
+    required this.errored,
+    required this.animation,
+  });
+
+  final bool connected;
+  final bool connecting;
+  final bool errored;
+  final Animation<double> animation;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color dot = connected
+        ? const Color(0xFF3CCB7F)
+        : errored
+            ? AppColors.red
+            : AppColors.muted;
+
+    return Semantics(
+      label: connected
+          ? 'Connected'
+          : connecting
+              ? 'Connecting'
+              : 'Disconnected',
+      child: ClipOval(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: AppColors.surface.withValues(alpha: 0.45),
+              shape: BoxShape.circle,
+              border: Border.all(color: AppColors.border.withValues(alpha: 0.55)),
             ),
+            alignment: Alignment.center,
+            child: connecting && !connected
+                ? AnimatedBuilder(
+                    animation: animation,
+                    builder: (context, _) {
+                      final t = animation.value;
+                      return SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          value: 0.25 + (t * 0.55),
+                          color: AppColors.white.withValues(alpha: 0.85),
+                          backgroundColor: AppColors.white.withValues(alpha: 0.15),
+                        ),
+                      );
+                    },
+                  )
+                : Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: dot,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
           ),
         ),
-        // Subtle transcript toggle + panel
-        Positioned(
-          right: 16,
-          top: 8,
-          child: _TranscriptPanel(
-            expanded: _showTranscript,
-            entries: _transcript,
-            onToggle: () => setState(() => _showTranscript = !_showTranscript),
+      ),
+    );
+  }
+}
+
+class _BottomControls extends StatelessWidget {
+  const _BottomControls({
+    required this.paused,
+    required this.micPhase,
+    required this.connecting,
+    required this.onPauseToggle,
+    required this.onMicPressed,
+    required this.onCameraPressed,
+    required this.pulse,
+    required this.waveLevels,
+  });
+
+  final bool paused;
+  final _MicPhase micPhase;
+  final bool connecting;
+  final VoidCallback onPauseToggle;
+  final VoidCallback onMicPressed;
+  final VoidCallback onCameraPressed;
+  final Animation<double> pulse;
+  final List<double> waveLevels;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        _CircleControl(
+          tooltip: paused ? 'Resume' : 'Pause',
+          onPressed: micPhase == _MicPhase.listening ? null : onPauseToggle,
+          background: paused
+              ? AppColors.red.withValues(alpha: 0.92)
+              : AppColors.surface.withValues(alpha: 0.45),
+          borderColor: paused
+              ? AppColors.red.withValues(alpha: 0.7)
+              : AppColors.border.withValues(alpha: 0.55),
+          child: ClasrumIcon(
+            paused ? ClasrumIconKind.play : ClasrumIconKind.pause,
+            size: 20,
+            color: AppColors.white,
           ),
         ),
-        // Minimal controls
-        Positioned(
-          left: 12,
-          right: 12,
-          bottom: 12,
-          child: _ControlBar(
-            micOpen: _micOpen,
-            connecting: _connecting,
-            onToggleMic: _toggleMic,
-            onInterrupt: () => widget.client.interrupt(),
-            onEnd: _endLesson,
+        const SizedBox(width: 12),
+        _MicControl(
+          phase: micPhase,
+          enabled: !connecting,
+          onPressed: onMicPressed,
+          pulse: pulse,
+          waveLevels: waveLevels,
+        ),
+        const SizedBox(width: 12),
+        _CircleControl(
+          tooltip: 'Camera',
+          onPressed: micPhase == _MicPhase.listening ? null : onCameraPressed,
+          background: AppColors.surface.withValues(alpha: 0.45),
+          borderColor: AppColors.border.withValues(alpha: 0.55),
+          child: const ClasrumIcon(
+            ClasrumIconKind.camera,
+            size: 20,
+            color: AppColors.white,
           ),
         ),
       ],
@@ -361,104 +977,49 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 }
 
-class _ControlBar extends StatelessWidget {
-  const _ControlBar({
-    required this.micOpen,
-    required this.connecting,
-    required this.onToggleMic,
-    required this.onInterrupt,
-    required this.onEnd,
-  });
-
-  final bool micOpen;
-  final bool connecting;
-  final VoidCallback onToggleMic;
-  final VoidCallback onInterrupt;
-  final VoidCallback onEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassContainer(
-      radius: 20,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      blurSigma: 12,
-      backgroundOpacity: 0.45,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: <Widget>[
-          _ControlIcon(
-            icon: micOpen ? ClasrumIconKind.microphone : ClasrumIconKind.pause,
-            tooltip: micOpen ? 'Listening' : 'Speak',
-            active: micOpen,
-            onPressed: connecting ? null : onToggleMic,
-          ),
-          const SizedBox(width: 8),
-          _ControlIcon(
-            icon: ClasrumIconKind.interrupt,
-            tooltip: 'Interrupt',
-            onPressed: connecting ? null : onInterrupt,
-          ),
-          const SizedBox(width: 8),
-          _ControlIcon(
-            icon: ClasrumIconKind.endLesson,
-            tooltip: 'End lesson',
-            onPressed: connecting ? null : onEnd,
-            danger: true,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ControlIcon extends StatelessWidget {
-  const _ControlIcon({
-    required this.icon,
+class _CircleControl extends StatelessWidget {
+  const _CircleControl({
     required this.tooltip,
     required this.onPressed,
-    this.active = false,
-    this.danger = false,
+    required this.child,
+    required this.background,
+    required this.borderColor,
   });
 
-  final ClasrumIconKind icon;
   final String tooltip;
   final VoidCallback? onPressed;
-  final bool active;
-  final bool danger;
+  final Widget child;
+  final Color background;
+  final Color borderColor;
 
   @override
   Widget build(BuildContext context) {
-    final bg = active ? AppColors.blue : Colors.transparent;
-    final fg = active
-        ? AppColors.white
-        : (danger ? AppColors.muted : AppColors.white);
-    return Tooltip(
-      message: tooltip,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
-          child: InkWell(
-            onTap: onPressed,
-            borderRadius: BorderRadius.circular(14),
-            child: SizedBox(
-              width: 44,
-              height: 44,
-              child: Center(
-                child: AnimatedScale(
-                  duration: const Duration(milliseconds: 200),
-                  scale: active ? 1.0 : 0.98,
-                  child: ClasrumIcon(
-                    icon,
-                    size: 20,
-                    color: fg.withValues(alpha: onPressed == null ? 0.4 : 1),
+    final disabled = onPressed == null;
+    return Semantics(
+      button: true,
+      label: tooltip,
+      child: Tooltip(
+        message: tooltip,
+        child: ClipOval(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                color: background,
+                shape: BoxShape.circle,
+                border: Border.all(color: borderColor),
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: onPressed,
+                  customBorder: const CircleBorder(),
+                  child: Center(
+                    child: Opacity(opacity: disabled ? 0.45 : 1, child: child),
                   ),
                 ),
               ),
@@ -470,111 +1031,328 @@ class _ControlIcon extends StatelessWidget {
   }
 }
 
-class _TranscriptPanel extends StatelessWidget {
-  const _TranscriptPanel({
-    required this.expanded,
-    required this.entries,
-    required this.onToggle,
+class _MicControl extends StatelessWidget {
+  const _MicControl({
+    required this.phase,
+    required this.enabled,
+    required this.onPressed,
+    required this.pulse,
+    required this.waveLevels,
   });
 
-  final bool expanded;
-  final List<Map<String, dynamic>> entries;
-  final VoidCallback onToggle;
+  final _MicPhase phase;
+  final bool enabled;
+  final VoidCallback onPressed;
+  final Animation<double> pulse;
+  final List<double> waveLevels;
 
   @override
   Widget build(BuildContext context) {
-    if (!expanded) {
-      return GlassIconButton(
-        icon: ClasrumIconKind.transcript,
-        tooltip: 'Transcript',
-        size: 36,
-        iconSize: 18,
-        onPressed: onToggle,
-        blurSigma: 8,
-        backgroundOpacity: 0.35,
-      );
-    }
-    return SizedBox(
-      width: 260,
-      height: 220,
-      child: GlassContainer(
-        radius: 16,
-        padding: const EdgeInsets.all(10),
-        blurSigma: 10,
-        backgroundOpacity: 0.55,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Expanded(
-                  child: Text(
-                    'Transcript',
-                    style: TextStyle(
-                      color: AppColors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+    final listening = phase == _MicPhase.listening;
+    final submitting = phase == _MicPhase.submitting;
+    final bg = listening
+        ? AppColors.red.withValues(alpha: 0.95)
+        : submitting
+            ? AppColors.red.withValues(alpha: 0.75)
+            : AppColors.red.withValues(alpha: 0.92);
+
+    return Semantics(
+      button: true,
+      label: listening ? 'Listening' : 'Speak',
+      child: Tooltip(
+        message: listening ? 'Listening… tap to cancel' : 'Tap to speak',
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOutCubic,
+              width: 132,
+              height: 52,
+              decoration: BoxDecoration(
+                color: bg,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: AppColors.white.withValues(alpha: listening ? 0.12 : 0.08),
                 ),
-                InkWell(
-                  onTap: onToggle,
-                  borderRadius: BorderRadius.circular(12),
-                  child: const Padding(
-                    padding: EdgeInsets.all(4),
-                    child: ClasrumIcon(ClasrumIconKind.close, size: 16, color: AppColors.muted),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Expanded(
-              child: entries.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'Transcript appears here.',
-                        style:
-                            TextStyle(color: AppColors.muted, fontSize: 12),
-                      ),
-                    )
-                  : ListView.builder(
-                      reverse: false,
-                      itemCount: entries.length,
-                      itemBuilder: (context, index) {
-                        final entry = entries[index];
-                        final speaker = entry['speaker'] as String? ?? 'system';
-                        final text = entry['text'] as String? ?? '';
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                speakerLabel(speaker),
-                                style: const TextStyle(
-                                  color: AppColors.muted,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                text,
-                                style: const TextStyle(
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: enabled ? onPressed : null,
+                  borderRadius: BorderRadius.circular(999),
+                  child: Center(
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 180),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: listening
+                          ? _Waveform(
+                              key: const ValueKey<String>('wave'),
+                              levels: waveLevels,
+                              pulse: pulse,
+                            )
+                          : submitting
+                              ? SizedBox(
+                                  key: const ValueKey<String>('submitting'),
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: AppColors.white.withValues(alpha: 0.95),
+                                  ),
+                                )
+                              : const ClasrumIcon(
+                                  key: ValueKey<String>('mic'),
+                                  ClasrumIconKind.microphone,
+                                  size: 22,
                                   color: AppColors.white,
-                                  fontSize: 12,
-                                  height: 1.4,
                                 ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
                     ),
+                  ),
+                ),
+              ),
             ),
-          ],
+          ),
         ),
       ),
     );
+  }
+}
+
+class _Waveform extends StatelessWidget {
+  const _Waveform({super.key, required this.levels, required this.pulse});
+
+  final List<double> levels;
+  final Animation<double> pulse;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: pulse,
+      builder: (context, _) {
+        return SizedBox(
+          width: 84,
+          height: 22,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: List<Widget>.generate(levels.length, (i) {
+              final base = levels[i];
+              final wobble = 0.92 + (pulse.value * 0.16);
+              final h = (4 + (18 * base * wobble)).clamp(4.0, 22.0);
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 1.4),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 90),
+                  curve: Curves.easeOut,
+                  width: 2.6,
+                  height: h,
+                  decoration: BoxDecoration(
+                    color: AppColors.white.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              );
+            }),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CameraOverlay extends StatelessWidget {
+  const _CameraOverlay({
+    required this.controller,
+    required this.opening,
+    required this.submitting,
+    required this.error,
+    required this.onClose,
+    required this.onCapture,
+  });
+
+  final CameraController? controller;
+  final bool opening;
+  final bool submitting;
+  final String? error;
+  final VoidCallback onClose;
+  final VoidCallback onCapture;
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final bottomInset = media.padding.bottom;
+    final panelHeight = (media.size.height * 0.52).clamp(320.0, media.size.height * 0.7);
+
+    return Stack(
+      children: <Widget>[
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: submitting ? null : onClose,
+            behavior: HitTestBehavior.opaque,
+            child: Container(color: Colors.black.withValues(alpha: 0.28)),
+          ),
+        ),
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeOutCubic,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: panelHeight,
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: AppColors.surface.withValues(alpha: 0.72),
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(28)),
+                  border: Border.all(
+                    color: AppColors.border.withValues(alpha: 0.55),
+                  ),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomInset * 0.2),
+                    child: Column(
+                      children: <Widget>[
+                        Container(
+                          width: 36,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: AppColors.border.withValues(alpha: 0.7),
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: <Widget>[
+                            const Expanded(
+                              child: Text(
+                                'Camera',
+                                style: TextStyle(
+                                  color: AppColors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            _FloatingCircleButton(
+                              tooltip: 'Close camera',
+                              onPressed: submitting ? null : onClose,
+                              size: 34,
+                              background: AppColors.surface.withValues(alpha: 0.55),
+                              borderColor: AppColors.border.withValues(alpha: 0.55),
+                              child: const ClasrumIcon(
+                                ClasrumIconKind.close,
+                                size: 16,
+                                color: AppColors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(18),
+                            child: Container(
+                              color: Colors.black,
+                              child: _buildPreview(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        if (error != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              error!,
+                              style: const TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        SizedBox(
+                          height: 64,
+                          child: Center(
+                            child: GestureDetector(
+                              onTap: submitting || opening || controller == null
+                                  ? null
+                                  : onCapture,
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 180),
+                                width: 64,
+                                height: 64,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: AppColors.white,
+                                  border: Border.all(
+                                    color: AppColors.white.withValues(alpha: 0.35),
+                                    width: 4,
+                                  ),
+                                ),
+                                child: submitting
+                                    ? const Padding(
+                                        padding: EdgeInsets.all(18),
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2.4,
+                                          color: AppColors.background,
+                                        ),
+                                      )
+                                    : const SizedBox.shrink(),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPreview() {
+    if (opening) {
+      return const Center(
+        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.white),
+      );
+    }
+    final c = controller;
+    if (c == null || !c.value.isInitialized) {
+      return const Center(
+        child: Text(
+          'Camera preview unavailable',
+          style: TextStyle(color: AppColors.muted),
+        ),
+      );
+    }
+    final preview = CameraPreview(c);
+    if (submitting) {
+      return Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          preview,
+          Container(color: Colors.black.withValues(alpha: 0.25)),
+          const Center(
+            child: Text(
+              'Processing…',
+              style: TextStyle(color: AppColors.white, fontSize: 13),
+            ),
+          ),
+        ],
+      );
+    }
+    return preview;
   }
 }
