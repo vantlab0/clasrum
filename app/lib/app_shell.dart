@@ -112,11 +112,11 @@ class _FloatingNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Fixed container width = 3 equal slots.
-    const double slot = 72;
-    const double containerWidth = slot * 3; // 216
-    const double height = 60;
-    const double pad = 6;
+    // Fixed container width = 3 equal slots (scaled up 50%).
+    const double slot = 108;
+    const double containerWidth = slot * 3; // 324
+    const double height = 90;
+    const double pad = 9;
 
     return SizedBox(
       width: containerWidth,
@@ -240,9 +240,9 @@ class _NavButton extends StatelessWidget {
                           kind: item.icon,
                           selected: true,
                           color: color,
-                          size: 20,
+                          size: 28,
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 8),
                         Flexible(
                           child: Text(
                             item.label,
@@ -251,7 +251,7 @@ class _NavButton extends StatelessWidget {
                             softWrap: false,
                             style: const TextStyle(
                               color: AppColors.white,
-                              fontSize: 13,
+                              fontSize: 16,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -264,7 +264,7 @@ class _NavButton extends StatelessWidget {
                         kind: item.icon,
                         selected: false,
                         color: color,
-                        size: 22,
+                        size: 30,
                       ),
                     ),
             ),

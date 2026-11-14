@@ -11,7 +11,6 @@ import '../../core/theme.dart';
 import '../../core/widgets/clasrum_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../core/widgets/profile_menu.dart';
-import '../../core/widgets/progress_track.dart';
 import '../../main.dart';
 import '../../services/realtime_client.dart';
 
@@ -262,7 +261,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildTopicCard(BuildContext context) {
     return GlassContainer(
       radius: 22,
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 18),
       blurSigma: 12,
       backgroundOpacity: 0.42,
       child: Column(
@@ -270,8 +269,8 @@ class _HomeScreenState extends State<HomeScreen> {
         children: <Widget>[
           TextField(
             controller: _topicController,
-            minLines: 2,
-            maxLines: 4,
+            minLines: 3,
+            maxLines: 5,
             maxLength: 500,
             style: const TextStyle(color: AppColors.white, height: 1.4),
             decoration: InputDecoration(
@@ -398,75 +397,41 @@ class _HomeScreenState extends State<HomeScreen> {
       children: _lessons.take(8).map((lesson) {
         final id = lesson['id'] as String? ?? '';
         final topic = lesson['topic'] as String? ?? 'Untitled lesson';
-        final progress = (lesson['progress'] as num?)?.toDouble() ?? 0.0;
         final updatedAt = _parseDate(lesson['updated_at'] ?? lesson['created_at']);
-        final status = lesson['status'] as String? ?? '';
-        final subtitle = <String>[
-          if (updatedAt != null) relativeTime(updatedAt),
-          if (status.isNotEmpty) lessonStatusLabel(status),
-        ].join(' · ');
+        final timestamp = updatedAt != null ? relativeTime(updatedAt) : '—';
+        final imageUrl = _unsplashPreviewUrl(id: id, topic: topic);
+
         return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: GlassContainer(
-            radius: 18,
-            padding: EdgeInsets.zero,
-            blurSigma: 8,
-            backgroundOpacity: 0.32,
-            child: Material(
-              type: MaterialType.transparency,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(18),
-                onTap: id.isEmpty
-                    ? null
-                    : () {
-                        widget.storage.setLastLessonId(id);
-                        widget.onStartLesson(id);
-                      },
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-                  child: Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Text(
-                              topic,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppColors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              subtitle.isEmpty ? '—' : subtitle,
-                              style: const TextStyle(
-                                color: AppColors.muted,
-                                fontSize: 12,
-                              ),
-                            ),
-                            if (progress > 0) ...[
-                              const SizedBox(height: 8),
-                              ProgressTrack(value: progress, height: 4),
-                            ],
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      const ClasrumIcon(ClasrumIconKind.chevronRight,
-                          size: 14, color: AppColors.muted),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          padding: const EdgeInsets.only(bottom: 14),
+          child: _RecentSessionCard(
+            imageUrl: imageUrl,
+            title: topic,
+            timestamp: timestamp,
+            onTap: id.isEmpty
+                ? null
+                : () {
+                    widget.storage.setLastLessonId(id);
+                    widget.onStartLesson(id);
+                  },
           ),
         );
       }).toList(),
     );
+  }
+
+  String _unsplashPreviewUrl({required String id, required String topic}) {
+    const photos = <String>[
+      'https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1513258496099-48168024aec0?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1434030216411-0b793f4b4173?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
+      'https://images.unsplash.com/photo-1509062522246-3755977927d7?auto=format&fit=crop&w=1200&q=80',
+    ];
+    final seed = (id.isNotEmpty ? id : topic).hashCode.abs();
+    return photos[seed % photos.length];
   }
 
   DateTime? _parseDate(dynamic value) {
@@ -514,6 +479,135 @@ class _StartButton extends StatelessWidget {
                 ClasrumIcon(ClasrumIconKind.startLearning, size: 16, color: AppColors.white),
               ],
             ),
+    );
+  }
+}
+
+class _RecentSessionCard extends StatelessWidget {
+  const _RecentSessionCard({
+    required this.imageUrl,
+    required this.title,
+    required this.timestamp,
+    required this.onTap,
+  });
+
+  final String imageUrl;
+  final String title;
+  final String timestamp;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Material(
+        color: AppColors.surface,
+        child: InkWell(
+          onTap: onTap,
+          child: AspectRatio(
+            aspectRatio: 16 / 10,
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                Image.network(
+                  imageUrl,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) => Container(
+                    color: AppColors.surfaceHigh,
+                    alignment: Alignment.center,
+                    child: const ClasrumIcon(
+                      ClasrumIconKind.notes,
+                      size: 28,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                  loadingBuilder: (context, child, loadingProgress) {
+                    if (loadingProgress == null) return child;
+                    return Container(
+                      color: AppColors.surfaceHigh,
+                      alignment: Alignment.center,
+                      child: const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    );
+                  },
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: <Color>[
+                        Colors.black.withValues(alpha: 0.05),
+                        Colors.black.withValues(alpha: 0.20),
+                        Colors.black.withValues(alpha: 0.55),
+                      ],
+                    ),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: FractionallySizedBox(
+                    heightFactor: 0.2,
+                    widthFactor: 1,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        border: Border(
+                          top: BorderSide(
+                            color: AppColors.border.withValues(alpha: 0.20),
+                          ),
+                        ),
+                      ),
+                      child: Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Text(
+                                  title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  timestamp,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.muted,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          const ClasrumIcon(
+                            ClasrumIconKind.chevronRight,
+                            size: 16,
+                            color: AppColors.white,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

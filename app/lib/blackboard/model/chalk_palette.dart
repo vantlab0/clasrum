@@ -5,12 +5,12 @@ import 'dart:ui' show Color;
 class ChalkPalette {
   const ChalkPalette._();
 
-  /// Matte blackboard background (CONTRACTS fixture `board_background`).
-  static const Color board = Color(0xFF171817);
+  /// Matte blackboard background (true dark).
+  static const Color board = Color(0xFF000000);
 
-  /// Slightly lighter frame/edge color around the board.
-  static const Color frame = Color(0xFF2C2E2B);
-  static const Color frameInner = Color(0xFF101110);
+  /// Frame/edge color around the board (kept for compatibility; not drawn).
+  static const Color frame = Color(0xFF000000);
+  static const Color frameInner = Color(0xFF000000);
 
   static const Color primary = Color(0xFFF2F0E8);
   static const Color secondary = Color(0xFFA8A79E);

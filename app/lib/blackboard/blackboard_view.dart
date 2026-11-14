@@ -82,14 +82,9 @@ class _BoardPainter extends CustomPainter {
   void paint(ui.Canvas canvas, ui.Size size) {
     final rect = transform.contentRect;
 
-    // 1. background — matte chalkboard (#171817)
+    // 1. background — true black board (no border frame)
     final bgPaint = Paint()..color = ChalkPalette.board;
     canvas.drawRect(rect, bgPaint);
-    final framePaint = Paint()
-      ..color = ChalkPalette.frame
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-    canvas.drawRect(rect.deflate(1), framePaint);
 
     // Layer order: 2 text, 3 equation, 4 drawing, 5 graph, 6 annotation.
     // Within a level, insertion order = z-order.

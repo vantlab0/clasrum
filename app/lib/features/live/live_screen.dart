@@ -57,7 +57,6 @@ class _LiveScreenState extends State<LiveScreen>
 
   late final BlackboardController _boardController;
   late final AnimationController _pulseController;
-  late final AnimationController _connectingController;
   late final AiAudioPlaybackController _audioPlayback;
 
   StreamSubscription<ConnectionState>? _connSub;
@@ -77,10 +76,6 @@ class _LiveScreenState extends State<LiveScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
-    _connectingController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat();
     _audioPlayback = AiAudioPlaybackController();
     _lessonId = widget.client.lessonId;
     _connecting = widget.client.state == ConnectionState.connecting;
@@ -132,7 +127,6 @@ class _LiveScreenState extends State<LiveScreen>
     unawaited(_audioPlayback.reset(endState: AiPlaybackState.idle));
     _audioPlayback.dispose();
     _pulseController.dispose();
-    _connectingController.dispose();
     _boardController.dispose();
     super.dispose();
   }
@@ -297,8 +291,6 @@ class _LiveScreenState extends State<LiveScreen>
     if (value is String) return int.tryParse(value);
     return null;
   }
-
-  ConnectionState get _connectionState => widget.client.state;
 
   Future<void> _confirmExit() async {
     final shouldLeave = await showDialog<bool>(
@@ -662,19 +654,13 @@ class _LiveScreenState extends State<LiveScreen>
 
   @override
   Widget build(BuildContext context) {
-    final connected = _connectionState == ConnectionState.connected;
-    final errored = _connectionState == ConnectionState.error;
-    final reconnecting = _connecting ||
-        _connectionState == ConnectionState.connecting ||
-        _connectionState == ConnectionState.interrupted;
-
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Stack(
         fit: StackFit.expand,
         children: <Widget>[
           // Blackboard remains mounted at all times.
-          const Positioned.fill(child: ColoredBox(color: Color(0xFF171817))),
+          const Positioned.fill(child: ColoredBox(color: Color(0xFF000000))),
           Positioned.fill(child: BlackboardView(controller: _boardController)),
 
           if (_error != null)
@@ -704,16 +690,7 @@ class _LiveScreenState extends State<LiveScreen>
             ),
           ),
 
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 12,
-            right: 12,
-            child: _ConnectionIndicator(
-              connected: connected,
-              connecting: reconnecting,
-              errored: errored || _connectionState == ConnectionState.disconnected,
-              animation: _connectingController,
-            ),
-          ),
+          // Connection indicator removed per UI request.
 
           Positioned(
             left: 0,
@@ -833,77 +810,6 @@ class _FloatingCircleButton extends StatelessWidget {
                 child: child,
               ),
             ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ConnectionIndicator extends StatelessWidget {
-  const _ConnectionIndicator({
-    required this.connected,
-    required this.connecting,
-    required this.errored,
-    required this.animation,
-  });
-
-  final bool connected;
-  final bool connecting;
-  final bool errored;
-  final Animation<double> animation;
-
-  @override
-  Widget build(BuildContext context) {
-    final Color dot = connected
-        ? const Color(0xFF3CCB7F)
-        : errored
-            ? AppColors.red
-            : AppColors.muted;
-
-    return Semantics(
-      label: connected
-          ? 'Connected'
-          : connecting
-              ? 'Connecting'
-              : 'Disconnected',
-      child: ClipOval(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: AppColors.surface.withValues(alpha: 0.45),
-              shape: BoxShape.circle,
-              border: Border.all(color: AppColors.border.withValues(alpha: 0.55)),
-            ),
-            alignment: Alignment.center,
-            child: connecting && !connected
-                ? AnimatedBuilder(
-                    animation: animation,
-                    builder: (context, _) {
-                      final t = animation.value;
-                      return SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          value: 0.25 + (t * 0.55),
-                          color: AppColors.white.withValues(alpha: 0.85),
-                          backgroundColor: AppColors.white.withValues(alpha: 0.15),
-                        ),
-                      );
-                    },
-                  )
-                : Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: dot,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
           ),
         ),
       ),

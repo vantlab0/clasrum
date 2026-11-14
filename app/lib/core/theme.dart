@@ -18,7 +18,7 @@ abstract final class AppColors {
   static const Color outlineSoft = border;
   static const Color surfaceRaised = surface;
   static const Color surfaceHigh = Color(0xFF171C24);
-  static const Color board = Color(0xFF171817);
+  static const Color board = Color(0xFF000000);
 
   // Kept for existing status/error usages (use sparingly)
   static const Color red = Color(0xFFE05555);
