@@ -134,6 +134,9 @@ async def get_or_create_user_for_supabase_payload(
 
     existing_by_email = await repositories.get_user_by_email(db, email)
     if existing_by_email is not None:
+        # If a local user already exists for this email, prefer reusing it to
+        # avoid unique-email conflicts (e.g. pre-existing accounts or inactive
+        # records). Do not create a duplicate row.
         return existing_by_email if existing_by_email.is_active else None
 
     meta = payload.get("user_metadata")

@@ -83,6 +83,13 @@ class _NotesScreenState extends State<NotesScreen> {
 
       if (results.any((r) => r.statusCode == 401 || r.statusCode == 403)) {
         await _handleAuthFailure();
+        if (mounted) {
+          setState(() {
+            _lessons = const [];
+            _notes = const [];
+            _loading = false;
+          });
+        }
         return;
       }
 
@@ -389,21 +396,24 @@ class _NotesScreenState extends State<NotesScreen> {
         padding: EdgeInsets.zero,
         blurSigma: 6,
         backgroundOpacity: 0.28,
-        child: ListTile(
-          dense: true,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-          title: Text(title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600)),
-          subtitle: Text(meta,
-              style: const TextStyle(color: AppColors.muted, fontSize: 12)),
-          trailing: const ClasrumIcon(ClasrumIconKind.moreOptions, color: AppColors.muted, size: 20),
-          onTap: () => _showSessionModal(lesson),
+        child: Material(
+          type: MaterialType.transparency,
+          child: ListTile(
+            dense: true,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            title: Text(title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600)),
+            subtitle: Text(meta,
+                style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+            trailing: const ClasrumIcon(ClasrumIconKind.moreOptions, color: AppColors.muted, size: 20),
+            onTap: () => _showSessionModal(lesson),
+          ),
         ),
       ),
     );
@@ -426,40 +436,43 @@ class _NotesScreenState extends State<NotesScreen> {
         padding: EdgeInsets.zero,
         blurSigma: 6,
         backgroundOpacity: 0.28,
-        child: ListTile(
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-          title: Text(title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600)),
-          subtitle: Text(meta.isEmpty ? 'Saved note' : meta,
-              style: const TextStyle(color: AppColors.muted, fontSize: 12)),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
-                      color: AppColors.border.withValues(alpha: 0.5)),
+        child: Material(
+          type: MaterialType.transparency,
+          child: ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+            title: Text(title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600)),
+            subtitle: Text(meta.isEmpty ? 'Saved note' : meta,
+                style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                        color: AppColors.border.withValues(alpha: 0.5)),
+                  ),
+                  child: Text(
+                    status == 'ready' ? 'Note' : noteStatusLabel(status),
+                    style:
+                        const TextStyle(color: AppColors.muted, fontSize: 11),
+                  ),
                 ),
-                child: Text(
-                  status == 'ready' ? 'Note' : noteStatusLabel(status),
-                  style:
-                      const TextStyle(color: AppColors.muted, fontSize: 11),
-                ),
-              ),
-              const SizedBox(width: 6),
-              const ClasrumIcon(ClasrumIconKind.chevronRight, color: AppColors.muted, size: 18),
-            ],
+                const SizedBox(width: 6),
+                const ClasrumIcon(ClasrumIconKind.chevronRight, color: AppColors.muted, size: 18),
+              ],
+            ),
+            onTap: noteId.isEmpty ? null : () => _openNote(noteId, title: title),
           ),
-          onTap: noteId.isEmpty ? null : () => _openNote(noteId, title: title),
         ),
       ),
     );
@@ -516,6 +529,12 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> {
       final token = widget.storage.token;
       if (token == null) {
         await _handleAuthFailure();
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = 'Unable to load note.';
+          });
+        }
         return;
       }
       final response = await http.get(
@@ -530,6 +549,12 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> {
         });
       } else if (response.statusCode == 401 || response.statusCode == 403) {
         await _handleAuthFailure();
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = 'Unable to load note from the server. Please try again later.';
+          });
+        }
       } else {
         setState(() {
           _loading = false;

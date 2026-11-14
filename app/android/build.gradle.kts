@@ -20,7 +20,7 @@ subprojects {
 }
 
 subprojects {
-    afterEvaluate {
+    val configureAndroid = {
         extensions.findByName("android")?.let { androidExt ->
             try {
                 val setCompileSdk = androidExt.javaClass.methods.firstOrNull {
@@ -36,6 +36,11 @@ subprojects {
             } catch (_: Throwable) {
             }
         }
+    }
+    if (state.executed) {
+        configureAndroid()
+    } else {
+        afterEvaluate { configureAndroid() }
     }
 }
 

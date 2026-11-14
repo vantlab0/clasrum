@@ -1,12 +1,7 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
 import '../../core/widgets/clasrum_icons.dart';
-import '../../core/widgets/glass_widgets.dart';
-
-export '../../core/widgets/glass_widgets.dart';
 
 /// Smooth, premium route transition for auth flow (slowed for visibility).
 PageRoute<T> authRoute<T>(Widget page) {
@@ -37,7 +32,7 @@ PageRoute<T> authRoute<T>(Widget page) {
   );
 }
 
-/// Shared premium auth layout used by login/register/recovery/verification.
+/// Shared auth layout (pure black background, no gradients or heavy shadows).
 class AuthScreenScaffold extends StatelessWidget {
   const AuthScreenScaffold({
     super.key,
@@ -55,106 +50,67 @@ class AuthScreenScaffold extends StatelessWidget {
     final mq = MediaQuery.of(context);
     final bottomInset = mq.viewInsets.bottom;
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: Colors.black,
       resizeToAvoidBottomInset: true,
-      body: Stack(
-        children: [
-          // Controlled ambient accents (subtle, on-palette).
-          Positioned(
-            top: -140,
-            right: -90,
-            child: _AmbientOrb(
-              size: 300,
-              color: AppColors.blue.withValues(alpha: 0.05),
-            ),
-          ),
-          Positioned(
-            bottom: -160,
-            left: -110,
-            child: _AmbientOrb(
-              size: 320,
-              color: AppColors.white.withValues(alpha: 0.025),
-            ),
-          ),
-          SafeArea(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return AnimatedPadding(
-                  duration: const Duration(milliseconds: 420),
-                  curve: Curves.easeOutCubic,
-                  padding: EdgeInsets.only(bottom: bottomInset > 0 ? 8 : 0),
-                  child: SingleChildScrollView(
-                    physics: const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics(),
-                    ),
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
-                    padding: EdgeInsets.fromLTRB(
-                      20,
-                      showBack ? 8 : 20,
-                      20,
-                      20,
-                    ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return AnimatedPadding(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              padding: EdgeInsets.only(bottom: bottomInset > 0 ? 8 : 0),
+              child: SingleChildScrollView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                padding: EdgeInsets.fromLTRB(
+                  20,
+                  showBack ? 8 : 20,
+                  20,
+                  20,
+                ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: constraints.maxHeight - (showBack ? 28 : 40),
+                  ),
+                  child: Center(
                     child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: constraints.maxHeight - (showBack ? 28 : 40),
-                      ),
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 420),
-                          child: IntrinsicHeight(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                if (showBack) ...[
-                                  Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: GlassIconButton(
-                                      icon: ClasrumIconKind.back,
-                                      tooltip: 'Back',
-                                      size: 40,
-                                      iconSize: 17,
-                                      onPressed: onBack ??
-                                          () => Navigator.maybePop(context),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                ],
-                                const _AuthBrandMark(),
-                                const SizedBox(height: 24),
-                                child,
-                              ],
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (showBack) ...[
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: IconButton(
+                                icon: const ClasrumIcon(
+                                  ClasrumIconKind.back,
+                                  size: 20,
+                                  color: Colors.white,
+                                ),
+                                tooltip: 'Back',
+                                onPressed:
+                                    onBack ?? () => Navigator.maybePop(context),
+                                style: IconButton.styleFrom(
+                                  backgroundColor: Colors.black,
+                                  side: const BorderSide(color: Colors.white24),
+                                  shape: const CircleBorder(),
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
+                            const SizedBox(height: 10),
+                          ],
+                          const _AuthBrandMark(),
+                          const SizedBox(height: 24),
+                          child,
+                        ],
                       ),
                     ),
                   ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AmbientOrb extends StatelessWidget {
-  const _AmbientOrb({required this.size, required this.color});
-  final double size;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: ImageFiltered(
-        imageFilter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
-        child: Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+                ),
+              ),
+            );
+          },
         ),
       ),
     );
@@ -173,29 +129,13 @@ class _AuthBrandMark extends StatelessWidget {
           height: 56,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(18),
-            color: AppColors.surface.withValues(alpha: 0.55),
-            border: Border.all(
-              color: AppColors.border.withValues(alpha: 0.55),
-              width: 1,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.blue.withValues(alpha: 0.08),
-                blurRadius: 24,
-                offset: const Offset(0, 10),
-              ),
-            ],
+            color: Colors.black,
+            border: Border.all(color: Colors.white24, width: 1),
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-              child: Center(
-                child: CustomPaint(
-                  size: const Size(24, 24),
-                  painter: _ClasrumMarkPainter(),
-                ),
-              ),
+          child: Center(
+            child: CustomPaint(
+              size: const Size(24, 24),
+              painter: _ClasrumMarkPainter(),
             ),
           ),
         ),
@@ -203,7 +143,7 @@ class _AuthBrandMark extends StatelessWidget {
         const Text(
           'Clasrum',
           style: TextStyle(
-            color: AppColors.white,
+            color: Colors.white,
             fontSize: 15,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.6,
@@ -325,7 +265,7 @@ class AuthGlassField extends StatelessWidget {
         Text(
           label,
           style: const TextStyle(
-            color: AppColors.muted,
+            color: Colors.white70,
             fontSize: 12,
             fontWeight: FontWeight.w500,
           ),
@@ -340,10 +280,13 @@ class AuthGlassField extends StatelessWidget {
           validator: validator,
           autofillHints: autofillHints,
           enabled: enabled,
-          style: const TextStyle(color: AppColors.white, fontSize: 15),
-          cursorColor: AppColors.blue,
+          style: const TextStyle(color: Colors.white, fontSize: 15),
+          cursorColor: Colors.white,
           decoration: InputDecoration(
             hintText: hint,
+            filled: true,
+            fillColor: Colors.black,
+            hintStyle: const TextStyle(color: Colors.white38),
             prefixIcon: prefixIcon == null
                 ? null
                 : Padding(
@@ -351,12 +294,32 @@ class AuthGlassField extends StatelessWidget {
                     child: ClasrumIcon(
                       prefixIcon!,
                       size: 18,
-                      color: AppColors.muted,
+                      color: Colors.white70,
                     ),
                   ),
             prefixIconConstraints:
                 const BoxConstraints(minWidth: 38, minHeight: 18),
             suffixIcon: suffixIcon,
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.white24),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.white54),
+            ),
+            errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.white38),
+            ),
+            focusedErrorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.white54),
+            ),
+            disabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Colors.white12),
+            ),
           ),
         ),
       ],
@@ -376,20 +339,13 @@ class AuthMessage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = isError ? AppColors.muted : AppColors.white;
-    final border = isError
-        ? AppColors.border.withValues(alpha: 0.7)
-        : AppColors.blue.withValues(alpha: 0.35);
-    final bg = isError
-        ? AppColors.surface.withValues(alpha: 0.45)
-        : AppColors.blue.withValues(alpha: 0.08);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: bg,
+        color: Colors.black,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: border),
+        border: Border.all(color: Colors.white24),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -397,13 +353,13 @@ class AuthMessage extends StatelessWidget {
           ClasrumIcon(
             isError ? ClasrumIconKind.info : ClasrumIconKind.resume,
             size: 16,
-            color: isError ? AppColors.muted : AppColors.blue,
+            color: Colors.white70,
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               message,
-              style: TextStyle(color: color, fontSize: 13, height: 1.45),
+              style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.45),
             ),
           ),
         ],
@@ -412,7 +368,7 @@ class AuthMessage extends StatelessWidget {
   }
 }
 
-class AuthPrimaryButton extends StatefulWidget {
+class AuthPrimaryButton extends StatelessWidget {
   const AuthPrimaryButton({
     super.key,
     required this.label,
@@ -425,92 +381,45 @@ class AuthPrimaryButton extends StatefulWidget {
   final bool loading;
 
   @override
-  State<AuthPrimaryButton> createState() => _AuthPrimaryButtonState();
-}
-
-class _AuthPrimaryButtonState extends State<AuthPrimaryButton> {
-  bool _pressed = false;
-
-  @override
   Widget build(BuildContext context) {
-    final active = widget.loading || _pressed;
-    return GestureDetector(
-      onTapDown: widget.loading ? null : (_) => setState(() => _pressed = true),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTapUp: (_) => setState(() => _pressed = false),
-      child: AnimatedScale(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
-        scale: active ? 0.985 : 1.0,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 320),
-          curve: Curves.easeOutCubic,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            boxShadow: widget.loading
-                ? [
-                    BoxShadow(
-                      color: AppColors.blue.withValues(alpha: 0.22),
-                      blurRadius: 18,
-                      spreadRadius: 0.5,
-                    ),
-                  ]
-                : const [],
-          ),
-          child: FilledButton(
-            onPressed: widget.loading ? null : widget.onPressed,
-            style: FilledButton.styleFrom(
-              backgroundColor: AppColors.blue,
-              foregroundColor: AppColors.white,
-              disabledBackgroundColor: AppColors.blue.withValues(alpha: 0.75),
-              disabledForegroundColor: AppColors.white,
-              minimumSize: const Size.fromHeight(48),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-            ),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 420),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) => FadeTransition(
-                opacity: animation,
-                child: ScaleTransition(
-                  scale: Tween<double>(begin: 0.96, end: 1.0).animate(animation),
-                  child: child,
-                ),
-              ),
-              child: widget.loading
-                  ? Row(
-                      key: const ValueKey<String>('loading'),
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      mainAxisSize: MainAxisSize.min,
-                      children: const <Widget>[
-                        SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.2,
-                            color: AppColors.white,
-                          ),
-                        ),
-                        SizedBox(width: 10),
-                        Text(
-                          'Please wait…',
-                          style: TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.w600),
-                        ),
-                      ],
-                    )
-                  : Text(
-                      widget.label,
-                      key: ValueKey<String>('label-${widget.label}'),
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600),
-                    ),
-            ),
-          ),
-        ),
+    return FilledButton(
+      onPressed: loading ? null : onPressed,
+      style: FilledButton.styleFrom(
+        backgroundColor: AppColors.blue,
+        foregroundColor: Colors.white,
+        disabledBackgroundColor: AppColors.blue.withValues(alpha: 0.75),
+        disabledForegroundColor: Colors.white,
+        minimumSize: const Size.fromHeight(48),
+        elevation: 0,
+        shadowColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
+      child: loading
+          ? Row(
+              key: const ValueKey<String>('loading'),
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: const <Widget>[
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.2,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 10),
+                Text(
+                  'Please wait…',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                ),
+              ],
+            )
+          : Text(
+              label,
+              key: ValueKey<String>('label-$label'),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
     );
   }
 }
@@ -529,10 +438,11 @@ class AuthTextLink extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final color = subtle ? Colors.white70 : Colors.white;
     return TextButton(
       onPressed: onPressed,
       style: TextButton.styleFrom(
-        foregroundColor: subtle ? AppColors.muted : AppColors.white,
+        foregroundColor: color,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         minimumSize: const Size(0, 36),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -542,7 +452,7 @@ class AuthTextLink extends StatelessWidget {
         style: TextStyle(
           fontSize: 13,
           fontWeight: subtle ? FontWeight.w500 : FontWeight.w600,
-          color: subtle ? AppColors.muted : AppColors.white,
+          color: color,
         ),
       ),
     );

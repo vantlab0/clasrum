@@ -75,6 +75,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (decoded is Map<String, dynamic>) {
           setState(() {
             _student = decoded;
+            _error = null;
             _loading = false;
           });
         } else {
@@ -85,6 +86,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
         }
       } else if (response.statusCode == 401 || response.statusCode == 403) {
         await _handleAuthFailure();
+        if (mounted) {
+          setState(() {
+            _student = null;
+            _loading = false;
+            _error = 'Unable to load profile from the server. Please try again later.';
+          });
+        }
       } else {
         setState(() {
           _loading = false;

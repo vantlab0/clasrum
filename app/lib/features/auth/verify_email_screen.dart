@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/theme.dart';
 import '../../main.dart';
 import 'auth_widgets.dart';
 import 'login_screen.dart';
@@ -134,18 +133,20 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                 'We sent a verification link to your email address. Confirm it to continue.',
           ),
           const SizedBox(height: 24),
-          GlassContainer(
-            radius: 22,
+          Container(
             padding: const EdgeInsets.all(18),
-            blurSigma: 12,
-            backgroundOpacity: 0.38,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: Colors.white24),
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Text(
                   'Email address',
                   style: TextStyle(
-                    color: AppColors.muted,
+                    color: Colors.white70,
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -156,16 +157,14 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                   decoration: BoxDecoration(
-                    color: AppColors.surface.withValues(alpha: 0.55),
+                    color: Colors.black,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: AppColors.border.withValues(alpha: 0.6),
-                    ),
+                    border: Border.all(color: Colors.white24),
                   ),
                   child: Text(
                     widget.email,
                     style: const TextStyle(
-                      color: AppColors.white,
+                      color: Colors.white,
                       fontSize: 15,
                       fontWeight: FontWeight.w500,
                     ),
@@ -190,52 +189,49 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                   onPressed:
                       (_resending || _cooldownSeconds > 0) ? null : _resend,
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.white,
-                    disabledForegroundColor: AppColors.white.withValues(alpha: 0.8),
+                    foregroundColor: Colors.white,
+                    disabledForegroundColor: Colors.white54,
                     minimumSize: const Size.fromHeight(46),
-                    side: BorderSide(
-                        color: AppColors.border.withValues(alpha: 0.7)),
+                    side: const BorderSide(color: Colors.white24),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 420),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    child: _resending
-                        ? Row(
-                            key: const ValueKey<String>('resending'),
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: const <Widget>[
-                              SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                  child: _resending
+                      ? const Row(
+                          key: ValueKey<String>('resending'),
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
                               ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Sending…',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          )
-                        : Text(
-                            _cooldownSeconds > 0
-                                ? 'Resend email in ${_cooldownSeconds}s'
-                                : 'Resend verification email',
-                            key: ValueKey<String>(
-                                'resend-${_cooldownSeconds > 0}'),
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
                             ),
+                            SizedBox(width: 10),
+                            Text(
+                              'Sending…',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        )
+                      : Text(
+                          _cooldownSeconds > 0
+                              ? 'Resend email in ${_cooldownSeconds}s'
+                              : 'Resend verification email',
+                          key: ValueKey<String>('resend-${_cooldownSeconds > 0}'),
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
                           ),
-                  ),
+                        ),
                 ),
               ],
             ),

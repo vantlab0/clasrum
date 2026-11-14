@@ -94,8 +94,18 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  /// Forces local sign-out when the session/token is no longer valid.
+  /// Handles backend auth failures (401/403 from our API).
+  ///
+  /// If a Supabase session is active, the app-level session is still valid and
+  /// we must not sign the user out (backend token validation/config issues
+  /// should not bounce the user back to login). If no Supabase session exists,
+  /// force local sign-out and clear user-scoped data.
   Future<void> signOutExpiredSession() async {
+    final hasSupabaseSession = currentSession != null;
+    if (hasSupabaseSession) {
+      notifyListeners();
+      return;
+    }
     try {
       if (SupabaseBootstrap.clientOrNull != null) {
         await _auth.signOut(scope: SignOutScope.local);

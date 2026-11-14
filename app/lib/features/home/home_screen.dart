@@ -108,20 +108,25 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.config.apiUri('/lessons'),
         headers: _authHeaders,
       );
+      if (!mounted) return;
       if (response.statusCode == 200) {
         final data = convert.jsonDecode(response.body) as Map<String, dynamic>;
         final items = (data['items'] as List? ?? const <dynamic>[])
             .cast<Map<String, dynamic>>();
+        setState(() {
+          _lessons = items;
+          _loadingLessons = false;
+        });
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        await _handleAuthFailure();
         if (mounted) {
           setState(() {
-            _lessons = items;
+            _lessons = const [];
             _loadingLessons = false;
           });
         }
-      } else if (response.statusCode == 401 || response.statusCode == 403) {
-        await _handleAuthFailure();
       } else {
-        if (mounted) setState(() => _loadingLessons = false);
+        setState(() => _loadingLessons = false);
       }
     } catch (_) {
       if (mounted) setState(() => _loadingLessons = false);

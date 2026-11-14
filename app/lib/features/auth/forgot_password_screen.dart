@@ -88,11 +88,13 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               subtitle: 'We’ll send a link to your email.',
             ),
             const SizedBox(height: 24),
-            GlassContainer(
-              radius: 22,
+            Container(
               padding: const EdgeInsets.all(18),
-              blurSigma: 12,
-              backgroundOpacity: 0.38,
+              decoration: BoxDecoration(
+                color: Colors.black,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Colors.white24),
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [

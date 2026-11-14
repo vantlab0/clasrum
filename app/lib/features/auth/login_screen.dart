@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/theme.dart';
 import '../../core/widgets/clasrum_icons.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
@@ -116,11 +115,13 @@ class _LoginScreenState extends State<LoginScreen> {
               subtitle: 'Continue your learning journey.',
             ),
             const SizedBox(height: 24),
-            GlassContainer(
-              radius: 22,
+            Container(
               padding: const EdgeInsets.all(18),
-              blurSigma: 12,
-              backgroundOpacity: 0.38,
+              decoration: BoxDecoration(
+                color: Colors.black,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Colors.white24),
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -164,7 +165,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             ? ClasrumIconKind.visibility
                             : ClasrumIconKind.visibilityOff,
                         size: 18,
-                        color: AppColors.muted,
+                        color: Colors.white70,
                       ),
                       tooltip: _obscure ? 'Show password' : 'Hide password',
                     ),
@@ -203,7 +204,7 @@ class _LoginScreenState extends State<LoginScreen> {
               children: [
                 const Text(
                   'New to Clasrum? ',
-                  style: TextStyle(color: AppColors.muted, fontSize: 13),
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
                 ),
                 AuthTextLink(
                   label: 'Create account',

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 /// Blackboard/chalk rendering uses its own palette in `blackboard/model`.
 abstract final class AppColors {
   // Required system colors
-  static const Color blue = Color(0xFF1677FF); // primary actions / selected
+  static const Color blue = Color(0xFFE53935); // primary actions / selected
   static const Color background = Color(0xFF080A0E); // main background
   static const Color surface = Color(0xFF12161D); // solid dark surface
   static const Color white = Color(0xFFFFFFFF); // primary text/icons
