@@ -184,11 +184,14 @@ class _NotesScreenState extends State<NotesScreen> {
   }
 
   String _unsplashPreviewUrl({required String id, required String topic}) {
-    final query = Uri.encodeComponent(
-      topic.trim().isEmpty ? 'education learning notes' : topic.trim(),
+    final cleanTitle =
+        topic.trim().isEmpty ? 'education learning notes' : topic.trim();
+    final prompt = Uri.encodeComponent(
+      '$cleanTitle, educational topic illustration, high quality',
     );
-    final sig = (id.isNotEmpty ? id : topic).hashCode.abs();
-    return 'https://source.unsplash.com/800x600/?$query&sig=$sig';
+    final seed = (id.isNotEmpty ? id : cleanTitle).hashCode.abs() % 1000000;
+    // Title-based preview image for cards (stable per item via seed).
+    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=flux';
   }
 
   void _showComingSoonShare() {

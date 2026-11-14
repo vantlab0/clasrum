@@ -576,13 +576,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _unsplashPreviewUrl({required String id, required String topic}) {
-    final query = Uri.encodeComponent(
-      topic.trim().isEmpty ? 'education learning' : topic.trim(),
+    final cleanTitle = topic.trim().isEmpty ? 'education learning' : topic.trim();
+    final prompt = Uri.encodeComponent(
+      '$cleanTitle, educational topic illustration, high quality',
     );
-    final sig = (id.isNotEmpty ? id : topic).hashCode.abs();
-    // Unsplash source endpoint with topic query and unique sig to reflect title
-    // and avoid repeating the same image across sessions.
-    return 'https://source.unsplash.com/800x600/?$query&sig=$sig';
+    final seed = (id.isNotEmpty ? id : cleanTitle).hashCode.abs() % 1000000;
+    // Title-based preview image for session cards (stable per session via seed).
+    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=flux';
   }
 
   DateTime? _parseDate(dynamic value) {
