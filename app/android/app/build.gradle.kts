@@ -6,8 +6,8 @@ plugins {
 
 android {
     namespace = "com.example.ai_classroom"
-    // flutter_pcm_sound and its AndroidX dependencies require API 34 at compile time.
-    compileSdk = maxOf(flutter.compileSdkVersion, 34)
+    // AndroidX/plugin dependencies (e.g. url_launcher_android) require API 36+.
+    compileSdk = maxOf(flutter.compileSdkVersion, 36)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

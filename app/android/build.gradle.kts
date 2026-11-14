@@ -30,8 +30,8 @@ subprojects {
                     it.name == "setCompileSdkVersion" && it.parameterCount == 1
                 }
                 when {
-                    setCompileSdk != null -> setCompileSdk.invoke(androidExt, 34)
-                    setCompileSdkVersion != null -> setCompileSdkVersion.invoke(androidExt, 34)
+                    setCompileSdk != null -> setCompileSdk.invoke(androidExt, 36)
+                    setCompileSdkVersion != null -> setCompileSdkVersion.invoke(androidExt, 36)
                 }
             } catch (_: Throwable) {
             }
