@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/config.dart';
 import '../core/errors.dart';
 import '../core/storage.dart';
+import '../blackboard/model/board_geometry.dart';
 
 /// Streamed message from the server (CONTRACTS §6 server→client).
 enum RealtimeMessageType {
@@ -26,6 +27,7 @@ enum RealtimeMessageType {
   sessionEnded,
   error,
   pong,
+  viewportFocus,
 }
 
 /// A normalized message received from the realtime WebSocket.
@@ -69,6 +71,24 @@ class RealtimeMessage {
       : (payload['transcript_cursor'] is num
           ? (payload['transcript_cursor'] as num).toInt()
           : null);
+
+  /// Viewport-focus message fields (server→client, Phase 3).
+  String? get viewportTargetId => payload['target_id'] as String?;
+  double? get viewportScale => payload['scale'] is num
+      ? (payload['scale'] as num).toDouble()
+      : (payload['scale'] is String ? double.tryParse(payload['scale']) : null);
+  BoardPoint? get viewportPosition =>
+      BoardPoint.tryParse(payload['position'] ?? payload['at']);
+  BoardRect? get viewportRegion => BoardRect.tryParse(payload['region']);
+  bool get viewportAnimate => payload['animate'] != false;
+  List<String>? get viewportTargetIds {
+    final raw = payload['target_ids'];
+    if (raw is List) {
+      return raw.whereType<String>().toList(growable: false);
+    }
+    final id = viewportTargetId;
+    return id == null ? null : <String>[id];
+  }
 }
 
 /// Connection state exposed to the UI.
@@ -381,6 +401,8 @@ class RealtimeClient extends ChangeNotifier {
         return RealtimeMessageType.sessionInterrupted;
       case 'session.ended':
         return RealtimeMessageType.sessionEnded;
+      case 'viewport.focus':
+        return RealtimeMessageType.viewportFocus;
       case 'error':
         return RealtimeMessageType.error;
       case 'pong':

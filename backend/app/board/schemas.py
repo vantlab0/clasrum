@@ -848,6 +848,9 @@ class HighlightArgs(StrictModel):
 class ClearArgs(StrictModel):
     """``board_clear`` -> ``clear`` (wipes the whole document)."""
 
+    def build_payload(self) -> dict[str, Any]:
+        return {}
+
 
 class MoveElementArgs(StrictModel):
     """``board_move_element`` -> ``move_element``; target must exist."""
@@ -867,6 +870,45 @@ class MoveElementArgs(StrictModel):
             {
                 "position": self.position.to_payload() if self.position else None,
                 "delta": self.delta.to_payload() if self.delta else None,
+            }
+        )
+
+
+class DrawTemplateArgs(StrictModel):
+    """``board_draw_template`` -> ``draw_template``; render an educational template."""
+
+    template_id: IdText = Field(
+        description="Template identifier (must match a registered template)."
+    )
+    region: Literal["left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"] | None = (
+        Field(default=None, description="Preferred board region for the template.")
+    )
+    position: Position | None = Field(
+        default=None, description="Template origin position, normalized 0..1."
+    )
+    size: Size | None = Field(
+        default=None, description="Template size, normalized 0..1."
+    )
+    labels: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)]],
+        Field(min_length=0, max_length=MAX_ITEMS),
+    ] = Field(
+        default_factory=list,
+        description="Template label IDs to include (subset of the template's labels).",
+    )
+    animate: bool = Field(
+        default=True, description="Whether to animate the progressive drawing."
+    )
+
+    def build_payload(self) -> dict[str, Any]:
+        return _clean(
+            {
+                "template_id": self.template_id,
+                "region": self.region,
+                "position": self.position.to_payload() if self.position else None,
+                "size": self.size.to_payload() if self.size else None,
+                "labels": list(self.labels),
+                "animate": self.animate,
             }
         )
 
@@ -959,6 +1001,52 @@ class LessonFinishArgs(StrictModel):
 
 
 # ---------------------------------------------------------------------------
+# intent tool arguments (realtime-facing, routed to the Board Director)
+# ---------------------------------------------------------------------------
+
+
+class BoardIntentArgs(StrictModel):
+    """``board_intent`` — request a visual update to the blackboard."""
+
+    intent: Annotated[str, Field(min_length=1, max_length=1000)] = Field(
+        description="What should appear or change on the board, in plain language."
+    )
+    focus: Literal["none", "new_content", "region"] = Field(
+        default="new_content",
+        description="Whether to focus on new content, a region, or nothing specific.",
+    )
+    region_hint: Literal["left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"] | None = (
+        Field(default=None, description="Preferred board region for the new content.")
+    )
+
+
+class BoardHighlightIntentArgs(StrictModel):
+    """``board_highlight`` (intent) — highlight an existing board element."""
+
+    target: IdText = Field(description="Label or element id of the board element to highlight.")
+    style: Literal["box", "underline", "pulse", "circle"] = Field(
+        default="box", description="Highlight presentation style."
+    )
+
+
+class BoardClearRegionArgs(StrictModel):
+    """``board_clear_region`` — clear existing board content."""
+
+    scope: Literal["all", "region"] = Field(description="Clear the whole board or one region.")
+    region: Literal["left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"] | None = (
+        Field(default=None, description="Region to clear when scope='region'.")
+    )
+
+    @model_validator(mode="after")
+    def _region_matches_scope(self) -> "BoardClearRegionArgs":
+        if self.scope == "region" and self.region is None:
+            raise ValueError("board_clear_region with scope=region requires region")
+        if self.scope == "all" and self.region is not None:
+            raise ValueError("region is only valid when scope=region")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # tool specification table
 # ---------------------------------------------------------------------------
 
@@ -969,13 +1057,17 @@ class ToolSpec(StrictModel):
     """One registry entry: Qwen-facing schema + mapping to a board event type."""
 
     name: str
-    kind: Literal["board", "lesson"]
+    kind: Literal["board", "lesson", "intent"]
     event_type: str | None
     target_mode: BoardTargetMode
     args_model: type[BaseModel]
     description: str
     #: For existing-element tools: element types the target may have (empty = any).
     allowed_element_types: tuple[str, ...] = ()
+    #: Whether this tool is exposed to the realtime conversational model. The 22
+    #: low-level board tools remain executable internally but are hidden from the
+    #: realtime session in favour of the intent tools.
+    exposed_to_realtime: bool = True
 
     def openai_schema(self) -> dict[str, Any]:
         return openai_tool_schema(self.name, self.description, self.args_model)
@@ -1156,15 +1248,9 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Remove one existing element by id (soft delete, replay-safe).",
         (),
     ),
-    (
-        "board_highlight",
-        "highlight",
-        "new",
-        HighlightArgs,
-        "Annotate 1-20 existing elements with an underline/circle/box/strike/arrow. "
-        "All target_ids must exist.",
-        (),
-    ),
+    # `board_highlight` is handled specially: exposed to the realtime model as a
+    # lightweight intent tool (target + style) while remaining executable with the
+    # internal low-level arguments (target_ids, ...). See _SPECIAL_TOOL_SPECS.
     (
         "board_clear",
         "clear",
@@ -1180,6 +1266,17 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "existing",
         MoveElementArgs,
         "Move an existing element to an absolute normalized position or by a delta.",
+        (),
+    ),
+    (
+        "board_draw_template",
+        "draw_template",
+        "new",
+        DrawTemplateArgs,
+        "Render a registered educational drawing template (mitochondria, cell, "
+        "circuit, triangle, coordinate axes, atom, ...). The template is expanded "
+        "into individual board events on the client; this tool only validates the "
+        "template_id and passes the request through.",
         (),
     ),
 )
@@ -1221,7 +1318,40 @@ _LESSON_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
     ),
 )
 
-TOOL_SPECS: tuple[ToolSpec, ...] = tuple(
+# (name, args_model, description) — lightweight realtime-facing intent tools.
+_INTENT_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
+    (
+        "board_intent",
+        BoardIntentArgs,
+        "Request a visual update to the blackboard. Describe what should appear or "
+        "change in plain language; a board director will decide the exact elements, "
+        "layout and styling. Prefer this over low-level drawing commands.",
+    ),
+    (
+        "board_clear_region",
+        BoardClearRegionArgs,
+        "Clear existing board content from the whole board or a specific region when "
+        "starting fresh or making space for new material.",
+    ),
+)
+
+# Special: realtime intent schema + internal low-level execution under same name.
+_BOARD_HIGHLIGHT_SPEC = ToolSpec(
+    name="board_highlight",
+    kind="board",  # keeps board tool/event mapping; args handled specially in registry
+    event_type="highlight",
+    target_mode="new",
+    args_model=BoardHighlightIntentArgs,  # public schema for realtime
+    description=(
+        "Highlight an existing board element to draw the student's attention to it. "
+        "Provide the element's id or label and an optional style."
+    ),
+    exposed_to_realtime=True,
+)
+
+# Low-level board tools remain fully executable for internal use (Board Director,
+# tests, legacy flows) but are not exposed to the realtime conversational model.
+_INTERNAL_BOARD_SPECS: tuple[ToolSpec, ...] = tuple(
     ToolSpec(
         name=name,
         kind="board",
@@ -1230,9 +1360,25 @@ TOOL_SPECS: tuple[ToolSpec, ...] = tuple(
         args_model=args_model,
         description=description,
         allowed_element_types=allowed,
+        exposed_to_realtime=False,
     )
     for name, event_type, target_mode, args_model, description, allowed in _BOARD_SPECS
-) + tuple(
+)
+
+_INTENT_TOOL_SPECS: tuple[ToolSpec, ...] = tuple(
+    ToolSpec(
+        name=name,
+        kind="intent",
+        event_type=None,
+        target_mode="none",
+        args_model=args_model,
+        description=description,
+        exposed_to_realtime=True,
+    )
+    for name, args_model, description in _INTENT_SPECS
+) + (_BOARD_HIGHLIGHT_SPEC,)
+
+_LESSON_TOOL_SPECS: tuple[ToolSpec, ...] = tuple(
     ToolSpec(
         name=name,
         kind="lesson",
@@ -1240,17 +1386,26 @@ TOOL_SPECS: tuple[ToolSpec, ...] = tuple(
         target_mode="none",
         args_model=args_model,
         description=description,
+        exposed_to_realtime=True,
     )
     for name, args_model, description in _LESSON_SPECS
 )
 
+TOOL_SPECS: tuple[ToolSpec, ...] = _INTENT_TOOL_SPECS + _INTERNAL_BOARD_SPECS + _LESSON_TOOL_SPECS
 TOOL_SPECS_BY_NAME: dict[str, ToolSpec] = {spec.name: spec for spec in TOOL_SPECS}
 
 BOARD_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS if spec.kind == "board")
-LESSON_TOOL_NAMES: tuple[str, ...] = tuple(
-    spec.name for spec in TOOL_SPECS if spec.kind == "lesson"
-)
+INTENT_TOOL_NAMES: tuple[str, ...] = ("board_intent", "board_highlight", "board_clear_region")
+LESSON_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS if spec.kind == "lesson")
 ALL_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS)
+INTERNAL_BOARD_TOOL_NAMES: tuple[str, ...] = tuple(
+    spec.name
+    for spec in TOOL_SPECS
+    if spec.kind == "board" and (not spec.exposed_to_realtime or spec.name == "board_highlight")
+)
+REALTIME_TOOL_NAMES: tuple[str, ...] = tuple(
+    spec.name for spec in TOOL_SPECS if spec.exposed_to_realtime
+)
 
 #: tool -> board event type (used by contract-parity tests and the registry).
 BOARD_TOOL_EVENT_TYPES: dict[str, str] = {
@@ -1332,15 +1487,27 @@ def openai_tool_schema(name: str, description: str, args_model: type[BaseModel])
 
 
 def openai_tool_schemas() -> list[dict[str, Any]]:
-    """All 28 Qwen function tool schemas, in registry order."""
+    """All registered tool schemas (internal + public), in registry order."""
     return [spec.openai_schema() for spec in TOOL_SPECS]
+
+
+def public_openai_tool_schemas() -> list[dict[str, Any]]:
+    """Tool schemas exposed to the realtime conversational model.
+
+    Includes the lightweight intent tools and lesson tools; excludes the 22
+    low-level board tools which remain available for internal execution only.
+    """
+    return [spec.openai_schema() for spec in TOOL_SPECS if spec.exposed_to_realtime]
 
 
 __all__ = [
     "ALL_TOOL_NAMES",
     "BOARD_TOOL_EVENT_TYPES",
     "BOARD_TOOL_NAMES",
+    "INTENT_TOOL_NAMES",
+    "INTERNAL_BOARD_TOOL_NAMES",
     "LESSON_TOOL_NAMES",
+    "REALTIME_TOOL_NAMES",
     "TOOL_SPECS",
     "TOOL_SPECS_BY_NAME",
     "ToolSpec",
@@ -1355,6 +1522,7 @@ __all__ = [
     "ColorStr",
     "openai_tool_schema",
     "openai_tool_schemas",
+    "public_openai_tool_schemas",
     # argument models
     "WriteTextArgs",
     "WriteHeadingArgs",
@@ -1378,10 +1546,14 @@ __all__ = [
     "HighlightArgs",
     "ClearArgs",
     "MoveElementArgs",
+    "DrawTemplateArgs",
     "LessonNextConceptArgs",
     "LessonUpdateProgressArgs",
     "LessonAskQuestionArgs",
     "LessonCheckAnswerArgs",
     "LessonRevisitConceptArgs",
     "LessonFinishArgs",
+    "BoardIntentArgs",
+    "BoardHighlightIntentArgs",
+    "BoardClearRegionArgs",
 ]

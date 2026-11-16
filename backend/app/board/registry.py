@@ -32,11 +32,15 @@ from app.board.schemas import (
     ALL_TOOL_NAMES,
     BOARD_TOOL_EVENT_TYPES,
     BOARD_TOOL_NAMES,
+    INTENT_TOOL_NAMES,
+    INTERNAL_BOARD_TOOL_NAMES,
     LESSON_TOOL_NAMES,
+    REALTIME_TOOL_NAMES,
     TOOL_SPECS,
     TOOL_SPECS_BY_NAME,
     ToolSpec,
     openai_tool_schemas,
+    public_openai_tool_schemas,
 )
 from app.board.service import (
     BoardError,
@@ -46,6 +50,7 @@ from app.board.service import (
     EVENT_PLOT_FUNCTION,
 )
 from app.db.constants import BoardEventSource
+from app.realtime.transcript_triggers import TranscriptTriggerSystem
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +114,11 @@ class ToolRegistry:
         board: BoardService | None = None,
         *,
         lesson_publisher: LessonStatePublisher | None = None,
+        trigger_system: TranscriptTriggerSystem | None = None,
     ) -> None:
         self._board = board or BoardService()
         self._lesson_publisher = lesson_publisher
+        self._trigger_system = trigger_system
 
     # -- introspection -----------------------------------------------------
     @property
@@ -144,8 +151,12 @@ class ToolRegistry:
         return spec.event_type if spec is not None else None
 
     def openai_tools(self) -> list[dict[str, Any]]:
-        """The ``tools`` array for the Qwen ``session.update`` payload."""
+        """All registered tool schemas (internal + public)."""
         return openai_tool_schemas()
+
+    def public_openai_tools(self) -> list[dict[str, Any]]:
+        """Schemas exposed to the realtime conversational model."""
+        return public_openai_tool_schemas()
 
     def specs(self) -> list[dict[str, Any]]:
         return self.openai_tools()
@@ -234,6 +245,18 @@ class ToolRegistry:
             logger.warning("tool rejected lesson=%s tool=%s code=invalid_json", lesson_id, name)
             return _invalid_arguments("arguments must be a JSON object")
 
+        # Intent tools and dual-use board_highlight (intent vs internal args).
+        if spec.kind == "intent" or name == "board_highlight":
+            # board_highlight (kind board) may be called with internal args.
+            if name == "board_highlight" and "target_ids" in parsed_arguments and "target" not in parsed_arguments:
+                return await self._execute_internal_highlight(
+                    db, lesson_id, parsed_arguments, source=source, animate=animate
+                )
+            if spec.kind == "intent" or name == "board_highlight":
+                return await self._execute_intent(
+                    db, lesson_id, spec, parsed_arguments, source=source, animate=animate
+                )
+
         try:
             args = spec.args_model.model_validate(parsed_arguments)
         except ValidationError as exc:
@@ -251,6 +274,204 @@ class ToolRegistry:
                 db, lesson_id, spec, args, source=source, animate=animate
             )
         return await self._execute_lesson(db, lesson_id, spec, args)
+
+    async def _execute_intent(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        spec: ToolSpec,
+        arguments: dict[str, Any],
+        *,
+        source: str,
+        animate: bool,
+    ) -> dict[str, Any]:
+        from app.board.intent_handler import BoardIntentHandler, IntentHandlingError
+
+        name = spec.name
+        try:
+            # board_highlight is dual-use: internal low-level calls carry target_ids.
+            if name == "board_highlight":
+                if "target_ids" in arguments and "target" not in arguments:
+                    return await self._execute_internal_highlight(
+                        db, lesson_id, arguments, source=source, animate=animate
+                    )
+                # Intent form: target (+ style) -> resolve to existing element(s).
+                return await self._execute_highlight_intent(
+                    db, lesson_id, arguments, source=source, animate=animate
+                )
+
+            if name == "board_clear_region":
+                try:
+                    args = spec.args_model.model_validate(arguments)
+                except ValidationError as exc:
+                    return _invalid_arguments(_format_validation_error(exc))
+                return await self._execute_clear_region_intent(
+                    db, lesson_id, args, source=source, animate=animate
+                )
+
+            if name == "board_intent":
+                try:
+                    args = spec.args_model.model_validate(arguments)
+                except ValidationError as exc:
+                    return _invalid_arguments(_format_validation_error(exc))
+                handler = BoardIntentHandler(
+                    board=self._board,
+                    registry=self,
+                    trigger_system=self._trigger_system,
+                )
+                try:
+                    return await handler.handle(db, lesson_id, args.model_dump())
+                except IntentHandlingError as exc:
+                    logger.warning("board_intent failed lesson=%s: %s", lesson_id, exc.message)
+                    return exc.to_tool_result()
+
+            return {
+                "ok": False,
+                "error": "unknown_tool",
+                "message": f"intent tool {name!r} is not supported",
+                "retryable": False,
+            }
+        except Exception:  # pragma: no cover - intent failures must not kill the socket
+            logger.exception("intent tool execution failed lesson=%s tool=%s", lesson_id, name)
+            return {
+                "ok": False,
+                "error": "internal_error",
+                "message": "the board operation could not be completed",
+                "retryable": False,
+            }
+
+    async def _execute_internal_highlight(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        arguments: dict[str, Any],
+        *,
+        source: str,
+        animate: bool,
+    ) -> dict[str, Any]:
+        from app.board.schemas import HighlightArgs
+
+        try:
+            args = HighlightArgs.model_validate(arguments)
+        except ValidationError as exc:
+            return _invalid_arguments(_format_validation_error(exc))
+        spec = ToolSpec(
+            name="board_highlight",
+            kind="board",
+            event_type="highlight",
+            target_mode="new",
+            args_model=HighlightArgs,
+            description="internal highlight",
+            allowed_element_types=(),
+        )
+        return await self._execute_board(db, lesson_id, spec, args, source=source, animate=animate)
+
+    async def _resolve_highlight_target(self, db: AsyncSession, lesson_id: str, target: str) -> list[str]:
+        document = await self._board.reconstruct_document(db, lesson_id)
+        needle = str(target).strip()
+        if not needle:
+            return []
+        # Exact element id match first.
+        for element in document.get("elements", []) or []:
+            if element.get("element_id") == needle and element.get("removed_at_sequence") is None:
+                return [needle]
+        # Fallback: case-insensitive label/text contains match.
+        lowered = needle.lower()
+        for element in document.get("elements", []) or []:
+            if element.get("removed_at_sequence") is not None:
+                continue
+            payload = element.get("payload") or {}
+            for key in ("text", "label", "term", "title", "latex"):
+                val = payload.get(key)
+                if isinstance(val, str) and (lowered == val.lower() or lowered in val.lower()):
+                    return [str(element.get("element_id"))]
+        return []
+
+    async def _execute_highlight_intent(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        arguments: dict[str, Any],
+        *,
+        source: str,
+        animate: bool,
+    ) -> dict[str, Any]:
+        from app.board.schemas import BoardHighlightIntentArgs, HighlightArgs
+
+        try:
+            intent = BoardHighlightIntentArgs.model_validate(arguments)
+        except ValidationError as exc:
+            return _invalid_arguments(_format_validation_error(exc))
+        target_ids = await self._resolve_highlight_target(db, lesson_id, intent.target)
+        if not target_ids:
+            return {
+                "ok": False,
+                "error": "unknown_element",
+                "message": f"could not find a board element matching {intent.target!r}",
+                "retryable": True,
+            }
+        style = intent.style
+        if style == "pulse":
+            style = "circle"
+        internal = HighlightArgs.model_validate({"target_ids": target_ids, "style": style, "color": "yellow"})
+        spec = ToolSpec(
+            name="board_highlight",
+            kind="board",
+            event_type="highlight",
+            target_mode="new",
+            args_model=HighlightArgs,
+            description="internal highlight",
+            allowed_element_types=(),
+        )
+        return await self._execute_board(db, lesson_id, spec, internal, source=source, animate=animate)
+
+    async def _execute_clear_region_intent(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        args: Any,
+        *,
+        source: str,
+        animate: bool,
+    ) -> dict[str, Any]:
+        from app.board.schemas import ClearArgs, EraseArgs
+
+        if args.scope == "all":
+            spec = ToolSpec(
+                name="board_clear",
+                kind="board",
+                event_type="clear",
+                target_mode="none",
+                args_model=ClearArgs,
+                description="clear board",
+                allowed_element_types=(),
+            )
+            return await self._execute_board(db, lesson_id, spec, ClearArgs(), source=source, animate=animate)
+
+        # Region clear: map named region to a normalized rect for erase.
+        rects = {
+            "left": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},
+            "right": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0},
+            "top": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 0.5},
+            "bottom": {"x": 0.0, "y": 0.5, "w": 1.0, "h": 0.5},
+            "center": {"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6},
+            "bottom_left": {"x": 0.0, "y": 0.5, "w": 0.5, "h": 0.5},
+            "bottom_right": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5},
+        }
+        region = rects.get(str(args.region))
+        if region is None:
+            return _invalid_arguments("unsupported region for board_clear_region")
+        erase = EraseArgs.model_validate({"scope": "region", "region": region})
+        spec = ToolSpec(
+            name="board_erase",
+            kind="board",
+            event_type="erase",
+            target_mode="new",
+            args_model=EraseArgs,
+            description="erase region",
+            allowed_element_types=(),
+        )
+        return await self._execute_board(db, lesson_id, spec, erase, source=source, animate=animate)
 
     @staticmethod
     def _parse_arguments(

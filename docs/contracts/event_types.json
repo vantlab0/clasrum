@@ -23,7 +23,8 @@
     "erase_element",
     "highlight",
     "clear",
-    "move_element"
+    "move_element",
+    "viewport_focus"
   ],
   "board_tools": [
     "board_write_text",
@@ -104,7 +105,8 @@
     "session.interrupted",
     "session.ended",
     "error",
-    "pong"
+    "pong",
+    "viewport.focus"
   ],
   "ws_messages_client": [
     "audio.start",

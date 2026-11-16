@@ -12,6 +12,10 @@ import 'render/chalk_text.dart';
 import 'render/board_render_cache.dart';
 import 'runtime/animation_scheduler.dart';
 import 'runtime/blackboard_controller.dart';
+import 'runtime/board_viewport_controller.dart';
+import 'templates/template_definition.dart';
+import 'templates/template_registry.dart';
+import 'templates/template_renderer.dart';
 
 /// The tutorial board widget (CONTRACTS §10).
 ///
@@ -24,15 +28,26 @@ class BlackboardView extends StatelessWidget {
     super.key,
     required this.controller,
     this.interactive = true,
+    this.viewportController,
+    this.templateRegistry,
   });
 
   final BlackboardController controller;
   final bool interactive;
+  final BoardViewportController? viewportController;
+  final TemplateRegistry? templateRegistry;
 
   @override
   Widget build(BuildContext context) {
+    final repaint = viewportController == null
+        ? controller.repaint
+        : _CombinedListenable(<Listenable>[
+            controller.repaint,
+            viewportController,
+          ]);
+
     return ListenableBuilder(
-      listenable: controller.repaint,
+      listenable: repaint,
       builder: (context, _) {
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -40,7 +55,13 @@ class BlackboardView extends StatelessWidget {
               constraints.maxWidth.isFinite ? constraints.maxWidth : 600,
               constraints.maxHeight.isFinite ? constraints.maxHeight : 400,
             );
-            final transform = BoardTransform.fromSize(size);
+            var transform = BoardTransform.fromSize(size);
+            if (viewportController != null) {
+              transform = transform.withViewport(
+                offset: viewportController.offset,
+                scale: viewportController.scale,
+              );
+            }
             final document = controller.document;
 
             return CustomPaint(
@@ -51,12 +72,35 @@ class BlackboardView extends StatelessWidget {
                 animations: controller.animations,
                 bounds: BoardBoundsRegistry(),
                 interactive: interactive,
+                templateRegistry: templateRegistry,
               ),
             );
           },
         );
       },
     );
+  }
+}
+
+/// Merges multiple [Listenable]s into one so a single [ListenableBuilder] can
+/// repaint when any source notifies.
+class _CombinedListenable extends Listenable {
+  _CombinedListenable(this.listenables);
+
+  final List<Listenable> listenables;
+
+  @override
+  void addListener(void Function() listener) {
+    for (final l in listenables) {
+      l.addListener(listener);
+    }
+  }
+
+  @override
+  void removeListener(void Function() listener) {
+    for (final l in listenables) {
+      l.removeListener(listener);
+    }
   }
 }
 
@@ -68,6 +112,7 @@ class _BoardPainter extends CustomPainter {
     required this.animations,
     required this.bounds,
     required this.interactive,
+    this.templateRegistry,
   });
 
   final BoardDocument document;
@@ -75,6 +120,7 @@ class _BoardPainter extends CustomPainter {
   final BoardAnimationScheduler animations;
   final BoardBoundsRegistry bounds;
   final bool interactive;
+  final TemplateRegistry? templateRegistry;
 
   final _textEngine = ChalkTextEngine();
 
@@ -155,6 +201,9 @@ class _BoardPainter extends CustomPainter {
       case BoardEventType.eraseElement:
       case BoardEventType.clear:
       case BoardEventType.moveElement:
+        break;
+      case BoardEventType.drawTemplate:
+        _paintDrawing(canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.unknown:
         break;
@@ -871,6 +920,39 @@ class _BoardPainter extends CustomPainter {
     );
     bounds.put(element.elementId, BoardRect.fromLTWH(position.x, position.y,
         element.size?.w ?? 0.3, element.size?.h ?? 0.09));
+  }
+
+  void _paintDrawing(
+    ui.Canvas canvas,
+    BoardElement element,
+    BoardPoint position,
+    double progress,
+    Color color,
+  ) {
+    final payload = element.payloadParsed;
+    if (payload is! DrawingPayload) return;
+
+    final steps = payload.steps;
+    if (steps == null || steps.isEmpty) return;
+
+    final sz = element.size ?? BoardSize(0.3, 0.2);
+
+    final result = DrawingRenderer.render(
+      canvas,
+      steps,
+      transform,
+      position,
+      sz,
+      progress: progress,
+    );
+
+    // Write measured bounds so highlights can target drawing parts.
+    for (final id in result.elementIds) {
+      final b = result.bounds[id];
+      if (b != null) {
+        bounds.put(id, b);
+      }
+    }
   }
 
   void _strokePath(

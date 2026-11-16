@@ -41,12 +41,14 @@ from app.config import get_settings
 from app.contracts import dtos, mappers
 from app.core import errors
 from app.core.deps import resolve_student
+from app.db.constants import BoardEventSource, Speaker
 from app.db.models import Lesson
 from app.db.session import session_scope
 from app.graph import service as graph_service
 from app.lessons import service as lessons_service
 from app.lessons.board_reads import get_board_snapshot, get_transcript_cursor
 from app.lessons.transcripts import append_transcript_entry
+from app.realtime.transcript_triggers import TranscriptTriggerSystem
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +144,7 @@ class LessonRealtimeHub:
         self._lock = asyncio.Lock()
         self._board: BoardService | None = None
         self._qwen_factory: type[QwenSession] | None = None
+        self._trigger_system: TranscriptTriggerSystem | None = None
 
     # -- wiring -----------------------------------------------------------
 
@@ -150,6 +153,14 @@ class LessonRealtimeHub:
 
     def set_qwen_factory(self, factory: type[QwenSession]) -> None:
         self._qwen_factory = factory
+
+    def set_trigger_system(self, trigger_system: TranscriptTriggerSystem) -> None:
+        """Attach the transcript trigger system (shared with the Board Director)."""
+        self._trigger_system = trigger_system
+
+    @property
+    def trigger_system(self) -> TranscriptTriggerSystem | None:
+        return self._trigger_system
 
     # -- BoardEventPublisher / LessonStatePublisher ----------------------
 
@@ -510,6 +521,21 @@ class LessonRealtimeHub:
                 if entry is not None:
                     await self._persist_transcript(db, lesson_id, entry)
                     await socket.websocket.send_json({MSG_TYPE: MSG_TRANSCRIPT_ENTRY, "entry": entry})
+                    # Non-blocking transcript trigger matching (deterministic, local).
+                    if self._trigger_system is not None:
+                        try:
+                            is_final = etype == "conversation.item.input_audio_transcription.completed"
+                            await self._trigger_system.handle_transcript(
+                                db,
+                                lesson_id,
+                                str(entry.get("text") or ""),
+                                speaker=str(entry.get("speaker") or Speaker.TUTOR),
+                                is_final=is_final,
+                            )
+                        except Exception:  # pragma: no cover - triggers must not block audio
+                            logger.exception(
+                                "transcript trigger processing failed lesson=%s", lesson_id
+                            )
                 continue
 
             if etype == "response.function_call_arguments.done":
@@ -532,16 +558,25 @@ class LessonRealtimeHub:
         event: dict[str, Any],
     ) -> None:
         """Execute a Qwen tool call via the registry and return the result."""
+        import time
+
         from app.board.registry import ToolRegistry
 
         call_id = event.get("call_id")
-        name = event.get("name")
+        name = str(event.get("name") or "")
         arguments = event.get("arguments", "{}")
         if not call_id or not name:
             return
 
-        registry = ToolRegistry(board=self._board or BoardService())
+        if name == "board_intent":
+            logger.info("board_intent tool_call received lesson=%s", lesson_id)
+
+        registry = ToolRegistry(
+            board=self._board or BoardService(),
+            trigger_system=self._trigger_system,
+        )
         registry.set_lesson_publisher(self)
+        started = time.perf_counter()
         try:
             result = await registry.execute_structured(
                 db, lesson_id, name, arguments, source="qwen_tool"
@@ -556,6 +591,14 @@ class LessonRealtimeHub:
                 "message": "the board operation could not be completed",
                 "retryable": False,
             }
+        finally:
+            if name == "board_intent":
+                logger.info(
+                    "board_intent handled lesson=%s ok=%s duration_ms=%.1f",
+                    lesson_id,
+                    bool(result.get("ok")) if isinstance(result, dict) else False,
+                    (time.perf_counter() - started) * 1000,
+                )
 
         try:
             if socket.qwen is not None:
@@ -738,7 +781,8 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
 def _openai_tools() -> list[dict[str, Any]]:
     from app.board.registry import ToolRegistry
 
-    return ToolRegistry().openai_tools()
+    # Realtime model receives intent + lesson tools only; low-level board tools are internal.
+    return ToolRegistry().public_openai_tools()
 
 
 __all__ = [

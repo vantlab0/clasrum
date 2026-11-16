@@ -14,11 +14,15 @@ from app.board.schemas import (
     ALL_TOOL_NAMES,
     BOARD_TOOL_EVENT_TYPES,
     BOARD_TOOL_NAMES,
+    INTENT_TOOL_NAMES,
+    INTERNAL_BOARD_TOOL_NAMES,
     LESSON_TOOL_NAMES,
+    REALTIME_TOOL_NAMES,
     TOOL_SPECS,
     TOOL_SPECS_BY_NAME,
     ToolSpec,
     openai_tool_schemas,
+    public_openai_tool_schemas,
 )
 from app.board.service import (
     BOARD_EVENT_TYPES,

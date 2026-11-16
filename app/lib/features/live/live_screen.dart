@@ -10,7 +10,10 @@ import 'package:record/record.dart';
 import '../../blackboard/blackboard_view.dart';
 import '../../blackboard/model/board_document.dart';
 import '../../blackboard/model/board_event.dart';
+import '../../blackboard/model/board_geometry.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
+import '../../blackboard/runtime/board_viewport_controller.dart';
+import '../../blackboard/templates/template_registry.dart';
 import '../../core/theme.dart';
 import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
@@ -56,8 +59,11 @@ class _LiveScreenState extends State<LiveScreen>
   String? _cameraError;
 
   late final BlackboardController _boardController;
+  late final BoardViewportController _viewportController;
   late final AnimationController _pulseController;
   late final AiAudioPlaybackController _audioPlayback;
+
+  Size? _lastViewportSize;
 
   StreamSubscription<ConnectionState>? _connSub;
   StreamSubscription<String>? _errSub;
@@ -72,6 +78,14 @@ class _LiveScreenState extends State<LiveScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _boardController = BlackboardController();
+    _viewportController = BoardViewportController(tickerProvider: this);
+    TemplateRegistry.registerBuiltIns();
+    // Track board content bounds so the viewport can clamp panning.
+    _boardController.addListener(() {
+      if (!mounted) return;
+      final bounds = _boardController.document.allVisibleBounds;
+      _viewportController.onContentBoundsChanged(bounds);
+    });
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
@@ -128,6 +142,7 @@ class _LiveScreenState extends State<LiveScreen>
     _audioPlayback.dispose();
     _pulseController.dispose();
     _boardController.dispose();
+    _viewportController.dispose();
     super.dispose();
   }
 
@@ -197,6 +212,9 @@ class _LiveScreenState extends State<LiveScreen>
           _error = 'Lesson ended.';
         });
         break;
+      case RealtimeMessageType.viewportFocus:
+        _applyViewportFocus(message.payload);
+        break;
       case RealtimeMessageType.sessionInterrupted:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
         unawaited(_stopMic(discard: true, silent: true));
@@ -253,6 +271,64 @@ class _LiveScreenState extends State<LiveScreen>
       } catch (_) {}
     }
     if (events.isNotEmpty) _boardController.enqueueAll(events);
+  }
+
+  void _applyViewportFocus(Map<String, dynamic> payload) {
+    final targetIds = <String>[];
+    final rawTargetId = payload['target_id'];
+    if (rawTargetId != null) targetIds.add(rawTargetId.toString());
+    final rawTargetIds = payload['target_ids'];
+    if (rawTargetIds is List) {
+      for (final id in rawTargetIds) {
+        if (id != null) targetIds.add(id.toString());
+      }
+    }
+
+    BoardRect? region;
+    final rawRegion = payload['region'];
+    if (rawRegion is Map) {
+      region = BoardRect.tryParse(rawRegion);
+    }
+
+    final position = BoardPoint.tryParse(payload['position'] ?? payload['at']);
+    final scale = payload['scale'] is num
+        ? (payload['scale'] as num).toDouble()
+        : (payload['scale'] is String
+            ? double.tryParse(payload['scale'])
+            : null);
+    final animate = payload['animate'] != false;
+
+    if (targetIds.isNotEmpty) {
+      unawaited(_viewportController.focusOnElements(
+        targetIds,
+        document: _boardController.document,
+        animate: animate,
+      ));
+    } else if (region != null) {
+      unawaited(_viewportController.focusOnRect(
+        region,
+        animate: animate,
+      ));
+    } else if (position != null) {
+      // Focus on a point: create a small rect around it.
+      final pointRect = BoardRect(
+        position.x - 0.02,
+        position.y - 0.02,
+        0.04,
+        0.04,
+      ).clamp01();
+      unawaited(_viewportController.focusOnRect(
+        pointRect,
+        animate: animate,
+      ));
+    }
+    if (scale != null && scale > 0) {
+      // Apply requested scale after any pan.
+      _viewportController.setViewport(
+        _viewportController.offset,
+        scale.clamp(0.5, 2.0),
+      );
+    }
   }
 
   void _handleAudioDelta(RealtimeMessage message) {
@@ -654,6 +730,13 @@ class _LiveScreenState extends State<LiveScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Report viewport size to the controller for mobile-first auto-pan decisions.
+    final viewportSize = MediaQuery.of(context).size;
+    if (_lastViewportSize != viewportSize) {
+      _lastViewportSize = viewportSize;
+      _viewportController.onViewportSizeChanged(viewportSize);
+    }
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Stack(
@@ -661,7 +744,33 @@ class _LiveScreenState extends State<LiveScreen>
         children: <Widget>[
           // Blackboard remains mounted at all times.
           const Positioned.fill(child: ColoredBox(color: Color(0xFF000000))),
-          Positioned.fill(child: BlackboardView(controller: _boardController)),
+          Positioned.fill(
+            child: GestureDetector(
+              onPanStart: (_) => _viewportController.onManualInteractionStart(),
+              onPanUpdate: (details) {
+                final dxNorm = details.delta.dx / viewportSize.width;
+                final dyNorm = details.delta.dy / viewportSize.height;
+                _viewportController.setViewport(
+                  _viewportController.offset + Offset(dxNorm, dyNorm),
+                  _viewportController.scale,
+                );
+              },
+              onPanEnd: (_) => _viewportController.onManualInteractionEnd(),
+              onScaleStart: (_) => _viewportController.onManualInteractionStart(),
+              onScaleUpdate: (details) {
+                _viewportController.setViewport(
+                  _viewportController.offset,
+                  (_viewportController.scale * details.scale)
+                      .clamp(0.5, 2.0),
+                );
+              },
+              onScaleEnd: (_) => _viewportController.onManualInteractionEnd(),
+              child: BlackboardView(
+                controller: _boardController,
+                viewportController: _viewportController,
+              ),
+            ),
+          ),
 
           if (_error != null)
             Positioned(

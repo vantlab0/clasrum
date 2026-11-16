@@ -67,10 +67,17 @@ class Settings(BaseSettings):
     notes_timeout_seconds: float = 120.0
     notes_max_transcript_chars: int = 60000
 
+    # --- Board Director (intent -> structured board plan) ------------------
+    board_director_model: str = "qwen-flash"  # Qwen3.7-Flash / flash-tier director
+    board_director_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    board_director_api_key: str = ""  # falls back to effective_notes_api_key / qwen_api_key
+    board_director_timeout_seconds: float = 20.0
+
     # --- board / lesson behaviour -----------------------------------------
     board_snapshot_interval_events: int = 40
     board_snapshot_keep: int = 5
     transcript_batch_size: int = 20
+    max_triggers_per_lesson: int = 50
 
     @property
     def is_sqlite(self) -> bool:
@@ -79,6 +86,10 @@ class Settings(BaseSettings):
     @property
     def effective_notes_api_key(self) -> str:
         return self.notes_api_key or self.qwen_api_key
+
+    @property
+    def effective_board_director_api_key(self) -> str:
+        return self.board_director_api_key or self.effective_notes_api_key
 
     @property
     def qwen_configured(self) -> bool:
