@@ -111,9 +111,7 @@ class ChalkTextStyleSpec {
     if (definitionTerm) return _specs['definitionTerm']!;
     final normalized = (style ?? 'body').toLowerCase();
     if (normalized == 'heading') {
-      return headingLevel <= 1
-          ? _specs['heading']!
-          : _specs['subheading']!;
+      return headingLevel <= 1 ? _specs['heading']! : _specs['subheading']!;
     }
     if (normalized == 'numbered') return _specs['numbered']!;
     return _specs[normalized] ?? _specs['body']!;
@@ -188,11 +186,9 @@ class ChalkTextEngine {
     TextAlign textAlign = TextAlign.left,
   }) {
     final safeSize = fontSizePx.clamp(6.0, 200.0);
-    final safeWidth = maxWidthPx.isFinite && maxWidthPx > 0
-        ? maxWidthPx
-        : 10000.0;
-    final key =
-        '${_stableHash(text)}|${spec.cacheKey}|${color.toARGB32()}|'
+    final safeWidth =
+        maxWidthPx.isFinite && maxWidthPx > 0 ? maxWidthPx : 10000.0;
+    final key = '${_stableHash(text)}|${spec.cacheKey}|${color.toARGB32()}|'
         '${safeSize.toStringAsFixed(2)}|${safeWidth.round()}|${textAlign.index}';
     final cached = _cache[key];
     if (cached != null) {
@@ -219,7 +215,8 @@ class ChalkTextEngine {
       color: color,
       fontSizePx: safeSize,
       maxWidthPx: safeWidth,
-      grain: _generateGrain(text, spec, painter.width, painter.height, safeSize),
+      grain:
+          _generateGrain(text, spec, painter.width, painter.height, safeSize),
     );
     _cache[key] = layout;
     _lru.add(key);
@@ -299,8 +296,7 @@ class ChalkTextEngine {
     final scale = (layout.fontSizePx / 32).clamp(0.5, 3.0);
     canvas.save();
     canvas.translate(origin.dx, origin.dy);
-    final revealWidth =
-        layout.width * clamped + layout.fontSizePx * 0.35 + 1;
+    final revealWidth = layout.width * clamped + layout.fontSizePx * 0.35 + 1;
     final clipHeight = layout.height + layout.fontSizePx;
     canvas.clipRect(
       Rect.fromLTWH(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert' as convert;
 
 import 'package:flutter/material.dart';
@@ -13,6 +14,8 @@ import '../../core/widgets/glass_widgets.dart';
 import '../../core/widgets/profile_menu.dart';
 import '../../main.dart';
 import '../../services/realtime_client.dart';
+import '../../features/flashcards/flashcards_screen.dart';
+import '../../features/test_yourself/test_yourself_screen.dart';
 
 /// Notes screen: recent sessions + saved structured notes.
 class NotesScreen extends StatefulWidget {
@@ -191,7 +194,7 @@ class _NotesScreenState extends State<NotesScreen> {
     );
     final seed = (id.isNotEmpty ? id : cleanTitle).hashCode.abs() % 1000000;
     // Title-based preview image for cards (stable per item via seed).
-    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=flux';
+    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=turbo';
   }
 
   void _showComingSoonShare() {
@@ -259,8 +262,8 @@ class _NotesScreenState extends State<NotesScreen> {
   Future<void> _deleteLesson(Map<String, dynamic> lesson) async {
     final id = lesson['id'] as String? ?? '';
     if (id.isEmpty) return;
-    final confirmed = await _confirmDelete('Delete session?',
-        'This will remove the session from this device.');
+    final confirmed = await _confirmDelete(
+        'Delete session?', 'This will remove the session from this device.');
     if (!confirmed) return;
     await widget.storage.hideLesson(id);
     if (mounted) setState(() {});
@@ -448,6 +451,130 @@ class _NotesScreenState extends State<NotesScreen> {
     }
   }
 
+  Future<void> _showNoteMenu(Map<String, dynamic> note) async {
+    final bool? result = await showDialog<bool>(
+          context: context,
+          barrierColor: Colors.black.withValues(alpha: 0.55),
+          builder: (context) => GlassModal(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Note actions',
+                  style: TextStyle(
+                      color: AppColors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 12),
+                GlassContainer(
+                  radius: AppRadius.md,
+                  padding: const EdgeInsets.all(12),
+                  blurSigma: 6,
+                  backgroundOpacity: 0.7,
+                  borderOpacity: 0.5,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      _MenuItem(
+                        label: 'Generate Quiz',
+                        icon: PwonyIconKind.notes,
+                        onTap: () {
+                          Navigator.of(context).pop(true);
+                          _generateQuizFromNote(note);
+                        },
+                      ),
+                      const Divider(
+                        color: AppColors.border,
+                        height: 8,
+                      ),
+                      _MenuItem(
+                        label: 'Generate Flashcards',
+                        icon: PwonyIconKind.flashcard,
+                        onTap: () {
+                          Navigator.of(context).pop(true);
+                          _generateFlashcardsFromNote(note);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ) ??
+        false;
+    if (result == true) {
+      // Action performed
+    }
+  }
+
+  Future<void> _generateQuizFromNote(Map<String, dynamic> note) async {
+    final noteId = note['id'] as String?;
+    if (noteId == null || noteId.isEmpty) return;
+    // Get note title for reference and pre-populate topic
+    final noteTitle = _noteTitle(note);
+    // Get actual note content from the saved note (content_markdown field)
+    final noteContent = note['content_markdown'] as String? ?? '';
+    // Close the contextual menu; the _MenuItem handler already popped it.
+    // Navigate to test yourself screen with note title and content
+    Navigator.of(context)
+        .push(
+      MaterialPageRoute<void>(
+        builder: (context) => TestYourselfScreen(
+          config: widget.config,
+          storage: widget.storage,
+          initialTopic: noteTitle,
+          initialNoteContent: noteContent.isNotEmpty ? noteContent : null,
+        ),
+      ),
+    )
+        .then((_) {
+      // After returning from test, we could reload or show results
+    });
+    // Show indication that quiz generation was triggered from note
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Generating quiz from note: $noteTitle')),
+      );
+    }
+  }
+
+  Future<void> _generateFlashcardsFromNote(Map<String, dynamic> note) async {
+    final noteId = note['id'] as String?;
+    if (noteId == null || noteId.isEmpty) return;
+    // Get note title for reference
+    final noteTitle = _noteTitle(note);
+    // Get note content for flashcard generation
+    final noteContent = note['content_markdown'] as String? ?? '';
+    // Close the contextual menu; the _MenuItem handler already popped it.
+    // Navigate to flashcards screen with note context
+    Navigator.of(context)
+        .push(
+      MaterialPageRoute<void>(
+        builder: (context) => FlashcardsScreen(
+          config: widget.config,
+          storage: widget.storage,
+          initialNoteTitle: noteTitle,
+          initialNoteContent: noteContent.isNotEmpty ? noteContent : null,
+          initialLessonId: note['lesson_id'] as String?,
+          initialSubject: note['subject'] as String?,
+        ),
+      ),
+    )
+        .then((_) {
+      // After returning from flashcards, we could reload or show results
+    });
+    // Show indication that flashcard generation was triggered from note
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Generating flashcards from note: $noteTitle')),
+      );
+    }
+  }
+
   void _showSessionModal(Map<String, dynamic> lesson) {
     final lessonId = lesson['id'] as String? ?? '';
     if (lessonId.isEmpty) return;
@@ -597,8 +724,9 @@ class _NotesScreenState extends State<NotesScreen> {
                           final lesson = lessons[index];
                           final title = _lessonTitle(lesson);
                           final displayTime = _lessonDisplayTime(lesson);
-                          final timestamp =
-                              displayTime != null ? relativeTime(displayTime) : '—';
+                          final timestamp = displayTime != null
+                              ? relativeTime(displayTime)
+                              : '—';
                           final id = lesson['id'] as String? ?? '';
                           return _ImageCard(
                             imageUrl: _unsplashPreviewUrl(id: id, topic: title),
@@ -633,14 +761,16 @@ class _NotesScreenState extends State<NotesScreen> {
                           final note = notes[index];
                           final title = _noteTitle(note);
                           final displayTime = _noteDisplayTime(note);
-                          final timestamp =
-                              displayTime != null ? relativeTime(displayTime) : '—';
+                          final timestamp = displayTime != null
+                              ? relativeTime(displayTime)
+                              : '—';
                           final id = note['id'] as String? ?? '';
                           return _ImageCard(
                             imageUrl: _unsplashPreviewUrl(id: id, topic: title),
                             title: title,
                             timestamp: timestamp,
                             onTap: () => _openNote(id, title: title),
+                            onLongPress: () => _showNoteMenu(note),
                             onMenuSelected: (action) {
                               switch (action) {
                                 case _CardMenuAction.rename:
@@ -710,6 +840,7 @@ class _ImageCard extends StatelessWidget {
     required this.title,
     required this.timestamp,
     required this.onTap,
+    this.onLongPress,
     required this.onMenuSelected,
   });
 
@@ -717,6 +848,7 @@ class _ImageCard extends StatelessWidget {
   final String title;
   final String timestamp;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
   final ValueChanged<_CardMenuAction> onMenuSelected;
 
   @override
@@ -727,6 +859,7 @@ class _ImageCard extends StatelessWidget {
         color: AppColors.surface,
         child: InkWell(
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Stack(
             fit: StackFit.expand,
             children: <Widget>[
@@ -928,7 +1061,8 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> {
         if (mounted) {
           setState(() {
             _loading = false;
-            _error = 'Unable to load note from the server. Please try again later.';
+            _error =
+                'Unable to load note from the server. Please try again later.';
           });
         }
       } else {
@@ -983,8 +1117,8 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> {
         ),
       );
     }
-    final sections = (note['sections'] as List?)?.cast<dynamic>() ??
-        const <dynamic>[];
+    final sections =
+        (note['sections'] as List?)?.cast<dynamic>() ?? const <dynamic>[];
     final markdown = note['content_markdown'] as String? ?? '';
 
     return SingleChildScrollView(
@@ -998,7 +1132,8 @@ class _NoteDetailScreenState extends State<NoteDetailScreen> {
             decoration: BoxDecoration(
               color: AppColors.surface.withValues(alpha: 0.55),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: AppColors.border.withValues(alpha: 0.4)),
+              border:
+                  Border.all(color: AppColors.border.withValues(alpha: 0.4)),
             ),
             child: sections.isNotEmpty
                 ? _SectionsView(sections: sections)
@@ -1079,6 +1214,48 @@ class _SectionsView extends StatelessWidget {
   }
 }
 
+class _MenuItem extends StatelessWidget {
+  const _MenuItem({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String label;
+  final PwonyIconKind icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+          child: Row(
+            children: <Widget>[
+              PwonyIcon(icon, size: 18, color: AppColors.muted),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _BodyText extends StatelessWidget {
   const _BodyText(this.text);
   final String text;
@@ -1097,7 +1274,8 @@ class _BodyText extends StatelessWidget {
           trimmed.trimLeft().startsWith('* ') ||
           RegExp(r'^\d+\.\s').hasMatch(trimmed.trimLeft());
       if (isBullet) {
-        final clean = trimmed.trimLeft().replaceFirst(RegExp(r'^([-*]|\d+\.)\s*'), '');
+        final clean =
+            trimmed.trimLeft().replaceFirst(RegExp(r'^([-*]|\d+\.)\s*'), '');
         spans.add(Padding(
           padding: const EdgeInsets.only(left: 4, bottom: 6),
           child: Row(
@@ -1126,6 +1304,7 @@ class _BodyText extends StatelessWidget {
         ));
       }
     }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: spans);
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.start, children: spans);
   }
 }

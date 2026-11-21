@@ -26,7 +26,6 @@ enum BoardEventType {
   clear('clear'),
   moveElement('move_element'),
   viewportFocus('viewport_focus'),
-  drawTemplate('draw_template'),
   unknown('unknown');
 
   const BoardEventType(this.wireName);
@@ -63,8 +62,6 @@ enum BoardEventType {
       case BoardEventType.highlight:
       case BoardEventType.highlightEquation:
         return 6;
-      case BoardEventType.drawTemplate:
-        return 4;
       default:
         return 0;
     }
@@ -233,6 +230,7 @@ class WriteBulletListPayload extends BoardPayload {
   final String? style;
   @override
   final String? color;
+  @override
   final String? markerColor;
 
   final List<String> _warnings;
@@ -266,6 +264,7 @@ class EquationPayload extends BoardPayload {
   final BoardSize? size;
   @override
   final String? color;
+  @override
   final double? fontScale;
   final String? caption;
 
@@ -283,24 +282,43 @@ class UpdateEquationPayload extends BoardPayload {
   UpdateEquationPayload(super.raw)
       : latex = _str(raw['latex']),
         color = _str(raw['color']),
-        fontScale = asDouble(raw['font_scale']);
+        fontScale = asDouble(raw['font_scale']),
+        _warnings = const <String>[];
 
   final String? latex;
   @override
   final String? color;
+  @override
   final double? fontScale;
+
+  final List<String> _warnings;
+
+  @override
+  bool get isValid => latex != null && latex!.trim().isNotEmpty;
+
+  @override
+  List<String> get warnings => List<String>.unmodifiable(_warnings);
 }
 
 /// Typed payload for `highlight_equation`.
 class HighlightEquationPayload extends BoardPayload {
   HighlightEquationPayload(super.raw)
       : color = _str(raw['color']),
-        style = _str(raw['style']) ?? 'box';
+        style = _str(raw['style']) ?? 'box',
+        _warnings = const <String>[];
 
   @override
   final String? color;
   @override
   final String? style;
+
+  final List<String> _warnings;
+
+  @override
+  bool get isValid => true;
+
+  @override
+  List<String> get warnings => List<String>.unmodifiable(_warnings);
 }
 
 /// Typed payload for `draw_line`.
@@ -368,6 +386,7 @@ class DrawShapePayload extends BoardPayload {
   final BoardSize? size;
   @override
   final String? color;
+  @override
   final String? fillColor;
   final double? strokeWidth;
   final double? corners;
@@ -402,7 +421,9 @@ class DrawPathPayload extends BoardPayload {
   final bool smooth;
   @override
   final String? color;
+  @override
   final double? strokeWidth;
+  @override
   final String? fillColor;
 
   final List<String> _warnings;
@@ -436,6 +457,7 @@ class DrawArrowPayload extends BoardPayload {
   final String? label;
   @override
   final String? color;
+  @override
   final double? strokeWidth;
 
   final List<String> _warnings;
@@ -546,7 +568,6 @@ class DrawDiagramPayload extends BoardPayload {
     'flowchart',
     'circuit',
     'force',
-    'biology',
     'concept_map',
     'geometry',
     'generic',
@@ -567,8 +588,7 @@ class DrawDiagramPayload extends BoardPayload {
       : const <String>[];
 
   @override
-  BoardPoint? get position =>
-      nodes.isEmpty ? null : nodes.first.position;
+  BoardPoint? get position => nodes.isEmpty ? null : nodes.first.position;
 
   @override
   BoardSize? get size => null;
@@ -645,6 +665,7 @@ class PlotFunctionPayload extends BoardPayload {
   final List<BoardPoint> samples;
   @override
   final String? color;
+  @override
   final double? strokeWidth;
   @override
   final String? style;
@@ -756,7 +777,7 @@ class GraphLabelPayload extends BoardPayload {
   List<String> get warnings => List<String>.unmodifiable(_warnings);
 }
 
-/// Typed payload for `erase`.
+/// Payload for `erase`.
 class ErasePayload extends BoardPayload {
   ErasePayload(super.raw)
       : scope = _str(raw['scope']) ?? 'all',
@@ -804,6 +825,7 @@ class HighlightPayload extends BoardPayload {
   final String? style;
   @override
   final String? color;
+  @override
   final String? label;
 
   final List<String> _warnings;
@@ -815,7 +837,7 @@ class HighlightPayload extends BoardPayload {
   List<String> get warnings => List<String>.unmodifiable(_warnings);
 }
 
-/// Typed payload for `move_element`.
+/// Payload for `move_element`.
 class MoveElementPayload extends BoardPayload {
   MoveElementPayload(super.raw)
       : position = BoardPoint.tryParse(raw['position']),
@@ -836,156 +858,6 @@ class MoveElementPayload extends BoardPayload {
 
   @override
   List<String> get warnings => List<String>.unmodifiable(_warnings);
-}
-
-/// Payload for `viewport_focus` (management event requesting the client
-/// viewport to pan/zoom so the given element(s) become comfortably visible).
-class ViewportFocusPayload extends BoardPayload {
-  ViewportFocusPayload(super.raw)
-      : targetId = _str(raw['target_id']),
-        position = BoardPoint.tryParse(raw['position']),
-        region = BoardRect.tryParse(raw['region']),
-        scale = asDouble(raw['scale']),
-        animate = raw['animate'] == false ? false : true,
-        _warnings = <String>[];
-
-  /// Element id to focus (preferred over position/region).
-  final String? targetId;
-  /// Normalized point to center on.
-  final BoardPoint? position;
-  /// Normalized rect to bring into view.
-  final BoardRect? region;
-  /// Requested zoom scale (null = no zoom change).
-  final double? scale;
-  /// Whether to animate the movement.
-  final bool animate;
-
-  final List<String> _warnings;
-
-  @override
-  bool get isValid =>
-      targetId != null || position != null || region != null || scale != null;
-
-  @override
-  List<String> get warnings => List<String>.unmodifiable(_warnings);
-}
-
-/// Payload for `draw_template` (management event requesting the client to
-/// render a registered educational template).
-class TemplatePayload extends BoardPayload {
-  TemplatePayload(super.raw)
-      : templateId = _str(raw['template_id']),
-        region = BoardRect.tryParse(raw['region']),
-        position = BoardPoint.tryParse(raw['position']),
-        size = BoardSize.tryParse(raw['size']),
-        labels = _stringList(raw['labels']),
-        animate = raw['animate'] == false ? false : true,
-        _warnings = <String>[];
-
-  /// Template identifier (must match a registered template).
-  final String? templateId;
-  /// Preferred placement region (hint for layout).
-  final BoardRect? region;
-  /// Normalized position of the template origin.
-  final BoardPoint? position;
-  /// Normalized size of the template.
-  final BoardSize? size;
-  /// Label IDs to include (subset of the template's labels).
-  final List<String> labels;
-  /// Whether to animate the drawing.
-  final bool animate;
-
-  final List<String> _warnings;
-
-  @override
-  bool get isValid => templateId != null && templateId!.isNotEmpty;
-
-  @override
-  List<String> get warnings => List<String>.unmodifiable(_warnings);
-}
-
-/// Payload for generative drawing plans (Phase 4).
-///
-/// Contains a sequence of [DrawingStep] instructions generated by the AI.
-/// The backend validates this payload against registered [DrawingSchema]es
-/// before sending it to Flutter for rendering. The structure is flexible enough
-/// to represent diagrams never previously encountered in the application.
-class DrawingPayload extends BoardPayload {
-  DrawingPayload(super.raw)
-      : steps = _drawingSteps(raw['steps']),
-        animate = raw['animate'] == false ? false : true,
-        _warnings = <String>[];
-
-  /// Generated drawing steps. Each step defines geometry, action, and style.
-  final List<DrawingStep> steps;
-
-  /// Whether to animate the drawing.
-  final bool animate;
-
-  final List<String> _warnings;
-
-  @override
-  bool get isValid => steps != null && steps.isNotEmpty;
-
-  @override
-  List<String> get warnings => List<String>.unmodifiable(_warnings);
-}
-
-/// Static helper to parse steps from raw JSON.
-static List<DrawingStep> _drawingSteps(dynamic raw) {
-  if (raw == null || raw is! List) return const <DrawingStep>[];
-  final steps = <DrawingStep>[];
-  for (final stepRaw in raw) {
-    if (stepRaw is! Map) continue;
-    final action = _drawingAction(stepRaw['action']);
-    if (action == null) continue;
-    final id = stepRaw['id'] as String? ?? '';
-    final geometry = stepRaw['geometry'] as Map? ?? {};
-    final durationMs = _num(stepRaw['durationMs']) ?? 600;
-    final delayMs = _num(stepRaw['delayMs']) ?? 0;
-    final targetId = stepRaw['targetId'] as String?;
-    final color = ChalkPalette.resolve(stepRaw['color']);
-    final strokeWidth = _num(stepRaw['strokeWidth']) ?? 2.0;
-    steps.add(DrawingStep(
-      id: id,
-      action: action,
-      geometry: geometry,
-      durationMs: durationMs,
-      delayMs: delayMs,
-      targetId: targetId,
-      color: color,
-      strokeWidth: strokeWidth,
-    ));
-  }
-  return steps;
-}
-
-/// Parses the [DrawingAction] string into the enum.
-static DrawingAction? _drawingAction(dynamic raw) {
-  if (raw == null) return null;
-  return DrawingAction.values.firstWhere(
-    (e) => e.toString().split('.').last == raw.toString(),
-    orElse: () => null,
-  );
-}
-
-/// Utility: parses a num from [obj].
-static double? _num(dynamic obj) {
-  if (obj is num) return obj.toDouble();
-  if (obj is String) return double.tryParse(obj.trim());
-  return null;
-}
-
-/// Utility: parses a BoardPoint from [obj].
-static BoardPoint? _boardPoint(dynamic obj) {
-  if (obj == null) return null;
-  if (obj is BoardPoint) return obj;
-  if (obj is Map) {
-    final x = _num(obj['x']);
-    final y = _num(obj['y']);
-    if (x != null && y != null) return BoardPoint(x, y);
-  }
-  return null;
 }
 
 /// Payload for management events with no fields (`clear`, `erase_element`).
@@ -1029,8 +901,7 @@ class BoardEvent {
     final warnings = <String>[];
     final type = _str(json['type']) ?? '';
     final sequence = asDouble(json['sequence'])?.round() ?? 0;
-    final boardRevision =
-        asDouble(json['board_revision'])?.round() ?? sequence;
+    final boardRevision = asDouble(json['board_revision'])?.round() ?? sequence;
     final eventId = _str(json['event_id']) ??
         'synthetic_${sequence}_${type.isEmpty ? 'unknown' : type}';
     if (_str(json['event_id']) == null) {
@@ -1042,9 +913,8 @@ class BoardEvent {
     final kind = BoardEventType.fromWire(type);
     if (!kind.isKnown) warnings.add('unknown board event type "$type"');
     final createdAtRaw = _str(json['created_at']);
-    final createdAt =
-        DateTime.tryParse(createdAtRaw ?? '')?.toUtc() ??
-            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    final createdAt = DateTime.tryParse(createdAtRaw ?? '')?.toUtc() ??
+        DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
     return BoardEvent(
       eventId: eventId,
       sessionId: _str(json['session_id']) ?? '',
@@ -1142,8 +1012,7 @@ class BoardEvent {
     final data = payloadParsed;
     if (data is HighlightPayload) return data.targetIds;
     final id = elementId;
-    if (id != null &&
-        (kind == BoardEventType.highlightEquation)) {
+    if (id != null && (kind == BoardEventType.highlightEquation)) {
       return <String>[id];
     }
     return const <String>[];
@@ -1228,12 +1097,7 @@ class BoardEvent {
         return EmptyPayload(raw);
       case BoardEventType.moveElement:
         return MoveElementPayload(raw);
-      case BoardEventType.viewportFocus:
-        return ViewportFocusPayload(raw);
-      case BoardEventType.drawTemplate:
-        return TemplatePayload(raw);
-      case BoardEventType.unknown:
-      case null:
+      default:
         return UnknownPayload(raw);
     }
   }
@@ -1252,7 +1116,8 @@ Map<String, dynamic>? _map(Object? value) {
   if (value is Map<String, dynamic>) return value;
   if (value is Map) {
     return value.map<String, dynamic>(
-      (dynamic key, dynamic val) => MapEntry<String, dynamic>(key.toString(), val),
+      (dynamic key, dynamic val) =>
+          MapEntry<String, dynamic>(key.toString(), val),
     );
   }
   return null;
@@ -1330,55 +1195,7 @@ List<PlotPointData> _plotPoints(Object? value) {
   return List<PlotPointData>.unmodifiable(points);
 }
 
-/// A step in a generative drawing plan (Phase 4).
-///
-/// Defines a single drawing action with geometry, style, and animation
-/// parameters. Steps are executed in order to progressively reveal a drawing.
-class DrawingStep {
-  const DrawingStep({
-    required this.id,
-    required this.action,
-    required this.geometry,
-    this.durationMs = 600,
-    this.delayMs = 0,
-    this.targetId,
-    this.color,
-    this.strokeWidth = 2.0,
-  });
-
-  /// Unique step identifier within the drawing.
-  final String id;
-
-  /// The drawing action to perform.
-  final DrawingAction action;
-
-  /// Normalized geometry for this step. Interpretation depends on [action]:
-  ///   - line: {start: {x, y}, end: {x, y}}
-  ///   - path: {points: [{x, y}, ...], closed?, smooth?}
-  ///   - rectangle: {position: {x, y}, size: {w, h}}
-  ///   - circle: {position: {x, y}, size: {w, h}}
-  ///   - text: {text, position, style?}
-  ///   - highlight: {targetIds: [...]}
-  ///   - fadeInLabel: (no geometry)
-  final Map<String, dynamic> geometry;
-
-  /// Animation duration in milliseconds.
-  final double durationMs;
-
-  /// Delay before this step starts, in milliseconds.
-  final double delayMs;
-
-  /// Element ID to target (for highlight actions).
-  final String? targetId;
-
-  /// Stroke color.
-  final Color? color;
-
-  /// Stroke width in logical pixels.
-  final double strokeWidth;
-}
-
-/// Drawing action type for a drawing step.
+/// Progressive drawing actions understood by the renderer.
 enum DrawingAction {
   line,
   path,
@@ -1387,6 +1204,29 @@ enum DrawingAction {
   text,
   highlight,
   fadeInLabel,
+}
+
+/// One executable drawing step in a generative drawing plan.
+class DrawingStep {
+  const DrawingStep({
+    required this.id,
+    required this.action,
+    required this.geometry,
+    required this.durationMs,
+    required this.delayMs,
+    this.targetId,
+    this.color,
+    this.strokeWidth = 2.0,
+  });
+
+  final String id;
+  final DrawingAction action;
+  final Map<String, dynamic> geometry;
+  final int durationMs;
+  final int delayMs;
+  final String? targetId;
+  final dynamic color;
+  final double strokeWidth;
 }
 
 /// Payload for generative drawing plans (Phase 4).
@@ -1410,14 +1250,22 @@ class DrawingPayload extends BoardPayload {
   final List<String> _warnings;
 
   @override
-  bool get isValid => steps != null && steps.isNotEmpty;
+  bool get isValid => steps.isNotEmpty;
 
   @override
   List<String> get warnings => List<String>.unmodifiable(_warnings);
 }
 
-/// Static helper to parse steps from raw JSON.
-static List<DrawingStep> _drawingSteps(dynamic raw) {
+/// Parses a raw [payload] map into a [DrawingPayload].
+///
+/// Invalid steps are dropped instead of throwing; callers can check
+/// `result.steps` and render a placeholder when the plan is empty.
+DrawingPayload parseDrawingPayload(Map<String, dynamic> payload) {
+  return DrawingPayload(Map<String, dynamic>.unmodifiable(payload));
+}
+
+/// Parses ordered drawing steps from raw JSON.
+List<DrawingStep> _drawingSteps(dynamic raw) {
   if (raw == null || raw is! List) return const <DrawingStep>[];
   final steps = <DrawingStep>[];
   for (final stepRaw in raw) {
@@ -1425,11 +1273,14 @@ static List<DrawingStep> _drawingSteps(dynamic raw) {
     final action = _drawingAction(stepRaw['action']);
     if (action == null) continue;
     final id = stepRaw['id'] as String? ?? '';
-    final geometry = stepRaw['geometry'] as Map? ?? {};
-    final durationMs = _num(stepRaw['durationMs']) ?? 600;
-    final delayMs = _num(stepRaw['delayMs']) ?? 0;
+    final geometryRaw = stepRaw['geometry'];
+    final geometry = geometryRaw is Map
+        ? Map<String, dynamic>.from(geometryRaw)
+        : <String, dynamic>{};
+    final durationMs = (_num(stepRaw['durationMs']) ?? 600).round();
+    final delayMs = (_num(stepRaw['delayMs']) ?? 0).round();
     final targetId = stepRaw['targetId'] as String?;
-    final color = ChalkPalette.resolve(stepRaw['color']);
+    final color = stepRaw['color'];
     final strokeWidth = _num(stepRaw['strokeWidth']) ?? 2.0;
     steps.add(DrawingStep(
       id: id,
@@ -1446,23 +1297,24 @@ static List<DrawingStep> _drawingSteps(dynamic raw) {
 }
 
 /// Parses the [DrawingAction] string into the enum.
-static DrawingAction? _drawingAction(dynamic raw) {
+DrawingAction? _drawingAction(dynamic raw) {
   if (raw == null) return null;
-  return DrawingAction.values.firstWhere(
-    (e) => e.toString().split('.').last == raw.toString(),
-    orElse: () => null,
-  );
+  final value = raw.toString();
+  for (final action in DrawingAction.values) {
+    if (action.name == value) return action;
+  }
+  return null;
 }
 
 /// Utility: parses a num from [obj].
-static double? _num(dynamic obj) {
+double? _num(dynamic obj) {
   if (obj is num) return obj.toDouble();
   if (obj is String) return double.tryParse(obj.trim());
   return null;
 }
 
 /// Utility: parses a BoardPoint from [obj].
-static BoardPoint? _boardPoint(dynamic obj) {
+BoardPoint? _boardPoint(dynamic obj) {
   if (obj == null) return null;
   if (obj is BoardPoint) return obj;
   if (obj is Map) {
@@ -1499,5 +1351,4 @@ const List<String> kBoardEventWireTypes = <String>[
   'clear',
   'move_element',
   'viewport_focus',
-  'draw_template',
 ];

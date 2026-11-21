@@ -1,10 +1,11 @@
-"""Lesson lifecycle, board, transcript and notes REST endpoints (§5).
+"""Lesson lifecycle, board, transcript, notes and flashcards REST endpoints (§5).
 
 Every route below is lesson-scoped and goes through ``require_lesson_owner``
 before touching any child table, so ownership is enforced in exactly one place.
 """
 from __future__ import annotations
 
+import logging
 from fastapi import APIRouter, BackgroundTasks, Query
 
 from app.contracts import dtos
@@ -14,6 +15,10 @@ from app.core.deps import CurrentStudent, DbSession, require_lesson_owner
 from app.db import repositories
 from app.lessons import service as lessons_service
 from app.notes.service import request_note_generation, run_generation
+from app.flashcards.mappers import set_to_detail, set_to_summary
+from app.flashcards.service import request_flashcard_generation, run_flashcard_generation
+from app.videos.service import search_videos, get_watch_history, record_watch
+from app.quiz.service import generate_quiz, get_quiz_results
 
 router = APIRouter(prefix="/lessons", tags=["lessons"])
 
@@ -176,3 +181,185 @@ async def generate_lesson_notes(
     detail = note_to_detail(note)
     background_tasks.add_task(run_generation, note.id)
     return dtos.GenerateNotesResponse(note=detail, status=detail.status)
+
+
+# ---------------------------------------------------------------------------
+# flashcards
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{lesson_id}/flashcards",
+    response_model=dtos.FlashcardSetListResponse,
+)
+async def list_flashcard_sets(
+    lesson_id: str,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.FlashcardSetListResponse:
+    """List previously generated flashcard sets for a lesson."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    sets = await repositories.list_flashcard_sets_for_lesson(db, lesson.id)
+    items: list[dtos.FlashcardSetSummary] = []
+    for flashcard_set in sets:
+        cards = await repositories.list_flashcards_in_set(db, flashcard_set.id)
+        items.append(
+            set_to_summary(flashcard_set, flashcard_count=len(cards))
+        )
+    return dtos.FlashcardSetListResponse(
+        items=items,
+        total=len(items),
+        limit=len(items) or 50,
+        offset=0,
+    )
+
+
+@router.get(
+    "/{lesson_id}/flashcards/{flashcard_set_id}",
+    response_model=dtos.FlashcardSet,
+)
+async def get_flashcard_set(
+    lesson_id: str,
+    flashcard_set_id: str,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.FlashcardSet:
+    """Read one persisted flashcard set, including every generated card."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    flashcard_set = await repositories.get_flashcard_set(db, flashcard_set_id)
+    if flashcard_set is None or flashcard_set.lesson_id != lesson.id:
+        raise errors.not_found(
+            "Flashcard set not found",
+            details={"flashcard_set_id": flashcard_set_id},
+        )
+    cards = await repositories.list_flashcards_in_set(db, flashcard_set.id)
+    return set_to_detail(flashcard_set, cards)
+
+
+@router.post(
+    "/{lesson_id}/flashcards/generate",
+    response_model=dtos.FlashcardSetSummary,
+)
+async def generate_flashcards(
+    lesson_id: str,
+    payload: dtos.CreateFlashcardSetRequest,
+    background_tasks: BackgroundTasks,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.FlashcardSetSummary:
+    """Generate flashcards from a lesson topic.
+
+    Returns a summary ID immediately; the background task populates the
+    flashcard set with AI-generated cards keyed by the set ID.
+    """
+    if len(payload.topic.strip()) < 2:
+        raise errors.invalid_arguments(
+            "topic must be at least 2 characters",
+        )
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    flashcard_set = await request_flashcard_generation(db, lesson, payload)
+    # Commit before yielding to the background task so it can see the row from
+    # its own session (FastAPI runs background tasks before dependency teardown).
+    await db.commit()
+    background_tasks.add_task(
+        run_flashcard_generation,
+        flashcard_set.id,
+        payload.topic,
+        payload.subject,
+        payload.class_level,
+    )
+    cards = await repositories.list_flashcards_in_set(db, flashcard_set.id)
+    return set_to_summary(flashcard_set, flashcard_count=len(cards))
+
+
+# ---------------------------------------------------------------------------
+# quiz
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{lesson_id}/quiz/generate",
+    response_model=dtos.QuizGenerationResponse,
+)
+async def generate_quiz_endpoint(
+    lesson_id: str,
+    payload: dtos.QuizGenerationRequest,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.QuizGenerationResponse:
+    """Generate a multiple-choice quiz on the given topic."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    result = await generate_quiz(db, lesson, payload)
+    return result
+
+
+@router.post(
+    "/{lesson_id}/quiz/results",
+    response_model=dtos.QuizResultsResponse,
+)
+async def get_quiz_results_endpoint(
+    lesson_id: str,
+    payload: dtos.QuizResultsRequest,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.QuizResultsResponse:
+    """Calculate and return quiz results from submitted answers."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    result = await get_quiz_results(db, lesson, payload)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# videos
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{lesson_id}/videos/search",
+    response_model=dtos.VideoSearchResponse,
+)
+async def search_videos_endpoint(
+    lesson_id: str,
+    payload: dtos.VideoSearchRequest,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.VideoSearchResponse:
+    """Search for educational videos on a given topic.
+
+    The AI may refine the query for better results, but preserves the original
+    topic intent. Returns ranked videos with metadata.
+    """
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    result = await search_videos(db, lesson, payload)
+    return result
+
+
+@router.get(
+    "/{lesson_id}/videos/history",
+    response_model=dtos.VideoWatchHistoryResponse,
+)
+async def get_watch_history_endpoint(
+    lesson_id: str,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.VideoWatchHistoryResponse:
+    """Retrieve the student's watch history for videos."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    result = await get_watch_history(db, lesson)
+    return result
+
+
+@router.post(
+    "/{lesson_id}/videos/watched",
+    response_model=dtos.VideoWatchHistoryEntry,
+)
+async def record_watched_endpoint(
+    lesson_id: str,
+    payload: dtos.VideoWatchHistoryEntry,
+    student: CurrentStudent,
+    db: DbSession,
+) -> dtos.VideoWatchHistoryEntry:
+    """Record that a student watched a video."""
+    lesson = await require_lesson_owner(lesson_id, student, db)
+    result = await record_watch(db, lesson, payload)
+    return result

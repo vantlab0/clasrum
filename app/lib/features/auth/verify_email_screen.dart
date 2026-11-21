@@ -58,13 +58,15 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
       final auth = AuthScope.maybeOf(context)?.authService;
       if (auth == null) {
         if (!mounted) return;
-        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        setState(
+            () => _error = 'Authentication is unavailable. Please try again.');
         return;
       }
       await auth.resendSignupVerificationEmail(email: widget.email);
       if (!mounted) return;
       setState(() {
-        _info = 'Verification email sent. Please check your inbox and spam folder.';
+        _info =
+            'Verification email sent. Please check your inbox and spam folder.';
       });
       _startCooldown(30);
     } on AuthException catch (e) {
@@ -100,8 +102,7 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
       }
       if (confirmed) {
         setState(() {
-          _info =
-              'Email verified. Please sign in to continue.';
+          _info = 'Email verified. Please sign in to continue.';
         });
       } else {
         setState(() {
@@ -180,7 +181,9 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                 ],
                 const SizedBox(height: 18),
                 AuthPrimaryButton(
-                  label: _checking ? 'Checking...' : 'I\'ve verified, check status',
+                  label: _checking
+                      ? 'Checking...'
+                      : 'I\'ve verified, check status',
                   onPressed: _checkStatus,
                   loading: _checking,
                 ),
@@ -226,7 +229,8 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                           _cooldownSeconds > 0
                               ? 'Resend email in ${_cooldownSeconds}s'
                               : 'Resend verification email',
-                          key: ValueKey<String>('resend-${_cooldownSeconds > 0}'),
+                          key: ValueKey<String>(
+                              'resend-${_cooldownSeconds > 0}'),
                           style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w500,

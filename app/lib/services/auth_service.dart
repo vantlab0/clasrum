@@ -37,7 +37,8 @@ class AuthService extends ChangeNotifier {
   User? get currentUser => SupabaseBootstrap.clientOrNull?.auth.currentUser;
 
   /// Current Supabase session, if any.
-  Session? get currentSession => SupabaseBootstrap.clientOrNull?.auth.currentSession;
+  Session? get currentSession =>
+      SupabaseBootstrap.clientOrNull?.auth.currentSession;
 
   /// Stream of Supabase auth state changes.
   Stream<AuthState> get authStateChanges {
@@ -188,9 +189,11 @@ class AuthService extends ChangeNotifier {
     final token = session?.accessToken;
     if (token != null && token.isNotEmpty) {
       await storage.setToken(token);
-    } else {
-      await storage.clearAuthToken();
     }
+    // Never clear here: at startup the Supabase INITIAL_SESSION may arrive
+    // before the restored session is visible, and clearing on a null session
+    // would permanently wipe the mirror for an actually signed-in user.
+    // Sign-out paths clear the mirror explicitly via `clearUserScopedData`.
   }
 
   @override

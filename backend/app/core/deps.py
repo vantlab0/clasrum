@@ -39,6 +39,15 @@ async def resolve_student(db: AsyncSession, token: str | None) -> User:
         student = await db.get(User, student_id)
         if student is not None and student.is_active:
             return student
+        import logging
+
+        logging.getLogger("app.auth").warning(
+            "local token decoded but user not found/inactive: %s", student_id
+        )
+    else:
+        import logging
+
+        logging.getLogger("app.auth").warning("local token decode failed")
 
     # 2) Optional Supabase compatibility path.
     payload = decode_supabase_access_token(token)

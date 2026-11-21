@@ -14,7 +14,6 @@ import 'runtime/animation_scheduler.dart';
 import 'runtime/blackboard_controller.dart';
 import 'runtime/board_viewport_controller.dart';
 import 'templates/template_definition.dart';
-import 'templates/template_registry.dart';
 import 'templates/template_renderer.dart';
 
 /// The tutorial board widget (CONTRACTS §10).
@@ -29,21 +28,20 @@ class BlackboardView extends StatelessWidget {
     required this.controller,
     this.interactive = true,
     this.viewportController,
-    this.templateRegistry,
   });
 
   final BlackboardController controller;
   final bool interactive;
   final BoardViewportController? viewportController;
-  final TemplateRegistry? templateRegistry;
 
   @override
   Widget build(BuildContext context) {
-    final repaint = viewportController == null
+    final viewport = viewportController;
+    final repaint = viewport == null
         ? controller.repaint
         : _CombinedListenable(<Listenable>[
             controller.repaint,
-            viewportController,
+            viewport,
           ]);
 
     return ListenableBuilder(
@@ -56,10 +54,11 @@ class BlackboardView extends StatelessWidget {
               constraints.maxHeight.isFinite ? constraints.maxHeight : 400,
             );
             var transform = BoardTransform.fromSize(size);
-            if (viewportController != null) {
+            final viewport = viewportController;
+            if (viewport != null) {
               transform = transform.withViewport(
-                offset: viewportController.offset,
-                scale: viewportController.scale,
+                offset: viewport.offset,
+                scale: viewport.scale,
               );
             }
             final document = controller.document;
@@ -72,7 +71,6 @@ class BlackboardView extends StatelessWidget {
                 animations: controller.animations,
                 bounds: BoardBoundsRegistry(),
                 interactive: interactive,
-                templateRegistry: templateRegistry,
               ),
             );
           },
@@ -112,7 +110,6 @@ class _BoardPainter extends CustomPainter {
     required this.animations,
     required this.bounds,
     required this.interactive,
-    this.templateRegistry,
   });
 
   final BoardDocument document;
@@ -120,7 +117,6 @@ class _BoardPainter extends CustomPainter {
   final BoardAnimationScheduler animations;
   final BoardBoundsRegistry bounds;
   final bool interactive;
-  final TemplateRegistry? templateRegistry;
 
   final _textEngine = ChalkTextEngine();
 
@@ -162,10 +158,12 @@ class _BoardPainter extends CustomPainter {
         break;
       case BoardEventType.writeEquation:
       case BoardEventType.updateEquation:
-        _paintEquationElement(canvas, element, resolvedPosition, progress, color);
+        _paintEquationElement(
+            canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.highlightEquation:
-        _paintHighlightEquation(canvas, element, resolvedPosition, progress, color);
+        _paintHighlightEquation(
+            canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.drawLine:
         _paintDrawLine(canvas, element, resolvedPosition, progress, color);
@@ -180,10 +178,12 @@ class _BoardPainter extends CustomPainter {
         _paintDrawArrow(canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.drawDiagram:
+        _paintDrawing(canvas, element, resolvedPosition, progress, color);
         _paintDrawDiagram(canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.createCoordinateSystem:
-        _paintCoordinateSystem(canvas, element, resolvedPosition, progress, color);
+        _paintCoordinateSystem(
+            canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.plotFunction:
         _paintPlotFunction(canvas, element, resolvedPosition, progress, color);
@@ -202,8 +202,8 @@ class _BoardPainter extends CustomPainter {
       case BoardEventType.clear:
       case BoardEventType.moveElement:
         break;
-      case BoardEventType.drawTemplate:
-        _paintDrawing(canvas, element, resolvedPosition, progress, color);
+      case BoardEventType.viewportFocus:
+        // Viewport focus does not produce rendered board content.
         break;
       case BoardEventType.unknown:
         break;
@@ -299,9 +299,10 @@ class _BoardPainter extends CustomPainter {
     final paint = Paint()
       ..color = ChalkPalette.withOpacity(color, 0.9)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = transform.strokePixels((element.payload['stroke_width'] as num?)?.toDouble());
-    final box = Rect.fromLTWH(px, py, transform.width * 0.4,
-        transform.unit * 0.09);
+      ..strokeWidth = transform
+          .strokePixels((element.payload['stroke_width'] as num?)?.toDouble());
+    final box =
+        Rect.fromLTWH(px, py, transform.width * 0.4, transform.unit * 0.09);
     canvas.drawRRect(
       RRect.fromRectAndRadius(box, const Radius.circular(4)),
       paint,
@@ -318,9 +319,14 @@ class _BoardPainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: box.width);
     textPainter.paint(canvas, Offset(px + 8, py + 4));
-    bounds.put(element.elementId, BoardRect.fromLTWH(
-      position.x, position.y, 0.4, 0.09,
-    ));
+    bounds.put(
+        element.elementId,
+        BoardRect.fromLTWH(
+          position.x,
+          position.y,
+          0.4,
+          0.09,
+        ));
   }
 
   // ------------------------------------------------------------ drawings --
@@ -335,7 +341,8 @@ class _BoardPainter extends CustomPainter {
     final payload = element.payload;
     final start = BoardPoint.tryParse(payload['start']) ?? BoardPoint.zero;
     final end = BoardPoint.tryParse(payload['end']) ?? BoardPoint.zero;
-    final strokeWidth = transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
+    final strokeWidth =
+        transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
     final dash = (payload['dash'] as List?)
         ?.whereType<num>()
         .map<double>((e) => e.toDouble())
@@ -344,7 +351,8 @@ class _BoardPainter extends CustomPainter {
     final path = Path()
       ..moveTo(transform.sx(start.x), transform.sy(start.y))
       ..lineTo(transform.sx(end.x), transform.sy(end.y));
-    _strokePath(canvas, path, color, strokeWidth, dash: dash, progress: progress);
+    _strokePath(canvas, path, color, strokeWidth,
+        dash: dash, progress: progress);
     bounds.put(element.elementId, BoardRect.fromPoints(start, end));
   }
 
@@ -360,7 +368,8 @@ class _BoardPainter extends CustomPainter {
     final pos = position;
     final size = element.size ?? const BoardSize(0.2, 0.14);
     final rect = transform.rectToPixels(BoardRect.fromPositionSize(pos, size));
-    final strokeWidth = transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
+    final strokeWidth =
+        transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
     final fill = ChalkPalette.resolve(payload['fill_color'],
         fallback: color.withValues(alpha: 0.15));
 
@@ -420,7 +429,8 @@ class _BoardPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth;
     canvas.drawPath(path, strokePaint);
-    bounds.put(element.elementId, BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h));
+    bounds.put(
+        element.elementId, BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h));
   }
 
   void _paintDrawPath(
@@ -432,10 +442,11 @@ class _BoardPainter extends CustomPainter {
   ) {
     final payload = element.payload;
     final pts = (payload['points'] as List?)
-        ?.whereType<Map<dynamic, dynamic>>()
-        .map((e) => BoardPoint.tryParse(e))
-        .whereType<BoardPoint>()
-        .toList() ?? <BoardPoint>[];
+            ?.whereType<Map<dynamic, dynamic>>()
+            .map((e) => BoardPoint.tryParse(e))
+            .whereType<BoardPoint>()
+            .toList() ??
+        <BoardPoint>[];
     if (pts.length < 2) return;
 
     final path = Path()
@@ -445,7 +456,8 @@ class _BoardPainter extends CustomPainter {
     }
     if (payload['closed'] == true) path.close();
 
-    final strokeWidth = transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
+    final strokeWidth =
+        transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
     final fill = ChalkPalette.resolve(payload['fill_color'],
         fallback: color.withValues(alpha: 0.12));
     if (payload['closed'] == true) {
@@ -463,9 +475,14 @@ class _BoardPainter extends CustomPainter {
     final maxX = xs.reduce((a, b) => a > b ? a : b);
     final minY = ys.reduce((a, b) => a < b ? a : b);
     final maxY = ys.reduce((a, b) => a > b ? a : b);
-    bounds.put(element.elementId, BoardRect(
-      minX, minY, (maxX - minX).clamp(0, 1), (maxY - minY).clamp(0, 1),
-    ));
+    bounds.put(
+        element.elementId,
+        BoardRect(
+          minX,
+          minY,
+          (maxX - minX).clamp(0, 1),
+          (maxY - minY).clamp(0, 1),
+        ));
   }
 
   void _paintDrawArrow(
@@ -478,11 +495,11 @@ class _BoardPainter extends CustomPainter {
     final payload = element.payload;
     final start = BoardPoint.tryParse(payload['start']) ?? BoardPoint.zero;
     final end = BoardPoint.tryParse(payload['end']) ?? BoardPoint.zero;
-    final strokeWidth = transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
+    final strokeWidth =
+        transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
     final curve = (payload['curve'] as num?)?.toDouble() ?? 0;
 
-    final path = Path()
-      ..moveTo(transform.sx(start.x), transform.sy(start.y));
+    final path = Path()..moveTo(transform.sx(start.x), transform.sy(start.y));
     if (curve.abs() > 0.01) {
       final control = BoardPoint(
         start.x + (end.x - start.x) * 0.5 + curve * (start.y - end.y) * 0.3,
@@ -585,11 +602,12 @@ class _BoardPainter extends CustomPainter {
           path.addOval(rect);
           break;
         default:
-          path.addRRect(RRect.fromRectAndRadius(rect, const Radius.circular(8)));
+          path.addRRect(
+              RRect.fromRectAndRadius(rect, const Radius.circular(8)));
           break;
       }
-      final fillPaint =
-          Paint()..color = ChalkPalette.withOpacity(nodeColor, 0.18);
+      final fillPaint = Paint()
+        ..color = ChalkPalette.withOpacity(nodeColor, 0.18);
       canvas.drawPath(path, fillPaint);
       final strokePaint = Paint()
         ..color = nodeColor
@@ -610,9 +628,11 @@ class _BoardPainter extends CustomPainter {
           ),
           textDirection: TextDirection.ltr,
         )..layout(maxWidth: rect.width - 12);
-        tp.paint(canvas, Offset(rect.left + 6, rect.top + (rect.height - tp.height) / 2));
+        tp.paint(canvas,
+            Offset(rect.left + 6, rect.top + (rect.height - tp.height) / 2));
       }
-      bounds.put(id, BoardRect.fromLTWH(nodePos.x, nodePos.y, nodeSize.w, nodeSize.h));
+      bounds.put(
+          id, BoardRect.fromLTWH(nodePos.x, nodePos.y, nodeSize.w, nodeSize.h));
     }
   }
 
@@ -664,13 +684,15 @@ class _BoardPainter extends CustomPainter {
       var x = xMin;
       while (x <= xMax) {
         final px = rect.left + (x - xMin) / (xMax - xMin) * rect.width;
-        canvas.drawLine(Offset(px, rect.top), Offset(px, rect.bottom), gridPaint);
+        canvas.drawLine(
+            Offset(px, rect.top), Offset(px, rect.bottom), gridPaint);
         x += xStep;
       }
       var y = yMin;
       while (y <= yMax) {
         final py = rect.bottom - (y - yMin) / (yMax - yMin) * rect.height;
-        canvas.drawLine(Offset(rect.left, py), Offset(rect.right, py), gridPaint);
+        canvas.drawLine(
+            Offset(rect.left, py), Offset(rect.right, py), gridPaint);
         y += yStep;
       }
     }
@@ -681,7 +703,9 @@ class _BoardPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: xLabel,
-          style: TextStyle(fontSize: transform.fontPixels(0.024), color: color,
+          style: TextStyle(
+              fontSize: transform.fontPixels(0.024),
+              color: color,
               fontFamily: 'Chalkboard'),
         ),
         textDirection: TextDirection.ltr,
@@ -692,15 +716,19 @@ class _BoardPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: yLabel,
-          style: TextStyle(fontSize: transform.fontPixels(0.024), color: color,
+          style: TextStyle(
+              fontSize: transform.fontPixels(0.024),
+              color: color,
               fontFamily: 'Chalkboard'),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      tp.paint(canvas, Offset(rect.left - tp.width - 6, rect.center.dy - tp.height / 2));
+      tp.paint(canvas,
+          Offset(rect.left - tp.width - 6, rect.center.dy - tp.height / 2));
     }
 
-    bounds.put(element.elementId, BoardRect.fromLTWH(position.x, position.y, size.w, size.h));
+    bounds.put(element.elementId,
+        BoardRect.fromLTWH(position.x, position.y, size.w, size.h));
   }
 
   void _paintPlotFunction(
@@ -712,13 +740,15 @@ class _BoardPainter extends CustomPainter {
   ) {
     final payload = element.payload;
     final samples = (payload['samples'] as List?)
-        ?.whereType<Map<dynamic, dynamic>>()
-        .map((e) => BoardPoint.tryParse(e))
-        .whereType<BoardPoint>()
-        .toList() ?? <BoardPoint>[];
+            ?.whereType<Map<dynamic, dynamic>>()
+            .map((e) => BoardPoint.tryParse(e))
+            .whereType<BoardPoint>()
+            .toList() ??
+        <BoardPoint>[];
     if (samples.length < 2) return;
 
-    final strokeWidth = transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
+    final strokeWidth =
+        transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
     final style = payload['style'] as String?;
 
     final path = Path()
@@ -729,7 +759,8 @@ class _BoardPainter extends CustomPainter {
     final dash = style == 'dashed'
         ? <double>[transform.unit * 0.04, transform.unit * 0.03]
         : null;
-    _strokePath(canvas, path, color, strokeWidth, dash: dash, progress: progress);
+    _strokePath(canvas, path, color, strokeWidth,
+        dash: dash, progress: progress);
 
     final xs = samples.map((p) => p.x);
     final ys = samples.map((p) => p.y);
@@ -737,9 +768,14 @@ class _BoardPainter extends CustomPainter {
     final maxX = xs.reduce((a, b) => a > b ? a : b);
     final minY = ys.reduce((a, b) => a < b ? a : b);
     final maxY = ys.reduce((a, b) => a > b ? a : b);
-    bounds.put(element.elementId, BoardRect(
-      minX, minY, (maxX - minX).clamp(0, 1), (maxY - minY).clamp(0, 1),
-    ));
+    bounds.put(
+        element.elementId,
+        BoardRect(
+          minX,
+          minY,
+          (maxX - minX).clamp(0, 1),
+          (maxY - minY).clamp(0, 1),
+        ));
   }
 
   void _paintPlotPoints(
@@ -751,18 +787,19 @@ class _BoardPainter extends CustomPainter {
   ) {
     final payload = element.payload;
     final pts = (payload['points'] as List?)
-        ?.whereType<Map<dynamic, dynamic>>()
-        .map((e) => BoardPoint.tryParse(e))
-        .whereType<BoardPoint>()
-        .toList() ?? <BoardPoint>[];
+            ?.whereType<Map<dynamic, dynamic>>()
+            .map((e) => BoardPoint.tryParse(e))
+            .whereType<BoardPoint>()
+            .toList() ??
+        <BoardPoint>[];
     for (final point in pts) {
       final pointColor = ChalkPalette.resolve(
         element.payload['color'],
         fallback: color,
       );
       final center = transform.toPixels(point);
-      canvas.drawCircle(center, transform.unit * 0.015,
-          Paint()..color = pointColor);
+      canvas.drawCircle(
+          center, transform.unit * 0.015, Paint()..color = pointColor);
     }
     final xs = pts.map((p) => p.x);
     final ys = pts.map((p) => p.y);
@@ -770,9 +807,14 @@ class _BoardPainter extends CustomPainter {
     final maxX = xs.reduce((a, b) => a > b ? a : b);
     final minY = ys.reduce((a, b) => a < b ? a : b);
     final maxY = ys.reduce((a, b) => a > b ? a : b);
-    bounds.put(element.elementId, BoardRect(
-      minX, minY, (maxX - minX).clamp(0, 1), (maxY - minY).clamp(0, 1),
-    ));
+    bounds.put(
+        element.elementId,
+        BoardRect(
+          minX,
+          minY,
+          (maxX - minX).clamp(0, 1),
+          (maxY - minY).clamp(0, 1),
+        ));
   }
 
   void _paintGraphLabel(
@@ -790,14 +832,18 @@ class _BoardPainter extends CustomPainter {
     final tp = TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(fontSize: transform.fontPixels(0.026), color: color,
+        style: TextStyle(
+            fontSize: transform.fontPixels(0.026),
+            color: color,
             fontFamily: 'Chalkboard'),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
     tp.paint(canvas, Offset(center.dx + 6, center.dy - tp.height / 2));
-    bounds.put(element.elementId, BoardRect.fromLTWH(at.x, at.y,
-        tp.width / transform.width, tp.height / transform.height));
+    bounds.put(
+        element.elementId,
+        BoardRect.fromLTWH(at.x, at.y, tp.width / transform.width,
+            tp.height / transform.height));
   }
 
   // ----------------------------------------------------------- annotations --
@@ -811,9 +857,9 @@ class _BoardPainter extends CustomPainter {
   ) {
     final payload = element.payload;
     final style = payload['style'] as String? ?? 'box';
-    final targetIds = (payload['target_ids'] as List?)
-        ?.whereType<String>()
-        .toList() ?? <String>[];
+    final targetIds =
+        (payload['target_ids'] as List?)?.whereType<String>().toList() ??
+            <String>[];
     if (targetIds.isEmpty) return;
 
     final rects = <BoardRect>[];
@@ -825,7 +871,8 @@ class _BoardPainter extends CustomPainter {
 
     final union = rects.reduce((a, b) => a.union(b));
     final pixelRect = transform.rectToPixels(union);
-    final highlightColor = ChalkPalette.resolve(payload['color'], fallback: color);
+    final highlightColor =
+        ChalkPalette.resolve(payload['color'], fallback: color);
 
     switch (style) {
       case 'underline':
@@ -857,8 +904,8 @@ class _BoardPainter extends CustomPainter {
         final boxPaint = Paint()
           ..color = ChalkPalette.withOpacity(highlightColor, 0.25);
         canvas.drawRRect(
-          RRect.fromRectAndRadius(pixelRect.inflate(6),
-              const Radius.circular(6)),
+          RRect.fromRectAndRadius(
+              pixelRect.inflate(6), const Radius.circular(6)),
           boxPaint,
         );
         final strokePaint = Paint()
@@ -866,8 +913,8 @@ class _BoardPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = transform.strokePixels(2.0);
         canvas.drawRRect(
-          RRect.fromRectAndRadius(pixelRect.inflate(6),
-              const Radius.circular(6)),
+          RRect.fromRectAndRadius(
+              pixelRect.inflate(6), const Radius.circular(6)),
           strokePaint,
         );
         break;
@@ -902,7 +949,8 @@ class _BoardPainter extends CustomPainter {
       position,
       element.size ?? const BoardSize(0.3, 0.09),
     ));
-    final highlightColor = ChalkPalette.resolve(payload['color'], fallback: color);
+    final highlightColor =
+        ChalkPalette.resolve(payload['color'], fallback: color);
 
     final boxPaint = Paint()
       ..color = ChalkPalette.withOpacity(highlightColor, 0.25);
@@ -918,8 +966,10 @@ class _BoardPainter extends CustomPainter {
       RRect.fromRectAndRadius(rect.inflate(4), const Radius.circular(4)),
       strokePaint,
     );
-    bounds.put(element.elementId, BoardRect.fromLTWH(position.x, position.y,
-        element.size?.w ?? 0.3, element.size?.h ?? 0.09));
+    bounds.put(
+        element.elementId,
+        BoardRect.fromLTWH(position.x, position.y, element.size?.w ?? 0.3,
+            element.size?.h ?? 0.09));
   }
 
   void _paintDrawing(
@@ -929,11 +979,10 @@ class _BoardPainter extends CustomPainter {
     double progress,
     Color color,
   ) {
-    final payload = element.payloadParsed;
-    if (payload is! DrawingPayload) return;
+    final payload = parseDrawingPayload(element.payload);
 
     final steps = payload.steps;
-    if (steps == null || steps.isEmpty) return;
+    if (steps.isEmpty) return;
 
     final sz = element.size ?? BoardSize(0.3, 0.2);
 
@@ -963,9 +1012,8 @@ class _BoardPainter extends CustomPainter {
     List<double>? dash,
     double progress = 1,
   }) {
-    final effectivePath = progress < 1
-        ? ChalkGeometry.revealPath(path, progress)
-        : path;
+    final effectivePath =
+        progress < 1 ? ChalkGeometry.revealPath(path, progress) : path;
     final drawPath = dash == null || dash.isEmpty
         ? effectivePath
         : ChalkGeometry.dashedPath(effectivePath, dash);

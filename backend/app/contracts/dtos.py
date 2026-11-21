@@ -50,7 +50,6 @@ def normalize_email(value: str) -> str:
 # health / errors
 # ---------------------------------------------------------------------------
 
-
 class HealthResponse(WireModel):
     status: str
     version: str
@@ -72,7 +71,6 @@ class ErrorEnvelope(WireModel):
 # ---------------------------------------------------------------------------
 # auth / student
 # ---------------------------------------------------------------------------
-
 
 class Student(WireModel):
     id: str
@@ -104,7 +102,7 @@ class RegisterRequest(WireModel):
     def _trim_name(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("display_name must not be blank")
+            raise ValueError("display_name must not blank")
         return value
 
 
@@ -144,7 +142,7 @@ class UpdateMeRequest(WireModel):
             return None
         value = value.strip()
         if not value:
-            raise ValueError("display_name must not be blank")
+            raise ValueError("display_name must not blank")
         return value
 
 
@@ -156,8 +154,6 @@ class DeleteDataRequest(WireModel):
     @field_validator("confirm", mode="before")
     @classmethod
     def _confirm_must_be_bool(cls, value: Any) -> Any:
-        # Reject truthy strings ("true", "yes", "1") that Pydantic would
-        # otherwise coerce to bool True — a stray request must never wipe data.
         if isinstance(value, str):
             raise ValueError("confirm must be a boolean true, not a string")
         return value
@@ -170,7 +166,6 @@ class DeleteDataResponse(WireModel):
 # ---------------------------------------------------------------------------
 # lessons
 # ---------------------------------------------------------------------------
-
 
 class CreateLessonRequest(WireModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
@@ -258,6 +253,171 @@ class LessonListResponse(WireModel):
     total: int = 0
     limit: int = 50
     offset: int = 0
+
+
+# ---------------------------------------------------------------------------
+# flashcards
+# ---------------------------------------------------------------------------
+
+class Flashcard(WireModel):
+    id: str
+    topic: str
+    subject: str | None = None
+    class_level: str | None = None
+    question: str
+    answer: str
+    explanation: str | None = None
+    order: int = 0
+
+
+class FlashcardSet(WireModel):
+    id: str
+    topic: str
+    subject: str | None = None
+    class_level: str | None = None
+    status: str = "ready"
+    error: str | None = None
+    created_at: OptUTCDateTime = None
+    flashcards: list[Flashcard] = Field(default_factory=list)
+
+
+class CreateFlashcardSetRequest(WireModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    topic: str = Field(min_length=2, max_length=500)
+    subject: str | None = Field(default=None, max_length=120)
+    class_level: str | None = Field(default=None, max_length=32)
+
+
+class FlashcardSetSummary(WireModel):
+    id: str
+    topic: str
+    subject: str | None = None
+    class_level: str | None = None
+    status: str = "ready"
+    flashcard_count: int
+    created_at: OptUTCDateTime = None
+
+
+class FlashcardSetListResponse(WireModel):
+    items: list[FlashcardSetSummary] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
+class FlashcardCreationResult(WireModel):
+    flashcard_set_id: str
+    flashcards_generated: int
+
+
+# ---------------------------------------------------------------------------
+# quiz
+# ---------------------------------------------------------------------------
+
+
+class QuizQuestionDTO(WireModel):
+    question: str
+    options: list[str]
+    correct_index: int
+    explanation: str | None = None
+
+
+class QuizGenerationRequest(WireModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    topic: str = Field(min_length=2, max_length=500)
+    question_count: int = Field(default=5, ge=1, le=20)
+    duration_minutes: int = Field(default=5, ge=1, le=60)
+    subject: str | None = Field(default=None, max_length=120)
+    class_level: str | None = Field(default=None, max_length=32)
+
+
+class QuizGenerationResponse(WireModel):
+    success: bool
+    questions: list[QuizQuestionDTO]
+    message: str | None = None
+
+
+class QuizResultsRequest(WireModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    question_indices: list[int]
+    selected_options: list[int]
+    time_taken_seconds: int
+
+
+class QuizResultsResponse(WireModel):
+    success: bool
+    total_questions: int
+    correct_answers: int
+    incorrect_answers: int
+    percentage: int
+    time_taken_seconds: int
+    per_question: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# videos
+# ---------------------------------------------------------------------------
+
+class Video(WireModel):
+    id: str  # YouTube video ID
+    title: str
+    description: str | None = None
+    channel_title: str | None = None
+    thumbnail_url: str | None = None
+    view_count: int | None = None
+    duration: str | None = None
+    video_url: str | None = None  # watch URL (embedded player compatible)
+    published_at: datetime | None = None
+
+
+class VideoSearchRequest(WireModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    query: str = Field(min_length=2, max_length=500)
+    subject: str | None = Field(default=None, max_length=120)
+    class_level: str | None = Field(default=None, max_length=32)
+
+
+class VideoSearchResult(WireModel):
+    video_id: str
+    title: str
+    description: str | None = None
+    channel_title: str | None = None
+    thumbnail_url: str | None = None
+    view_count: int | None = None
+    duration: str | None = None
+    published_at: datetime | None = None
+
+
+class VideoSearchResponse(WireModel):
+    query: str
+    refined_query: str | None = None
+    videos: list[VideoSearchResult]
+    total_found: int
+    has_refinement: bool = False
+
+
+class VideoWatchHistoryEntry(WireModel):
+    video_id: str
+    title: str
+    thumbnail_url: str | None = None
+    channel_title: str | None = None
+    search_query: str
+    watched_at: datetime
+
+
+class VideoWatchHistoryResponse(WireModel):
+    items: list[VideoWatchHistoryEntry]
+    total: int
+
+
+class VideoTrendingResponse(WireModel):
+    videos: list[VideoSearchResult]
+    region: str 
+
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +570,8 @@ class ResumeResponse(WireModel):
     needs_notes_prompt: bool
 
 
+
+
 # ---------------------------------------------------------------------------
 # internal (non-wire) payloads
 # ---------------------------------------------------------------------------
@@ -418,3 +580,4 @@ class ResumeResponse(WireModel):
 class LessonCreationResult(WireModel):
     lesson: LessonDetail
     plan: LessonPlan
+

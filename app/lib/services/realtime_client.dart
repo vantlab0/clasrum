@@ -76,7 +76,9 @@ class RealtimeMessage {
   String? get viewportTargetId => payload['target_id'] as String?;
   double? get viewportScale => payload['scale'] is num
       ? (payload['scale'] as num).toDouble()
-      : (payload['scale'] is String ? double.tryParse(payload['scale']) : null);
+      : (payload['scale'] is String
+          ? double.tryParse(payload['scale'].toString())
+          : null);
   BoardPoint? get viewportPosition =>
       BoardPoint.tryParse(payload['position'] ?? payload['at']);
   BoardRect? get viewportRegion => BoardRect.tryParse(payload['region']);
@@ -132,8 +134,7 @@ class RealtimeClient extends ChangeNotifier {
   Stream<RealtimeMessage> get messages => _messageController.stream;
 
   /// Connection lifecycle.
-  Stream<ConnectionState> get connectionState =>
-      _connectionController.stream;
+  Stream<ConnectionState> get connectionState => _connectionController.stream;
 
   /// Friendly error messages surfaced to the UI.
   Stream<String> get errors => _errorController.stream;

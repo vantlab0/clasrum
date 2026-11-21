@@ -84,9 +84,9 @@ class BoardTransform {
   Offset offsetPixels(double normalizedX, double normalizedY) =>
       Offset(sx(normalizedX), sy(normalizedY));
 
-  Size sizeToPixels(BoardSize boardSize) =>
-      Size(boardSize.w * width * viewportScale,
-           boardSize.h * height * viewportScale);
+  Size sizeToPixels(BoardSize boardSize) => Size(
+      boardSize.w * width * viewportScale,
+      boardSize.h * height * viewportScale);
 
   Rect rectToPixels(BoardRect rect) => Rect.fromLTWH(
         sx(rect.x),
@@ -96,21 +96,17 @@ class BoardTransform {
       );
 
   BoardPoint toNormalized(Offset pixels) {
-    final sx = (pixels.dx - contentRect.left) /
-        (viewportScale * width) +
+    final sx = (pixels.dx - contentRect.left) / (viewportScale * width) +
         viewportOffset.dx;
-    final sy = (pixels.dy - contentRect.top) /
-        (viewportScale * height) +
+    final sy = (pixels.dy - contentRect.top) / (viewportScale * height) +
         viewportOffset.dy;
     return BoardPoint(sx, sy);
   }
 
   BoardRect normalizedRect(Rect pixels) => BoardRect(
-        (pixels.left - contentRect.left) /
-            (viewportScale * width) +
+        (pixels.left - contentRect.left) / (viewportScale * width) +
             viewportOffset.dx,
-        (pixels.top - contentRect.top) /
-            (viewportScale * height) +
+        (pixels.top - contentRect.top) / (viewportScale * height) +
             viewportOffset.dy,
         pixels.width / (width * viewportScale),
         pixels.height / (height * viewportScale),

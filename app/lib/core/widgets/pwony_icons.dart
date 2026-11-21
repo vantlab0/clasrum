@@ -25,6 +25,7 @@ enum PwonyIconKind {
   passwordSecurity,
   close,
   moreOptions,
+  menu, // hamburger menu / floating action indicator
   // Additional UI glyphs for consistent replacement of generic icons.
   chevronDown,
   chevronRight,
@@ -36,6 +37,8 @@ enum PwonyIconKind {
   delete,
   transcript,
   interrupt,
+  flashcard,
+  flip,
 }
 
 /// Reusable custom icon widget with consistent sizing and optical alignment.
@@ -190,6 +193,9 @@ class _PwonyIconPainter extends CustomPainter {
       case PwonyIconKind.moreOptions:
         _moreOptions(canvas, s, fill);
         break;
+      case PwonyIconKind.menu:
+        _menu(canvas, s, stroke);
+        break;
       case PwonyIconKind.chevronDown:
         _chevronDown(canvas, s, stroke);
         break;
@@ -219,6 +225,12 @@ class _PwonyIconPainter extends CustomPainter {
         break;
       case PwonyIconKind.interrupt:
         _interrupt(canvas, s, stroke);
+        break;
+      case PwonyIconKind.flashcard:
+        _flashcard(canvas, s, stroke);
+        break;
+      case PwonyIconKind.flip:
+        _flip(canvas, s, stroke);
         break;
     }
     canvas.restore();
@@ -378,8 +390,10 @@ class _PwonyIconPainter extends CustomPainter {
     canvas.drawCircle(c, s * 0.22, p);
     for (var i = 0; i < 6; i++) {
       final a = (math.pi / 3) * i - math.pi / 2;
-      final inner = Offset(c.dx + math.cos(a) * s * 0.22, c.dy + math.sin(a) * s * 0.22);
-      final outer = Offset(c.dx + math.cos(a) * s * 0.285, c.dy + math.sin(a) * s * 0.285);
+      final inner =
+          Offset(c.dx + math.cos(a) * s * 0.22, c.dy + math.sin(a) * s * 0.22);
+      final outer = Offset(
+          c.dx + math.cos(a) * s * 0.285, c.dy + math.sin(a) * s * 0.285);
       canvas.drawLine(inner, outer, p);
     }
   }
@@ -443,7 +457,8 @@ class _PwonyIconPainter extends CustomPainter {
       ..close();
     canvas.drawPath(bell, p);
     canvas.drawArc(
-      Rect.fromCenter(center: Offset(s * 0.5, s * 0.7), width: s * 0.16, height: s * 0.12),
+      Rect.fromCenter(
+          center: Offset(s * 0.5, s * 0.7), width: s * 0.16, height: s * 0.12),
       0.15,
       math.pi - 0.3,
       false,
@@ -464,7 +479,12 @@ class _PwonyIconPainter extends CustomPainter {
       ..cubicTo(s * 0.58, s * 0.2, s * 0.66, s * 0.24, s * 0.66, s * 0.36)
       ..lineTo(s * 0.66, s * 0.44);
     canvas.drawPath(shackle, p);
-    canvas.drawCircle(Offset(s * 0.5, s * 0.6), s * 0.035, Paint()..color = color..style = PaintingStyle.fill);
+    canvas.drawCircle(
+        Offset(s * 0.5, s * 0.6),
+        s * 0.035,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.fill);
   }
 
   void _close(Canvas canvas, double s, Paint p) {
@@ -477,6 +497,18 @@ class _PwonyIconPainter extends CustomPainter {
     for (final x in [0.32, 0.5, 0.68]) {
       canvas.drawCircle(Offset(s * x, s * 0.5), r, fill);
     }
+  }
+
+  void _menu(Canvas canvas, double s, Paint p) {
+    // Three horizontal strokes for hamburger menu icon.
+    final top = s * 0.25;
+    final middle = s * 0.5;
+    final bottom = s * 0.75;
+    final start = s * 0.2;
+    final end = s * 0.8;
+    canvas.drawLine(Offset(start, top), Offset(end, top), p);
+    canvas.drawLine(Offset(start, middle), Offset(end, middle), p);
+    canvas.drawLine(Offset(start, bottom), Offset(end, bottom), p);
   }
 
   void _chevronDown(Canvas canvas, double s, Paint p) {
@@ -559,6 +591,44 @@ class _PwonyIconPainter extends CustomPainter {
     for (final x in [0.38, 0.48, 0.58]) {
       canvas.drawLine(Offset(s * x, s * 0.4), Offset(s * x, s * 0.26), p);
     }
+  }
+
+  void _flashcard(Canvas canvas, double s, Paint p) {
+    // Two stacked cards: the back card offset up-right, the front card below.
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(s * 0.36, s * 0.2, s * 0.42, s * 0.5),
+        Radius.circular(s * 0.07),
+      ),
+      p,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(s * 0.22, s * 0.3, s * 0.42, s * 0.5),
+        Radius.circular(s * 0.07),
+      ),
+      p,
+    );
+    canvas.drawLine(Offset(s * 0.34, s * 0.5), Offset(s * 0.52, s * 0.5), p);
+    canvas.drawLine(Offset(s * 0.34, s * 0.62), Offset(s * 0.46, s * 0.62), p);
+  }
+
+  void _flip(Canvas canvas, double s, Paint p) {
+    final rect =
+        Rect.fromCircle(center: Offset(s * 0.5, s * 0.5), radius: s * 0.29);
+    // Two opposing arcs form a rotation cue around a card-like centre.
+    canvas.drawArc(rect, math.pi * 0.78, math.pi * 0.58, false, p);
+    canvas.drawArc(rect, math.pi * 1.78, math.pi * 0.58, false, p);
+    final topArrow = Path()
+      ..moveTo(s * 0.2, s * 0.38)
+      ..lineTo(s * 0.26, s * 0.25)
+      ..lineTo(s * 0.35, s * 0.33);
+    canvas.drawPath(topArrow, p);
+    final bottomArrow = Path()
+      ..moveTo(s * 0.8, s * 0.62)
+      ..lineTo(s * 0.74, s * 0.75)
+      ..lineTo(s * 0.65, s * 0.67);
+    canvas.drawPath(bottomArrow, p);
   }
 
   void _camera(Canvas canvas, double s, Paint p) {

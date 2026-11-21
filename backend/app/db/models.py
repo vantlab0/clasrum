@@ -133,6 +133,12 @@ class Lesson(IdMixin, TimestampMixin, Base):
     notes: Mapped[list["LessonNote"]] = relationship(
         back_populates="lesson", cascade="all, delete-orphan"
     )
+    flashcard_sets: Mapped[list["LessonFlashcardSet"]] = relationship(
+        back_populates="lesson", cascade="all, delete-orphan"
+    )
+    watch_history: Mapped[list["VideoWatchHistory"]] = relationship(
+        back_populates="lesson", cascade="all, delete-orphan"
+    )
 
 
 class LessonPlan(IdMixin, TimestampMixin, Base):
@@ -186,7 +192,7 @@ class LessonTranscriptEntry(IdMixin, Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     speaker: Mapped[str] = mapped_column(String(16), nullable=False)  # tutor|student|system
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     transcript: Mapped[LessonTranscript] = relationship(back_populates="entries")
@@ -267,3 +273,72 @@ class LessonNote(IdMixin, TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     lesson: Mapped[Lesson] = relationship(back_populates="notes")
+
+
+class LessonFlashcardSet(IdMixin, TimestampMixin, Base):
+    __tablename__ = "lesson_flashcard_sets"
+    __table_args__ = (Index("ix_flashcard_set_lesson", "lesson_id"),)
+
+    lesson_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("lessons.id", ondelete="CASCADE"), nullable=False
+    )
+    topic: Mapped[str] = mapped_column(String(500), nullable=False)
+    subject: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    class_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    lesson: Mapped["Lesson"] = relationship(back_populates="flashcard_sets")
+    flashcards: Mapped[list["LessonFlashcard"]] = relationship(
+        back_populates="flashcard_set", cascade="all, delete-orphan"
+    )
+
+
+class LessonFlashcard(IdMixin, TimestampMixin, Base):
+    __tablename__ = "lesson_flashcards"
+    __table_args__ = (Index("ix_flashcard_set", "flashcard_set_id"),)
+
+    flashcard_set_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("lesson_flashcard_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    question: Mapped[str] = mapped_column(String(500), nullable=False)
+    answer: Mapped[str] = mapped_column(String(1000), nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    flashcard_set: Mapped["LessonFlashcardSet"] = relationship(
+        back_populates="flashcards"
+    )
+
+
+class VideoWatchHistory(IdMixin, TimestampMixin, Base):
+    __tablename__ = "video_watch_history"
+    __table_args__ = (
+        Index("ix_watch_history_lesson_video", "lesson_id", "video_id"),
+        Index("ix_watch_history_watched_at", "watched_at"),
+    )
+
+    lesson_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("lessons.id", ondelete="CASCADE"), nullable=False
+    )
+    video_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    thumbnail_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    channel_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    search_query: Mapped[str] = mapped_column(String(500), nullable=False)
+    watched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    lesson: Mapped["Lesson"] = relationship(back_populates="watch_history")
+
+
+class VideoSearchCache(IdMixin, TimestampMixin, Base):
+    __tablename__ = "video_search_cache"
+    __table_args__ = (
+        Index("ix_search_cache_key", "cache_key", unique=True),
+        Index("ix_search_cache_cached_at", "cached_at"),
+    )
+
+    cache_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    cached_data: Mapped[str] = mapped_column(Text, nullable=False)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

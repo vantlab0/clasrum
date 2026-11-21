@@ -61,7 +61,8 @@ class _LoginScreenState extends State<LoginScreen> {
       final auth = _auth;
       if (auth == null) {
         if (!mounted) return;
-        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        setState(
+            () => _error = 'Authentication is unavailable. Please try again.');
         return;
       }
       final response = await auth.signInWithPassword(
@@ -93,7 +94,8 @@ class _LoginScreenState extends State<LoginScreen> {
   String? _validateEmail(String? value) {
     final v = (value ?? '').trim();
     if (v.isEmpty) return 'Enter your email address.';
-    if (!v.contains('@') || !v.contains('.')) return 'Enter a valid email address.';
+    if (!v.contains('@') || !v.contains('.'))
+      return 'Enter a valid email address.';
     return null;
   }
 

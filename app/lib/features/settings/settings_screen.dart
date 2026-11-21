@@ -128,7 +128,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final auth = AuthScope.maybeOf(context)?.authService;
       final email = auth?.currentUser?.email ?? _student?['email'] as String?;
       if (auth == null || email == null || email.trim().isEmpty) {
-        setState(() => _error = 'No account email available for password reset.');
+        setState(
+            () => _error = 'No account email available for password reset.');
       } else {
         await auth.resetPassword(email: email);
         if (mounted) {
@@ -195,7 +196,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: <Widget>[
                       _infoRow(
                         'Name',
-                        (_student?['display_name'] as String?)?.trim().isNotEmpty == true
+                        (_student?['display_name'] as String?)
+                                    ?.trim()
+                                    .isNotEmpty ==
+                                true
                             ? _student!['display_name'] as String
                             : '—',
                       ),
@@ -207,13 +211,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         label: _sendingReset
                             ? 'Sending reset email…'
                             : 'Password & security',
-                        subtitle: 'Send a password reset email to your account.',
+                        subtitle:
+                            'Send a password reset email to your account.',
                         onTap: _sendingReset ? null : _sendPasswordReset,
                         trailing: _sendingReset
                             ? const SizedBox(
                                 width: 16,
                                 height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               )
                             : const PwonyIcon(PwonyIconKind.chevronRight,
                                 size: 18, color: AppColors.muted),
@@ -303,8 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           children: <Widget>[
             Expanded(
               child: Text(label,
-                  style:
-                      const TextStyle(color: AppColors.muted, fontSize: 14)),
+                  style: const TextStyle(color: AppColors.muted, fontSize: 14)),
             ),
             const SizedBox(width: 12),
             Flexible(

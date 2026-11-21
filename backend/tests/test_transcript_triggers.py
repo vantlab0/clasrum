@@ -364,14 +364,36 @@ async def test_board_intent_registers_triggers(seeded_student, make_lesson):
 
     async def fake_director(context):
         return {
-            "actions": [
+            "protocol": "clasrum.drawing",
+            "version": 1,
+            "title": "ATP node",
+            "elements": [
                 {
-                    "type": "add_node",
                     "id": "atp_node",
-                    "label": "ATP",
-                    "sublabel": "Energy currency",
-                    "region": "right",
-                }
+                    "kind": "rectangle",
+                    "geometry": {
+                        "position": {"x": 0.6, "y": 0.3},
+                        "size": {"w": 0.3, "h": 0.15},
+                    },
+                    "style": {"stroke_color": "yellow", "stroke_width": 2.0},
+                    "stage": 1,
+                    "duration_ms": 600,
+                },
+                {
+                    "id": "atp_label",
+                    "kind": "text",
+                    "geometry": {
+                        "text": "ATP",
+                        "position": {"x": 0.75, "y": 0.36},
+                        "align": "center",
+                    },
+                    "stage": 2,
+                    "duration_ms": 300,
+                },
+            ],
+            "stages": [
+                {"stage": 1, "description": "node", "element_ids": ["atp_node"]},
+                {"stage": 2, "description": "label", "element_ids": ["atp_label"]},
             ],
             "triggers": [
                 {"phrase": "ATP", "target": "atp_node", "action": "pulse", "cooldown_ms": 3000}
@@ -412,8 +434,27 @@ async def test_board_intent_triggers_optional(seeded_student, make_lesson):
 
     async def fake_director(context):
         return {
-            "actions": [
-                {"type": "add_node", "id": "x", "label": "X", "region": "right"}
+            "protocol": "clasrum.drawing",
+            "version": 1,
+            "title": "X node",
+            "elements": [
+                {
+                    "id": "x",
+                    "kind": "ellipse",
+                    "geometry": {"center": {"x": 0.7, "y": 0.4}, "rx": 0.1, "ry": 0.1},
+                    "stage": 1,
+                    "duration_ms": 400,
+                },
+                {
+                    "id": "x_label",
+                    "kind": "text",
+                    "geometry": {"text": "X", "position": {"x": 0.7, "y": 0.4}, "align": "center"},
+                    "stage": 1,
+                    "duration_ms": 200,
+                },
+            ],
+            "stages": [
+                {"stage": 1, "description": "x", "element_ids": ["x", "x_label"]},
             ],
             # No triggers key -> no registration.
         }

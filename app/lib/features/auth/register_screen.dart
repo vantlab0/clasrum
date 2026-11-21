@@ -52,7 +52,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
   String? _validateEmail(String? value) {
     final v = (value ?? '').trim();
     if (v.isEmpty) return 'Enter your email address.';
-    if (!v.contains('@') || !v.contains('.')) return 'Enter a valid email address.';
+    if (!v.contains('@') || !v.contains('.'))
+      return 'Enter a valid email address.';
     return null;
   }
 
@@ -78,7 +79,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final scope = AuthScope.maybeOf(context);
     if (scope == null) {
       if (mounted) {
-        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        setState(
+            () => _error = 'Authentication is unavailable. Please try again.');
       }
       return;
     }

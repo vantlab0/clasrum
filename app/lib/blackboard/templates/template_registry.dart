@@ -1,6 +1,6 @@
 import 'dart:ui' show Color;
 
-import '../template_definition.dart';
+import 'template_definition.dart';
 import '../model/board_geometry.dart';
 
 // ———————————————————————————————————————————————————————————————————

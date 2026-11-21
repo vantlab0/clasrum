@@ -19,6 +19,8 @@ from app.db.models import (
     LessonBoardEvent,
     LessonBoardSnapshot,
     LessonCheckpoint,
+    LessonFlashcard,
+    LessonFlashcardSet,
     LessonNote,
     LessonPlan,
     LessonTranscript,
@@ -27,6 +29,8 @@ from app.db.models import (
     StudentLearningObservation,
     StudentLearningProfile,
     User,
+    VideoSearchCache,
+    VideoWatchHistory,
 )
 
 DEFAULT_PAGE_SIZE = 50
@@ -449,6 +453,62 @@ async def lesson_has_notes(db: AsyncSession, lesson_id: str) -> bool:
         )
     )
     return int(result.scalar_one()) > 0
+
+
+async def create_flashcard_set(
+    db: AsyncSession,
+    *,
+    lesson: Lesson,
+    topic: str,
+    subject: str | None,
+    class_level: str | None,
+    status: str = "pending",
+) -> LessonFlashcardSet:
+    flashcard_set = LessonFlashcardSet(
+        lesson_id=lesson.id,
+        topic=topic,
+        subject=subject,
+        class_level=class_level,
+        status=status,
+    )
+    db.add(flashcard_set)
+    await db.flush()
+    return flashcard_set
+
+
+async def get_flashcard_set(db: AsyncSession, flashcard_set_id: str) -> LessonFlashcardSet | None:
+    return await db.get(LessonFlashcardSet, flashcard_set_id)
+
+
+async def list_flashcards_in_set(
+    db: AsyncSession, flashcard_set_id: str
+) -> list[LessonFlashcard]:
+    result = await db.execute(
+        select(LessonFlashcard)
+        .where(LessonFlashcard.flashcard_set_id == flashcard_set_id)
+        .order_by(LessonFlashcard.order.asc(), LessonFlashcard.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def lesson_has_flashcard_set(db: AsyncSession, lesson_id: str) -> bool:
+    result = await db.execute(
+        select(func.count(LessonFlashcardSet.id)).where(
+            LessonFlashcardSet.lesson_id == lesson_id,
+        )
+    )
+    return int(result.scalar_one()) > 0
+
+
+async def list_flashcard_sets_for_lesson(
+    db: AsyncSession, lesson_id: str,
+) -> list[LessonFlashcardSet]:
+    result = await db.execute(
+        select(LessonFlashcardSet)
+        .where(LessonFlashcardSet.lesson_id == lesson_id)
+        .order_by(LessonFlashcardSet.created_at.desc())
+    )
+    return list(result.scalars().all())
 
 
 async def list_notes_for_student(

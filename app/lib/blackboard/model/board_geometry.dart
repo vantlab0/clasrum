@@ -14,8 +14,10 @@ class BoardPoint {
 
   BoardPoint clamp01() => BoardPoint(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
 
-  BoardPoint operator +(BoardPoint other) => BoardPoint(x + other.x, y + other.y);
-  BoardPoint operator -(BoardPoint other) => BoardPoint(x - other.x, y - other.y);
+  BoardPoint operator +(BoardPoint other) =>
+      BoardPoint(x + other.x, y + other.y);
+  BoardPoint operator -(BoardPoint other) =>
+      BoardPoint(x - other.x, y - other.y);
   BoardPoint operator *(double factor) => BoardPoint(x * factor, y * factor);
 
   Offset toOffset() => Offset(x, y);
@@ -143,7 +145,8 @@ class BoardRect {
     final top = y.clamp(0.0, 1.0);
     final r = right.clamp(0.0, 1.0);
     final b = bottom.clamp(0.0, 1.0);
-    return BoardRect(left, top, math.max(0.0, r - left), math.max(0.0, b - top));
+    return BoardRect(
+        left, top, math.max(0.0, r - left), math.max(0.0, b - top));
   }
 
   BoardRect union(BoardRect other) {

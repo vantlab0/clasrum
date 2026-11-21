@@ -87,7 +87,9 @@ class BoardBoundsEstimator {
       case BoardEventType.plotFunction:
       case BoardEventType.plotPoints:
         // The document copies the owning coordinate-system box onto plots.
-        return position == null ? null : BoardRect(position.x, position.y, 0.4, 0.3);
+        return position == null
+            ? null
+            : BoardRect(position.x, position.y, 0.4, 0.3);
       case BoardEventType.addGraphLabel:
         return _estimateGraphLabel(element);
       case BoardEventType.highlight:
@@ -120,7 +122,8 @@ class BoardBoundsEstimator {
     return BoardRect(position.x, position.y, width, height).clamp01();
   }
 
-  static BoardRect? _estimateHeading(BoardElement element, BoardPoint? position) {
+  static BoardRect? _estimateHeading(
+      BoardElement element, BoardPoint? position) {
     if (position == null) return null;
     final data = element.payloadParsedOrRaw();
     final text = data['text']?.toString() ?? '';
@@ -130,7 +133,8 @@ class BoardBoundsEstimator {
       (1.0 - position.x - 0.04).clamp(0.05, 1.0),
       math.max(1, text.length) * font * BoardTextMetrics.glyphWidthFactor,
     );
-    final height = font * BoardTextMetrics.lineHeight + (level == 1 ? 0.012 : 0);
+    final height =
+        font * BoardTextMetrics.lineHeight + (level == 1 ? 0.012 : 0);
     return BoardRect(position.x, position.y, width, height).clamp01();
   }
 
@@ -153,7 +157,9 @@ class BoardBoundsEstimator {
     final termHeight = termFont * BoardTextMetrics.lineHeight;
     final bodyLines = math.max(
       1,
-      (text.length * font * BoardTextMetrics.glyphWidthFactor /
+      (text.length *
+              font *
+              BoardTextMetrics.glyphWidthFactor /
               math.max(width, 0.1))
           .ceil(),
     );
@@ -214,7 +220,8 @@ class BoardBoundsEstimator {
     return _paddedBounds(<BoardPoint>[start, end], pad: 0.012);
   }
 
-  static BoardRect? _estimateArrow(BoardElement element) => _estimateLine(element);
+  static BoardRect? _estimateArrow(BoardElement element) =>
+      _estimateLine(element);
 
   static BoardRect? _estimateShape(BoardElement element, BoardPoint? position) {
     final size = element.size;
@@ -231,7 +238,9 @@ class BoardBoundsEstimator {
       }
       if (points.isNotEmpty) return _paddedBounds(points, pad: 0.012);
     }
-    return position == null ? null : BoardRect(position.x, position.y, 0.2, 0.14);
+    return position == null
+        ? null
+        : BoardRect(position.x, position.y, 0.2, 0.14);
   }
 
   static BoardRect? _estimatePath(BoardElement element) {
@@ -257,8 +266,8 @@ class BoardBoundsEstimator {
       if (rawNode is! Map) continue;
       final position = BoardPoint.tryParse(rawNode['position']);
       if (position == null) continue;
-      final size = BoardSize.tryParse(rawNode['size']) ??
-          const BoardSize(0.16, 0.09);
+      final size =
+          BoardSize.tryParse(rawNode['size']) ?? const BoardSize(0.16, 0.09);
       final nodeRect = BoardRect.fromPositionSize(position, size);
       bounds = first ? nodeRect : bounds.union(nodeRect);
       first = false;
@@ -305,7 +314,8 @@ class BoardBoundsEstimator {
     return null;
   }
 
-  static BoardRect _paddedBounds(List<BoardPoint> points, {required double pad}) {
+  static BoardRect _paddedBounds(List<BoardPoint> points,
+      {required double pad}) {
     var minX = points.first.x;
     var minY = points.first.y;
     var maxX = minX;

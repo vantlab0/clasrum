@@ -118,8 +118,8 @@ abstract final class AppTheme {
         fillColor: AppColors.surface.withValues(alpha: 0.65),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        hintStyle:
-            textTheme.bodyMedium?.copyWith(color: AppColors.muted.withValues(alpha: 0.9)),
+        hintStyle: textTheme.bodyMedium
+            ?.copyWith(color: AppColors.muted.withValues(alpha: 0.9)),
         labelStyle: textTheme.bodyMedium?.copyWith(color: AppColors.muted),
         prefixIconColor: AppColors.muted,
         suffixIconColor: AppColors.muted,
@@ -204,7 +204,8 @@ abstract final class AppTheme {
         showDragHandle: true,
         dragHandleColor: AppColors.border,
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
         ),
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(

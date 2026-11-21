@@ -157,8 +157,7 @@ class BoardAnimationScheduler {
   bool isAnimatingLevel(int level) => _activeLevels.contains(level);
 
   /// Reveal progress of [elementId] in `0..1` (1 = fully drawn).
-  double progress(String elementId) =>
-      _reveals[elementId]?.progress ?? 1.0;
+  double progress(String elementId) => _reveals[elementId]?.progress ?? 1.0;
 
   /// Whether [elementId] is currently being revealed (or moved).
   bool isAnimatingElement(String elementId) =>
@@ -234,8 +233,7 @@ class BoardAnimationScheduler {
       onComplete?.call();
       return;
     }
-    final effective =
-        _scale(duration ?? const Duration(milliseconds: 420));
+    final effective = _scale(duration ?? const Duration(milliseconds: 420));
     if (effective.inMicroseconds <= 0 || from == to) {
       _moves.remove(elementId);
       _refreshActiveLevels();
@@ -336,6 +334,8 @@ class BoardAnimationScheduler {
         return const Duration(milliseconds: 240);
       case BoardEventType.clear:
         return const Duration(milliseconds: 300);
+      case BoardEventType.viewportFocus:
+        return Duration.zero;
       case BoardEventType.unknown:
         return const Duration(milliseconds: 300);
     }

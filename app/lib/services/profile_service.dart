@@ -35,11 +35,8 @@ class ProfileService {
   /// Retrieves the current user's profile, or null if not found.
   Future<Map<String, dynamic>?> getCurrentProfile() async {
     final userId = _requireUserId();
-    final data = await _client
-        .from(table)
-        .select()
-        .eq('id', userId)
-        .maybeSingle();
+    final data =
+        await _client.from(table).select().eq('id', userId).maybeSingle();
     if (data == null) return null;
     return Map<String, dynamic>.from(data);
   }
@@ -84,8 +81,9 @@ class ProfileService {
     final now = DateTime.now().toUtc().toIso8601String();
     final payload = <String, dynamic>{
       'id': _requireUserId(),
-      'display_name':
-          (fallbackName != null && fallbackName.isNotEmpty) ? fallbackName : 'Student',
+      'display_name': (fallbackName != null && fallbackName.isNotEmpty)
+          ? fallbackName
+          : 'Student',
       'avatar_url': null,
       'created_at': now,
       'updated_at': now,

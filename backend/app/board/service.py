@@ -75,7 +75,7 @@ EVENT_ERASE_ELEMENT = "erase_element"
 EVENT_HIGHLIGHT = "highlight"
 EVENT_CLEAR = "clear"
 EVENT_MOVE_ELEMENT = "move_element"
-EVENT_DRAW_TEMPLATE = "draw_template"
+EVENT_DRAW_PLAN = "draw_plan"  # Phase 4: generative AI drawing plan
 
 BOARD_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -101,7 +101,7 @@ BOARD_EVENT_TYPES: frozenset[str] = frozenset(
         EVENT_HIGHLIGHT,
         EVENT_CLEAR,
         EVENT_MOVE_ELEMENT,
-        EVENT_DRAW_TEMPLATE,
+        EVENT_DRAW_PLAN,
     }
 )
 
@@ -123,8 +123,8 @@ NEW_ELEMENT_EVENTS: frozenset[str] = frozenset(
         EVENT_PLOT_POINTS,
         EVENT_ADD_GRAPH_LABEL,
         EVENT_HIGHLIGHT,  # annotation element referencing target_ids
-        EVENT_DRAW_TEMPLATE,  # template renders multiple child elements
-    }
+        EVENT_DRAW_PLAN,  # one element holding the whole generative plan
+        }
 )
 
 #: Event types that require an existing element_id.
@@ -158,7 +158,7 @@ ELEMENT_LEVELS: dict[str, int] = {
     EVENT_DRAW_PATH: 4,
     EVENT_DRAW_ARROW: 4,
     EVENT_DRAW_DIAGRAM: 4,
-    EVENT_DRAW_TEMPLATE: 4,
+    EVENT_DRAW_PLAN: 4,
     EVENT_CREATE_COORDINATE_SYSTEM: 5,
     EVENT_PLOT_FUNCTION: 5,
     EVENT_PLOT_POINTS: 5,
@@ -977,7 +977,7 @@ __all__ = [
     "BoardValidationError",
     "COORDINATE_SYSTEM_EVENTS",
     "ELEMENT_LEVELS",
-    "EVENT_DRAW_TEMPLATE",
+    "EVENT_DRAW_PLAN",
     "NEW_ELEMENT_EVENTS",
     "NON_ELEMENT_EVENTS",
     "TARGET_ELEMENT_EVENTS",

@@ -1,18 +1,23 @@
-"""BoardIntentHandler: visual intent -> structured board plan -> board events.
+"""BoardIntentHandler: visual intent -> generative drawing plan -> board event.
 
-Pipeline (docs in task spec):
+Pipeline (Phase 4 — generative AI drawing engine):
+
   board_intent tool call
     -> validate params
     -> collect compact board summary + recent transcript + lesson state
-    -> ask Qwen text model for a structured JSON plan
-    -> validate plan actions against supported board capabilities
-    -> layout (region-based, deterministic)
-    -> convert to existing low-level board events
-    -> execute via BoardService
+    -> ask Qwen3.7-Flash for a complete generative drawing plan
+       (structured vector drawing instructions, no templates)
+    -> validate the plan against the drawing protocol (strict schema,
+       bounded geometry, stage/layer references)
+    -> on validation failure: ONE bounded correction retry, then fail safely
+    -> fit the plan into the requested board region (uniform scale+translate)
+    -> append a single ``draw_plan`` board event via BoardService
+    -> register transcript triggers and focus targets
     -> return a valid tool result
 
-All model output is treated as untrusted: it is parsed, schema-validated and
-mapped to the existing registry/BoardService validators before any mutation.
+The realtime model keeps sending lightweight visual intents; the detailed
+drawing generation happens asynchronously here so the tutor never waits for
+the finished illustration before continuing to speak.
 """
 from __future__ import annotations
 
@@ -28,8 +33,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.board import layout
+from app.board.drawing_protocol import (
+    DrawingPlanError,
+    MAX_ELEMENTS,
+    MAX_PATH_SEGMENTS,
+    MAX_POINTS,
+    MAX_STAGES,
+    MAX_TEXT_LENGTH,
+    parse_drawing_plan,
+    plan_element_bounds,
+    plan_total_duration_ms,
+)
 from app.board.registry import ToolRegistry
-from app.board.service import BoardService, BoardValidationError, active_elements
+from app.board.service import BoardService, active_elements
 from app.config import get_settings
 from app.db.models import Lesson, LessonBoardEvent, LessonCheckpoint, LessonPlan, LessonTranscriptEntry
 from app.realtime.transcript_triggers import (
@@ -44,90 +60,85 @@ logger = logging.getLogger(__name__)
 MAX_BOARD_SUMMARY_ELEMENTS = 40
 MAX_TRANSCRIPT_TURNS = 12
 MAX_TRANSCRIPT_CHARS = 3000
-MAX_PLAN_ACTIONS = 12
-MODEL_TIMEOUT_SECONDS = 20.0
-
-# Board-director action types the model may request. Anything else is rejected.
-# These map to existing low-level board tools/events (no unsupported inventions).
-SUPPORTED_ACTION_TYPES: frozenset[str] = frozenset(
-    {
-        "add_node",  # -> write_text/definition styled block
-        "add_text",
-        "write_text",
-        "write_heading",
-        "write_definition",
-        "write_bullet_list",
-        "write_equation",
-        "draw_diagram",
-        "create_coordinate_system",
-        "plot_function",
-        "plot_points",
-        "add_graph_label",
-        "draw_arrow",
-        "draw_line",
-        "draw_shape",
-        "annotate",  # -> highlight existing targets (no new placement)
-        "highlight",  # explicit highlight existing targets
-    }
-)
+MODEL_TIMEOUT_SECONDS = 25.0
+#: Validation-failure retries per intent (bounded: never loops on bad output).
+MAX_VALIDATION_RETRIES = 1
 
 FOCUS_VALUES = {"none", "new_content", "region"}
 REGION_HINTS = {"left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"}
-HIGHLIGHT_STYLES = {"box", "underline", "pulse", "circle"}
 
-#: Template IDs the backend validates against. The full geometry lives in the
-#: Flutter template registry; the backend only needs to know which IDs are valid.
-VALID_TEMPLATE_IDS: frozenset[str] = frozenset(
-    {
-        "mitochondria",
-        "animal_cell",
-        "electric_circuit",
-        "triangle",
-        "coordinate_axes",
-        "atom",
-    }
-)
+_KNINDS_LINE = "line | polyline | polygon | rectangle | ellipse | arc | quad_bezier | cubic_bezier | path | text | arrow"
 
 _SYSTEM_PROMPT = (
-    "You are a Board Director for a live tutoring blackboard. "
-    "Given the current board, lesson state, recent transcript and a visual intent, "
-    "return ONLY a JSON object describing what to draw. "
-    "Do not include markdown fences or commentary.\n"
-    "Rules: (1) Request only supported actions; never invent element types. "
-    "(2) Do not calculate exact pixel/normalized coordinates – provide a region or "
-    "relative_to hint and the layout engine will position elements. "
-    "(3) Keep labels concise and readable. (4) Prefer updating/annotating existing "
-    "elements (by id) over duplicating content. (5) Return valid JSON matching the schema."
+    "You are the Generative Drawing Engine of a live tutoring blackboard. "
+    "You invent original educational illustrations from scratch for whatever "
+    "concept the tutor is explaining. There are no templates: decide yourself "
+    "which structures the concept needs, how they connect, their proportions, "
+    "positions, strokes, shading and labels, and express everything as "
+    "structured vector drawing instructions.\n"
+    "Output STRICT JSON only (no markdown fences, no commentary) with keys: "
+    "protocol, version, title, elements, stages.\n"
+    f"- elements: 1..{MAX_ELEMENTS} objects. Each has: id (short unique slug), "
+    f"kind ({_KNINDS_LINE}), geometry (object per kind), optional style "
+    "{stroke_color, stroke_width (0.2..4), stroke_opacity, fill_color, "
+    "fill_opacity, line_cap, line_join, dash[]}, layer (0..5, back to front), "
+    "stage (1..12), duration_ms (60..6000, how long the stroke takes to draw), "
+    "delay_ms (0..4000, pause before this stroke).\n"
+    "Geometry per kind: line/arrow {start:{x,y}, end:{x,y}[, curve:-1..1]}; "
+    "polyline/polygon {points:[{x,y}...], closed:bool, smooth:bool}; rectangle "
+    "{position:{x,y}, size:{w,h}, corner_radius?}; ellipse {center:{x,y}, rx, ry}; "
+    "arc {center:{x,y}, rx, ry, start_angle, sweep_angle}; quad_bezier {start, "
+    "control, end}; cubic_bezier {start, c1, c2, end}; path {segments:[{op:move|"
+    "line|quad|cubic|arc|close, point/control/c1/c2/center/rx/ry/start_angle/"
+    "sweep_angle...}]}; text {text, position:{x,y}, align, font_scale?}.\n"
+    f"- stages: 0..{MAX_STAGES} objects {{stage, description, element_ids, "
+    "pause_ms}} describing the progressive reveal sequence (outline first, "
+    "then internal structures, then details/shading, then labels).\n"
+    "All coordinates are normalized to the available board region given in the "
+    "context (region rect). Use organic paths, quadratic/cubic curves, arcs and "
+    "irregular outlines for biological/organic structures; use hatching as "
+    "several short parallel path strokes for shading; keep fills subtle "
+    "(opacity <= 0.35); chalk palette colors: primary/secondary/blue/yellow/red/green "
+    "or #RRGGBB. Labels use kind=text with short text.\n"
+    "Rules: draw something original that matches the requested concept; do not "
+    "copy generic placeholder diagrams; every stage must build on the previous "
+    "one; elements must be listed in drawing order; no executable code, no SVG, "
+    "no HTML."
 )
 
 _PLAN_SCHEMA_HINT = {
-    "actions": [
+    "protocol": "clasrum.drawing",
+    "version": 1,
+    "title": "short title of the illustration",
+    "elements": [
         {
-            "type": "add_node|add_text|write_heading|write_definition|write_bullet_list|"
-            "write_equation|draw_diagram|create_coordinate_system|plot_function|annotate|highlight",
-            "id": "optional_stable_id",
-            "label": "text/term/heading",
-            "sublabel": "optional detail",
-            "text": "optional body",
-            "latex": "optional equation latex",
-            "items": ["optional", "bullets"],
-            "region": "left|right|top|bottom|center|bottom_left|bottom_right",
-            "relative_to": "optional_existing_element_id",
-            "target": "existing_element_id for annotate/highlight",
-            "targets": ["existing_element_ids"],
-            "style": "box|underline|pulse|circle",
+            "id": "unique_element_id",
+            "kind": _KNINDS_LINE,
+            "geometry": {"...": "per kind, see system prompt"},
+            "style": {
+                "stroke_color": "primary|#RRGGBB",
+                "stroke_width": 2.0,
+                "stroke_opacity": 0.9,
+                "fill_color": "#RRGGBB",
+                "fill_opacity": 0.2,
+                "line_cap": "round",
+                "line_join": "round",
+                "dash": [],
+            },
+            "layer": 0,
+            "stage": 1,
+            "duration_ms": 700,
+            "delay_ms": 0,
         }
     ],
-    "triggers": [
+    "stages": [
         {
-            "phrase": "spoken phrase to match",
-            "target": "logical_or_real_element_id",
-            "action": "highlight|pulse|underline|circle|annotation",
-            "cooldown_ms": 3000,
-            "max_fires": 3,
+            "stage": 1,
+            "description": "what this stage draws",
+            "element_ids": ["unique_element_id"],
+            "pause_ms": 150,
         }
     ],
-    "focus": {"target_ids": ["ids"], "priority": "high|normal"},
 }
 
 
@@ -246,7 +257,6 @@ async def fetch_lesson_context(db: AsyncSession, lesson_id: str) -> dict[str, An
             {"id": c.get("id"), "title": c.get("title"), "status": c.get("status")}
             for c in concepts[:20]
         ]
-        # Derive covered vs pending from plan status when available.
         ctx["covered_concepts"] = [c.get("id") for c in concepts if c.get("status") == "completed"]
         ctx["pending_concepts"] = [c.get("id") for c in concepts if c.get("status") != "completed"]
     ckpt = (
@@ -254,7 +264,6 @@ async def fetch_lesson_context(db: AsyncSession, lesson_id: str) -> dict[str, An
     ).scalar_one_or_none()
     if ckpt is not None and isinstance(ckpt.state, dict):
         st = ckpt.state
-        # Prefer graph's view when present (authoritative resume index).
         for key in ("current_concept", "progress", "completed_concepts", "pending_concepts"):
             if st.get(key) is not None:
                 ctx[key] = st.get(key)
@@ -267,7 +276,6 @@ async def fetch_lesson_context(db: AsyncSession, lesson_id: str) -> dict[str, An
 def _extract_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if text.startswith("```"):
-        # Strip fenced blocks.
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
@@ -285,27 +293,54 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 async def call_board_director(context: IntentContext) -> dict[str, Any]:
-    """Call Qwen (OpenAI-compatible) and return the parsed plan dict."""
+    """Call Qwen3.7-Flash (OpenAI-compatible) and return the raw plan dict.
+
+    Raises :class:`IntentHandlingError` for timeouts, rate limits, bad response
+    shapes and unparseable JSON — the caller decides whether to retry once.
+    """
     settings = get_settings()
     api_key = settings.effective_board_director_api_key
     if not api_key:
         raise IntentHandlingError(
             "Board director model is not configured", code="qwen_unavailable", retryable=False
         )
-    url = settings.board_director_base_url.rstrip("/") + "/chat/completions"
+    region_rect = layout.REGION_RECTS.get(str(context.region_hint or "full"), layout.REGION_RECTS["full"])
     user_payload = {
-        "board_summary": context.board_summary,
-        "lesson_state": context.lesson_state,
+        "lesson_context": {
+            "topic": context.lesson_state.get("topic"),
+            "subject": context.lesson_state.get("subject"),
+            "current_concept": context.lesson_state.get("current_concept")
+            or context.lesson_state.get("current_concept_title"),
+            "concept_list": context.lesson_state.get("concepts"),
+        },
         "recent_transcript": context.transcript,
+        "current_board_content": context.board_summary,
         "visual_intent": context.intent,
         "focus": context.focus,
-        "region_hint": context.region_hint,
-        "supported_action_types": sorted(SUPPORTED_ACTION_TYPES),
-        "response_schema_hint": _PLAN_SCHEMA_HINT,
+        "available_region": {
+            "name": context.region_hint or "full",
+            "x": region_rect[0],
+            "y": region_rect[1],
+            "w": region_rect[2],
+            "h": region_rect[3],
+        },
+        "canvas": {"width": 1.0, "height": 1.0, "origin": "top_left", "y_down": True},
+        "drawing_protocol": {
+            "name": "clasrum.drawing",
+            "version": 1,
+            "limits": {
+                "max_elements": MAX_ELEMENTS,
+                "max_stages": MAX_STAGES,
+                "max_path_segments": MAX_PATH_SEGMENTS,
+                "max_points_per_polyline": MAX_POINTS,
+                "max_text_length": MAX_TEXT_LENGTH,
+            },
+            "response_schema_hint": _PLAN_SCHEMA_HINT,
+        },
     }
     body = {
         "model": settings.board_director_model,
-        "temperature": 0.2,
+        "temperature": 0.4,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
@@ -317,19 +352,23 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
-                url,
+                settings.board_director_base_url.rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=body,
             )
-        t1 = time.perf_counter()
+        duration_ms = (time.perf_counter() - t0) * 1000
         logger.info(
-            "board_director request_ok duration_ms=%.1f status=%s",
-            (t1 - t0) * 1000,
-            response.status_code,
+            "board_director request_ok duration_ms=%.1f status=%s", duration_ms, response.status_code
         )
+        if response.status_code == 429:
+            raise IntentHandlingError(
+                "Board director is rate limited", code="qwen_rate_limited", retryable=True
+            )
         response.raise_for_status()
         data = response.json()
         content = data["choices"][0]["message"]["content"]
+    except IntentHandlingError:
+        raise
     except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
         logger.warning("board_director timeout: %s", exc)
         raise IntentHandlingError("Board director timed out", code="qwen_unavailable", retryable=True) from exc
@@ -355,202 +394,126 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     return plan
 
 
-def validate_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and normalize the model plan; reject unsupported actions."""
-    actions = plan.get("actions")
-    if not isinstance(actions, list):
-        raise IntentHandlingError("Plan must contain an actions array", retryable=True)
-    normalized: list[dict[str, Any]] = []
-    for raw in actions[:MAX_PLAN_ACTIONS]:
-        if not isinstance(raw, dict):
+def validate_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate + normalize a generative drawing plan (protocol v1).
+
+    Returns the cleaned plan payload ready for the ``draw_plan`` event.
+    Raises :class:`IntentHandlingError` with a model-actionable message.
+    """
+    try:
+        parsed = parse_drawing_plan(plan)
+    except DrawingPlanError as exc:
+        raise IntentHandlingError(
+            f"invalid drawing plan: {exc}", code="invalid_arguments", retryable=True
+        ) from None
+    return parsed.to_payload()
+
+
+def fit_plan_to_region(
+    payload: dict[str, Any], region: tuple[float, float, float, float]
+) -> dict[str, Any]:
+    """Uniformly scale + translate a validated plan payload into ``region``.
+
+    Preserves the illustration's aspect ratio and internal proportions. Plans
+    that already fit inside the region pass through unchanged.
+    """
+    boxes = plan_element_bounds(payload)
+    if not boxes:
+        return payload
+    min_x = min(box[0] for box in boxes)
+    min_y = min(box[1] for box in boxes)
+    max_x = max(box[0] + box[2] for box in boxes)
+    max_y = max(box[1] + box[3] for box in boxes)
+    rx, ry, rw, rh = region
+    if min_x >= rx - 1e-6 and min_y >= ry - 1e-6 and max_x <= rx + rw + 1e-6 and max_y <= ry + rh + 1e-6:
+        return payload  # already inside the requested region
+    width = max(max_x - min_x, 1e-6)
+    height = max(max_y - min_y, 1e-6)
+    scale = min(rw / width, rh / height) * 0.94
+    scale = max(0.02, min(scale, 4.0))
+    center_x = rx + rw / 2 - scale * (min_x + max_x) / 2
+    center_y = ry + rh / 2 - scale * (min_y + max_y) / 2
+
+    def point(p: Any) -> dict[str, float]:
+        if not isinstance(p, dict):
+            return {"x": 0.0, "y": 0.0}
+        x = p.get("x")
+        y = p.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return {"x": 0.0, "y": 0.0}
+        return {"x": round(x * scale + center_x, 4), "y": round(y * scale + center_y, 4)}
+
+    def clamp01(value: float) -> float:
+        return round(min(1.0, max(0.0, value)), 4)
+
+    for element in payload.get("elements", []):
+        if not isinstance(element, dict):
             continue
-        action_type = str(raw.get("type") or "").strip()
-        if action_type not in SUPPORTED_ACTION_TYPES:
-            logger.warning("board plan rejected unsupported action type=%s", action_type)
-            raise IntentHandlingError(
-                f"Unsupported board action: {action_type}", code="invalid_arguments", retryable=True
-            )
-        region = raw.get("region")
-        if region is not None and str(region) not in REGION_HINTS and str(region) not in layout.REGION_RECTS:
-            raw = {**raw, "region": None}
-        normalized.append(dict(raw))
-    focus = plan.get("focus") if isinstance(plan.get("focus"), dict) else {}
-    triggers = plan.get("triggers")
-    if not isinstance(triggers, list):
-        triggers = []
-    return {"actions": normalized, "focus": dict(focus), "triggers": triggers}
+        kind = element.get("kind")
+        geometry = element.get("geometry")
+        if not isinstance(geometry, dict):
+            continue
+        element["geometry"] = geometry = dict(geometry)
+        if kind in {"line", "arrow"}:
+            geometry["start"] = point(geometry.get("start"))
+            geometry["end"] = point(geometry.get("end"))
+        elif kind in {"polyline", "polygon"}:
+            geometry["points"] = [point(p) for p in (geometry.get("points") or [])]
+        elif kind == "rectangle":
+            position = geometry.get("position") or {}
+            size = geometry.get("size") or {}
+            new_pos = point(position)
+            new_w = _num(size.get("w"), 0.0) * scale
+            new_h = _num(size.get("h"), 0.0) * scale
+            geometry["position"] = new_pos
+            geometry["size"] = {
+                "w": clamp01(new_w) or 0.001,
+                "h": clamp01(new_h) or 0.001,
+            }
+        elif kind in {"ellipse", "arc"}:
+            geometry["center"] = point(geometry.get("center"))
+            rx_value = _num(geometry.get("rx"), 0.0) * scale
+            ry_value = _num(geometry.get("ry"), 0.0) * scale
+            geometry["rx"] = clamp01(rx_value) or 0.001
+            geometry["ry"] = clamp01(ry_value) or 0.001
+            if kind == "ellipse":
+                geometry["rx"] = max(geometry["rx"], 0.001)
+                geometry["ry"] = max(geometry["ry"], 0.001)
+        elif kind in {"quad_bezier", "cubic_bezier"}:
+            geometry["start"] = point(geometry.get("start"))
+            geometry["end"] = point(geometry.get("end"))
+            for key in ("control", "c1", "c2"):
+                if geometry.get(key) is not None:
+                    geometry[key] = point(geometry[key])
+        elif kind == "path":
+            segments = []
+            for segment in geometry.get("segments") or []:
+                if not isinstance(segment, dict):
+                    continue
+                new_segment = dict(segment)
+                for key in ("point", "control", "c1", "c2", "center"):
+                    if new_segment.get(key) is not None:
+                        new_segment[key] = point(new_segment[key])
+                for key in ("rx", "ry"):
+                    if new_segment.get(key) is not None:
+                        new_segment[key] = clamp01(_num(new_segment[key], 0.0) * scale) or 0.001
+                segments.append(new_segment)
+            geometry["segments"] = segments
+        elif kind == "text":
+            geometry["position"] = point(geometry.get("position"))
+            font_scale = _num(geometry.get("font_scale"), 1.0) * scale
+            geometry["font_scale"] = round(max(0.3, min(2.5, font_scale)), 4)
+    return payload
 
 
-def _text_style_for(action: Mapping[str, Any]) -> str:
-    if action.get("type") == "add_node":
-        return "subheading" if action.get("sublabel") else "body"
-    return "body"
-
-
-def _action_to_tool_calls(action: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], str | None]]:
-    """Map one planned action to one or more (tool_name, args, logical_id) calls."""
-    atype = str(action.get("type") or "")
-    logical_id = str(action.get("id") or "") or None
-    position = action.get("position") if isinstance(action.get("position"), dict) else {"x": 0.1, "y": 0.1}
-    size = action.get("size") if isinstance(action.get("size"), dict) else None
-
-    if atype in {"add_node", "add_text", "write_text"}:
-        label = _clean_text(action.get("label") or action.get("text"), 2000)
-        sub = _clean_text(action.get("sublabel"), 500)
-        text = f"{label}\n{sub}".strip() if sub else label
-        if not text:
-            return []
-        args: dict[str, Any] = {"text": text, "position": position, "style": _text_style_for(action)}
-        if size:
-            args["size"] = size
-        return [("board_write_text", args, logical_id)]
-
-    if atype == "write_heading":
-        text = _clean_text(action.get("label") or action.get("text"), 400)
-        if not text:
-            return []
-        return [("board_write_heading", {"text": text, "position": position, "level": 2}, logical_id)]
-
-    if atype == "write_definition":
-        term = _clean_text(action.get("label") or action.get("term"), 400)
-        body = _clean_text(action.get("text") or action.get("sublabel"), 2000)
-        if not term or not body:
-            # degrade to text block rather than failing the whole plan
-            text = (term + (": " if term and body else "") + body).strip()
-            if not text:
-                return []
-            return [("board_write_text", {"text": text, "position": position, "style": "definition"}, logical_id)]
-        return [("board_write_definition", {"term": term, "text": body, "position": position}, logical_id)]
-
-    if atype == "write_bullet_list":
-        items = action.get("items")
-        if not isinstance(items, list) or not items:
-            body = _clean_text(action.get("text") or action.get("label"), 2000)
-            items = [line.strip("- •") for line in body.splitlines() if line.strip()] or ([body] if body else [])
-        items = [_clean_text(str(i), 300) for i in items if str(i).strip()][:20]
-        if not items:
-            return []
-        return [("board_write_bullet_list", {"items": items, "position": position}, logical_id)]
-
-    if atype == "write_equation":
-        latex = _clean_text(action.get("latex") or action.get("label") or action.get("text"), 1200)
-        if not latex:
-            return []
-        return [("board_write_equation", {"latex": latex, "position": position}, logical_id)]
-
-    if atype == "draw_diagram":
-        nodes = action.get("nodes") if isinstance(action.get("nodes"), list) else []
-        edges = action.get("edges") if isinstance(action.get("edges"), list) else []
-        # Minimal normalization: ensure required node fields exist.
-        norm_nodes = []
-        for idx, node in enumerate(nodes[:20]):
-            if not isinstance(node, dict):
-                continue
-            nid = _clean_text(node.get("id") or f"n{idx+1}", 64) or f"n{idx+1}"
-            pos = node.get("position") if isinstance(node.get("position"), dict) else {"x": 0.1 + idx * 0.08, "y": 0.2}
-            norm_nodes.append({"id": nid, "label": _clean_text(node.get("label"), 200), "position": pos})
-        if not norm_nodes:
-            # Can't invent a diagram safely; fall back to a text block.
-            label = _clean_text(action.get("label") or action.get("text"), 400)
-            return [("board_write_text", {"text": label or "Diagram", "position": position}, logical_id)] if label or True else []
-        norm_edges = []
-        node_ids = {n["id"] for n in norm_nodes}
-        for edge in edges[:40]:
-            if not isinstance(edge, dict):
-                continue
-            src, tgt = edge.get("from") or edge.get("source"), edge.get("to") or edge.get("target")
-            if src in node_ids and tgt in node_ids and src != tgt:
-                norm_edges.append({"from": src, "to": tgt, "label": _clean_text(edge.get("label"), 200)})
-        args = {"kind": "generic", "nodes": norm_nodes, "edges": norm_edges}
-        if action.get("label"):
-            args["title"] = _clean_text(action.get("label"), 300)
-        return [("board_draw_diagram", args, logical_id)]
-
-    if atype == "draw_template":
-        template_id = _clean_text(action.get("template_id"), 64)
-        if not template_id or template_id not in VALID_TEMPLATE_IDS:
-            # Unknown template: degrade to a text block rather than failing.
-            label = _clean_text(action.get("label") or action.get("text"), 400)
-            if not label:
-                return []
-            return [("board_write_text", {"text": label, "position": position, "style": "definition"}, logical_id)]
-        region = action.get("region")
-        if region is not None and str(region) not in REGION_HINTS:
-            region = None
-        labels = action.get("labels")
-        if not isinstance(labels, list):
-            labels = []
-        labels = [_clean_text(str(l), 300) for l in labels if str(l).strip()][:20]
-        args: dict[str, Any] = {
-            "template_id": template_id,
-            "region": region,
-            "labels": labels,
-            "animate": True,
-        }
-        if isinstance(action.get("position"), dict):
-            args["position"] = action["position"]
-        if isinstance(action.get("size"), dict):
-            args["size"] = action["size"]
-        return [("board_draw_template", args, logical_id)]
-
-    if atype in {"annotate", "highlight"}:
-        targets: list[str] = []
-        if isinstance(action.get("targets"), list):
-            targets = [str(t) for t in action.get("targets") if t]
-        elif action.get("target"):
-            targets = [str(action.get("target"))]
-        targets = targets[:20]
-        if not targets:
-            return []
-        style = str(action.get("style") or "box")
-        if style == "pulse":  # not a native highlight style; map to circle
-            style = "circle"
-        if style not in {"underline", "circle", "box", "strike", "arrow"}:
-            style = "box"
-        args = {"target_ids": targets, "style": style, "color": "yellow"}
-        if action.get("label"):
-            args["label"] = _clean_text(action.get("label"), 300)
-        return [("board_highlight", args, None)]
-
-    # Graph actions: only allow if required ids are present; otherwise drop safely.
-    if atype == "create_coordinate_system":
-        args = {
-            "position": position,
-            "size": size or {"w": 0.34, "h": 0.28},
-            "x_range": action.get("x_range") or [-10, 10],
-            "y_range": action.get("y_range") or [-10, 10],
-        }
-        return [("board_create_coordinate_system", args, logical_id)]
-    if atype == "plot_function":
-        csid = action.get("coordinate_system_id") or action.get("target")
-        expr = action.get("expression") or action.get("label")
-        if not csid or not expr:
-            return []
-        return [("board_plot_function", {"coordinate_system_id": str(csid), "expression": str(expr)}, logical_id)]
-    if atype == "add_graph_label":
-        csid = action.get("coordinate_system_id") or action.get("target")
-        text = action.get("text") or action.get("label")
-        at = action.get("at") or {"x": 0, "y": 0}
-        if not csid or not text:
-            return []
-        return [("board_add_graph_label", {"coordinate_system_id": str(csid), "at": at, "text": str(text)}, logical_id)]
-    if atype == "draw_arrow":
-        start = action.get("start") or position
-        end = action.get("end") or {"x": min(float(position.get("x", 0.1)) + 0.2, 0.95), "y": float(position.get("y", 0.1))}
-        args = {"start": start, "end": end}
-        if action.get("label"):
-            args["label"] = _clean_text(action.get("label"), 200)
-        return [("board_draw_arrow", args, logical_id)]
-
-    return []
+def _num(value: Any, default: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return default
 
 
 class BoardIntentHandler:
-    """Orchestrates intent -> plan -> layout -> board events.
-
-    Optionally registers transcript triggers (from the Board Director plan)
-    so that spoken phrases later trigger visual emphasis on board elements.
-    """
+    """Orchestrates intent -> generative plan -> board event."""
 
     def __init__(
         self,
@@ -587,130 +550,193 @@ class BoardIntentHandler:
         board_summary = summarize_board(document)
         lesson_state = await fetch_lesson_context(db, lesson_id)
         transcript = await fetch_recent_transcript(db, lesson_id)
-        context = IntentContext(
-            board_summary=board_summary,
-            lesson_state=lesson_state,
-            transcript=transcript,
-            intent=intent,
-            focus=focus,
-            region_hint=str(region_hint) if region_hint else None,
-        )
 
         t_model = time.perf_counter()
-        try:
-            plan = await call_board_director(context)
-        finally:
-            logger.info("board_director total_ms=%.1f lesson=%s", (time.perf_counter() - t_model) * 1000, lesson_id)
-        try:
-            plan = validate_plan(plan)
-        except IntentHandlingError:
-            logger.warning("board_intent schema_validation_failed lesson=%s", lesson_id)
-            raise
-
-        laid_out = layout.layout_plan(plan, document=document, default_region=context.region_hint)
-        executed: list[dict[str, Any]] = []
-        id_map: dict[str, str] = {}  # logical id -> created element_id
-
-        for action in laid_out.get("actions", []):
-            # Resolve relative_to logical ids if the model referenced a just-created one.
-            rel = action.get("relative_to")
-            if isinstance(rel, str) and rel in id_map:
-                action = {**action, "relative_to": id_map[rel]}
-            # Resolve coordinate_system_id references from logical ids.
-            if isinstance(action.get("coordinate_system_id"), str) and action["coordinate_system_id"] in id_map:
-                action = {**action, "coordinate_system_id": id_map[action["coordinate_system_id"]]}
-            if isinstance(action.get("target"), str) and action["target"] in id_map:
-                action = {**action, "target": id_map[action["target"]]}
-
-            tool_calls = _action_to_tool_calls(action)
-            for tool_name, args, logical_id in tool_calls:
-                try:
-                    result = await self._registry.execute_structured(
-                        db, lesson_id, tool_name, args, source="system"
-                    )
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("board_intent action_exec_failed tool=%s err=%s", tool_name, exc)
-                    result = {"ok": False, "error": "internal_error", "message": str(exc), "retryable": False}
-                executed.append({"tool": tool_name, "result": result, "logical_id": logical_id})
-                if result.get("ok") and logical_id and result.get("element_id"):
-                    id_map[logical_id] = str(result["element_id"])
-                if not result.get("ok"):
-                    logger.warning(
-                        "board_intent action_rejected lesson=%s tool=%s error=%s",
-                        lesson_id,
-                        tool_name,
-                        result.get("error"),
-                    )
-
-        successes = [e for e in executed if (e.get("result") or {}).get("ok")]
-        logger.info(
-            "board_intent completed lesson=%s actions=%d ok=%d",
-            lesson_id,
-            len(executed),
-            len(successes),
+        plan_payload, model_error = await self._generate_plan(
+            IntentContext(
+                board_summary=board_summary,
+                lesson_state=lesson_state,
+                transcript=transcript,
+                intent=intent,
+                focus=focus,
+                region_hint=str(region_hint) if region_hint else None,
+            ),
         )
-        # -- transcript trigger registration ---------------------------------
-        registered_triggers: list[dict[str, Any]] = []
-        trigger_system = self._trigger_system
-        if trigger_system is not None:
-            plan_triggers = plan.get("triggers")
-            if isinstance(plan_triggers, list):
-                for raw in plan_triggers:
-                    if not isinstance(raw, dict):
-                        continue
-                    phrase = str(raw.get("phrase") or "").strip()
-                    target = str(raw.get("target") or "").strip()
-                    action = str(raw.get("action") or "highlight").strip().lower()
-                    if not phrase or not target or action not in SUPPORTED_TRIGGER_ACTIONS:
-                        continue
-                    # Remap logical target id to the real element id if created.
-                    real_target = id_map.get(target, target)
-                    cooldown_ms = raw.get("cooldown_ms")
-                    try:
-                        cooldown_ms = int(cooldown_ms) if cooldown_ms is not None else DEFAULT_COOLDOWN_MS
-                    except (TypeError, ValueError):
-                        cooldown_ms = DEFAULT_COOLDOWN_MS
-                    max_fires = raw.get("max_fires")
-                    try:
-                        tid = trigger_system.register_trigger(
-                            lesson_id,
-                            phrase,
-                            real_target,
-                            action,
-                            cooldown_ms=cooldown_ms,
-                            max_fires=max_fires,
-                        )
-                        registered_triggers.append(
-                            {
-                                "trigger_id": tid,
-                                "phrase": phrase,
-                                "target_id": real_target,
-                                "action": action,
-                                "cooldown_ms": cooldown_ms,
-                            }
-                        )
-                    except ValueError as exc:
-                        logger.warning(
-                            "board_intent trigger registration failed lesson=%s: %s",
-                            lesson_id,
-                            exc,
-                        )
-        # --------------------------------------------------------------------
-        focus_out = laid_out.get("focus") or {}
-        # Remap focus target ids through logical id map when possible.
-        if isinstance(focus_out, dict) and isinstance(focus_out.get("target_ids"), list):
-            focus_out = {
-                **focus_out,
-                "target_ids": [id_map.get(t, t) for t in focus_out.get("target_ids", [])],
-            }
+        logger.info(
+            "board_director total_ms=%.1f lesson=%s", (time.perf_counter() - t_model) * 1000, lesson_id
+        )
+        if model_error is not None or plan_payload is None:
+            assert model_error is not None
+            raise model_error
+
+        region = layout.REGION_RECTS.get(
+            str(region_hint or "full"), layout.REGION_RECTS["full"]
+        )
+        plan_payload = fit_plan_to_region(plan_payload, region)
+
+        payload = {
+            **plan_payload,
+            "context": {
+                "topic": lesson_state.get("topic"),
+                "subject": lesson_state.get("subject"),
+                "current_concept": lesson_state.get("current_concept")
+                or lesson_state.get("current_concept_title"),
+                "region": region_hint or "full",
+                "intent": intent,
+            },
+        }
+        record = await self._board.append_event(
+            db,
+            lesson_id,
+            "draw_plan",
+            payload,
+            source="qwen_tool",
+            animate=True,
+        )
+
+        id_map = {element["id"]: record.element_id for element in plan_payload.get("elements", [])
+                  if isinstance(element, dict) and element.get("id")}
+        registered_triggers = await self._register_triggers(db, lesson_id, plan_payload, id_map)
+        focus_out = self._resolve_focus(plan_payload, id_map)
+
+        logger.info(
+            "board_intent completed lesson=%s elements=%d duration_ms=%d",
+            lesson_id,
+            len(plan_payload.get("elements", [])),
+            plan_total_duration_ms(plan_payload),
+        )
         return {
             "ok": True,
             "intent": intent,
-            "actions_executed": len(successes),
-            "actions": executed,
+            "event_id": record.event_id,
+            "sequence": record.sequence,
+            "element_id": record.element_id,
+            "plan": {
+                "title": plan_payload.get("title"),
+                "element_count": len(plan_payload.get("elements", [])),
+                "stage_count": len(plan_payload.get("stages", [])),
+                "duration_ms": plan_total_duration_ms(plan_payload),
+            },
             "focus": focus_out,
             "triggers_registered": registered_triggers,
         }
 
+    async def _generate_plan(
+        self,
+        context: IntentContext,
+    ) -> tuple[dict[str, Any] | None, IntentHandlingError | None]:
+        """Call the model and validate; one bounded correction retry on failure.
 
-__all__ = ["BoardIntentHandler", "IntentHandlingError", "summarize_board", "validate_plan"]
+        Returns ``(plan_payload, None)`` on success or ``(None, error)``.
+        """
+        last_error: IntentHandlingError | None = None
+        feedback = ""
+        for attempt in range(MAX_VALIDATION_RETRIES + 1):
+            attempt_context = context
+            if feedback:
+                attempt_context = IntentContext(
+                    board_summary=context.board_summary,
+                    lesson_state=context.lesson_state,
+                    transcript=context.transcript,
+                    intent=(
+                        f"{context.intent}\n\nYour previous attempt was rejected by the "
+                        f"drawing protocol validator: {feedback} Produce a corrected plan."
+                    ),
+                    focus=context.focus,
+                    region_hint=context.region_hint,
+                )
+            try:
+                raw_plan = await call_board_director(attempt_context)
+            except IntentHandlingError as exc:
+                # Transport/model failures are not corrected by re-prompting.
+                return None, exc
+            try:
+                return validate_drawing_plan(raw_plan), None
+            except IntentHandlingError as exc:
+                last_error = exc
+                feedback = str(exc.message)[:400]
+                logger.warning(
+                    "drawing plan validation failed attempt=%d: %s", attempt + 1, exc.message
+                )
+        return None, last_error
+
+    async def _register_triggers(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        plan_payload: dict[str, Any],
+        id_map: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Register transcript triggers declared by the plan (best-effort)."""
+        trigger_system = self._trigger_system
+        if trigger_system is None:
+            return []
+        registered: list[dict[str, Any]] = []
+        raw_triggers = plan_payload.get("triggers")
+        if not isinstance(raw_triggers, list):
+            return []
+        seen: set[tuple[str, str]] = set()
+        for raw in raw_triggers:
+            if not isinstance(raw, dict):
+                continue
+            phrase = str(raw.get("phrase") or "").strip()
+            target = str(raw.get("target") or "").strip()
+            action = str(raw.get("action") or "highlight").strip().lower()
+            if not phrase or not target or action not in SUPPORTED_TRIGGER_ACTIONS:
+                continue
+            key = (phrase.lower(), target)
+            if key in seen:
+                continue
+            seen.add(key)
+            real_target = id_map.get(target, target)
+            try:
+                cooldown_ms = int(raw.get("cooldown_ms"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                cooldown_ms = DEFAULT_COOLDOWN_MS
+            max_fires = raw.get("max_fires")
+            try:
+                tid = trigger_system.register_trigger(
+                    lesson_id,
+                    phrase,
+                    real_target,
+                    action,
+                    cooldown_ms=cooldown_ms,
+                    max_fires=max_fires,
+                )
+                registered.append(
+                    {
+                        "trigger_id": tid,
+                        "phrase": phrase,
+                        "target_id": real_target,
+                        "action": action,
+                        "cooldown_ms": cooldown_ms,
+                    }
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "board_intent trigger registration failed lesson=%s: %s", lesson_id, exc
+                )
+        return registered
+
+    @staticmethod
+    def _resolve_focus(plan_payload: dict[str, Any], id_map: dict[str, str]) -> dict[str, Any]:
+        focus = plan_payload.get("focus") if isinstance(plan_payload.get("focus"), dict) else {}
+        target_ids = focus.get("target_ids")
+        remapped = [id_map.get(str(t), str(t)) for t in target_ids] if isinstance(target_ids, list) else []
+        return {
+            "target_ids": remapped,
+            "priority": str(focus.get("priority") or "normal"),
+        }
+
+
+__all__ = [
+    "BoardIntentHandler",
+    "IntentContext",
+    "IntentHandlingError",
+    "call_board_director",
+    "fetch_lesson_context",
+    "fetch_recent_transcript",
+    "fit_plan_to_region",
+    "summarize_board",
+    "validate_drawing_plan",
+]

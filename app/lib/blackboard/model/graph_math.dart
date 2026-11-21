@@ -71,7 +71,8 @@ double niceStep(double rawStep) {
 
 /// A set of uniformly spaced axis ticks plus display labels.
 class TickSet {
-  const TickSet({required this.values, required this.labels, required this.step});
+  const TickSet(
+      {required this.values, required this.labels, required this.step});
 
   final List<double> values;
   final List<String> labels;
@@ -93,10 +94,9 @@ TickSet computeTicks(
   double? preferredStep,
 }) {
   if (!range.isValid) return TickSet.empty;
-  final rawStep =
-      preferredStep != null && preferredStep > 0
-          ? preferredStep
-          : range.span / math.max(1, targetCount - 1);
+  final rawStep = preferredStep != null && preferredStep > 0
+      ? preferredStep
+      : range.span / math.max(1, targetCount - 1);
   final step = preferredStep != null && preferredStep > 0
       ? preferredStep
       : niceStep(rawStep);
@@ -196,11 +196,17 @@ class GraphMapper {
   final BoardRange yRange;
   final BoardRect rect;
 
-  LinearMap get xMap =>
-      LinearMap(inputMin: xRange.min, inputMax: xRange.max, outputMin: rect.x, outputMax: rect.right);
+  LinearMap get xMap => LinearMap(
+      inputMin: xRange.min,
+      inputMax: xRange.max,
+      outputMin: rect.x,
+      outputMax: rect.right);
 
-  LinearMap get yMap =>
-      LinearMap(inputMin: yRange.min, inputMax: yRange.max, outputMin: rect.bottom, outputMax: rect.y);
+  LinearMap get yMap => LinearMap(
+      inputMin: yRange.min,
+      inputMax: yRange.max,
+      outputMin: rect.bottom,
+      outputMax: rect.y);
 
   BoardPoint dataToNormalized(double x, double y) =>
       BoardPoint(xMap.map(x), yMap.map(y));
@@ -221,7 +227,8 @@ class GraphMapper {
     return Offset(xMap.invert(normalized.x), yMap.invert(normalized.y));
   }
 
-  bool containsData(double x, double y) => xRange.contains(x) && yRange.contains(y);
+  bool containsData(double x, double y) =>
+      xRange.contains(x) && yRange.contains(y);
 
   Rect pixelsRect(BoardTransform transform) => transform.rectToPixels(rect);
 
@@ -296,12 +303,15 @@ AxisGeometry layoutAxisGeometry({
   final yAxisX = yAxisAtZero
       ? mapper.dataToPixels(0, 0, transform).dx
       : (mapper.xRange.min > 0 ? plotRect.left : plotRect.right);
-  final xAxisAtEdge = xAxisY <= plotRect.top + 0.5 || xAxisY >= plotRect.bottom - 0.5;
-  final yAxisAtEdge = yAxisX <= plotRect.left + 0.5 || yAxisX >= plotRect.right - 0.5;
+  final xAxisAtEdge =
+      xAxisY <= plotRect.top + 0.5 || xAxisY >= plotRect.bottom - 0.5;
+  final yAxisAtEdge =
+      yAxisX <= plotRect.left + 0.5 || yAxisX >= plotRect.right - 0.5;
 
   final xLabels = <AxisTick>[];
   final xOccupied = <Rect>[];
-  final xAnchorTop = xAxisAtZero ? xAxisY + labelPadding : xAxisY + labelPadding;
+  final xAnchorTop =
+      xAxisAtZero ? xAxisY + labelPadding : xAxisY + labelPadding;
   for (var i = 0; i < xTicks.values.length; i++) {
     final value = xTicks.values[i];
     final label = xTicks.labels[i];
@@ -313,7 +323,8 @@ AxisGeometry layoutAxisGeometry({
     ];
     Offset? chosen;
     for (final candidate in candidates) {
-      final rect = Rect.fromLTWH(candidate.dx, candidate.dy, width, labelHeight);
+      final rect =
+          Rect.fromLTWH(candidate.dx, candidate.dy, width, labelHeight);
       if (!_overlapsAny(rect, xOccupied) &&
           rect.left >= plotRect.left - 2 &&
           rect.right <= plotRect.right + 2 &&
@@ -324,8 +335,7 @@ AxisGeometry layoutAxisGeometry({
       }
     }
     if (chosen == null) continue;
-    final rect =
-        Rect.fromLTWH(chosen.dx, chosen.dy, width, labelHeight);
+    final rect = Rect.fromLTWH(chosen.dx, chosen.dy, width, labelHeight);
     xOccupied.add(rect);
     xLabels.add(
       AxisTick(
@@ -340,9 +350,8 @@ AxisGeometry layoutAxisGeometry({
 
   final yLabels = <AxisTick>[];
   final yOccupied = <Rect>[];
-  final labelRightEdge = yAxisAtZero
-      ? yAxisX - labelPadding
-      : plotRect.left - labelPadding;
+  final labelRightEdge =
+      yAxisAtZero ? yAxisX - labelPadding : plotRect.left - labelPadding;
   for (var i = 0; i < yTicks.values.length; i++) {
     final value = yTicks.values[i];
     final label = yTicks.labels[i];
@@ -354,7 +363,8 @@ AxisGeometry layoutAxisGeometry({
     ];
     Offset? chosen;
     for (final candidate in candidates) {
-      final rect = Rect.fromLTWH(candidate.dx, candidate.dy, width, labelHeight);
+      final rect =
+          Rect.fromLTWH(candidate.dx, candidate.dy, width, labelHeight);
       if (!_overlapsAny(rect, yOccupied) &&
           !_overlapsAny(rect, xOccupied) &&
           rect.left >= plotRect.left - 2 &&
@@ -474,7 +484,8 @@ class PlotMath {
 
   /// Marker radius in pixels: payload radius is normalized (fraction of the
   /// board unit) with a readable pixel floor.
-  static double markerRadius(BoardTransform transform, double? normalizedRadius) {
+  static double markerRadius(
+      BoardTransform transform, double? normalizedRadius) {
     if (normalizedRadius == null || !normalizedRadius.isFinite) {
       return math.max(2.5, transform.unit * 0.007);
     }

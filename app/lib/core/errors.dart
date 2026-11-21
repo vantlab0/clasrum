@@ -39,9 +39,7 @@ class ApiException implements Exception {
       code: code,
       message: message,
       statusCode: statusCode,
-      details: rawDetails is Map
-          ? Map<String, dynamic>.from(rawDetails)
-          : null,
+      details: rawDetails is Map ? Map<String, dynamic>.from(rawDetails) : null,
       retryable: retryable,
     );
   }

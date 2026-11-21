@@ -1,7 +1,11 @@
 /// Formatting helpers shared by the classroom UI.
 library;
 
-const List<String> learningLevels = <String>['beginner', 'intermediate', 'advanced'];
+const List<String> learningLevels = <String>[
+  'beginner',
+  'intermediate',
+  'advanced'
+];
 
 const List<int> supportedDurations = <int>[15, 30, 45, 60];
 

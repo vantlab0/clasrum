@@ -82,14 +82,16 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
     if (!mounted || _entry != null || _opening) return;
     _opening = true;
     final overlay = Overlay.of(context, rootOverlay: true);
-    final renderBox = _targetKey.currentContext?.findRenderObject() as RenderBox?;
+    final renderBox =
+        _targetKey.currentContext?.findRenderObject() as RenderBox?;
     final overlayBox = overlay.context.findRenderObject() as RenderBox?;
     if (renderBox == null || overlayBox == null || !renderBox.hasSize) {
       _opening = false;
       return;
     }
 
-    final targetOffset = renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
+    final targetOffset =
+        renderBox.localToGlobal(Offset.zero, ancestor: overlayBox);
     final targetSize = renderBox.size;
     final screenSize = overlayBox.size;
     const menuWidth = 228.0;
@@ -239,11 +241,13 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
                         children: <Widget>[
                           Expanded(
                             child: OutlinedButton(
-                              onPressed: () => Navigator.of(dialogContext).pop(false),
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(false),
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: AppColors.white,
                                 side: BorderSide(
-                                  color: AppColors.border.withValues(alpha: 0.7),
+                                  color:
+                                      AppColors.border.withValues(alpha: 0.7),
                                 ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
@@ -255,7 +259,8 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
                           const SizedBox(width: 10),
                           Expanded(
                             child: FilledButton(
-                              onPressed: () => Navigator.of(dialogContext).pop(true),
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(true),
                               style: FilledButton.styleFrom(
                                 backgroundColor: AppColors.blue,
                                 foregroundColor: AppColors.white,
@@ -401,7 +406,8 @@ class _AccountDropdownMenu extends StatelessWidget {
                 onTap: onUpgrade,
               ),
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 child: Divider(
                   height: 1,
                   thickness: 1,
@@ -443,9 +449,8 @@ class _MenuItemState extends State<_MenuItem> {
   @override
   Widget build(BuildContext context) {
     final active = _hovered || _pressed;
-    final bg = active
-        ? AppColors.white.withValues(alpha: 0.06)
-        : Colors.transparent;
+    final bg =
+        active ? AppColors.white.withValues(alpha: 0.06) : Colors.transparent;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       child: MouseRegion(

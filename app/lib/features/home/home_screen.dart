@@ -376,7 +376,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildHeader(BuildContext context) {
     final name = _displayName?.trim();
-    final greeting = (name != null && name.isNotEmpty) ? 'Hello, $name' : 'Hello';
+    final greeting =
+        (name != null && name.isNotEmpty) ? 'Hello, $name' : 'Hello';
     return Row(
       children: <Widget>[
         Expanded(
@@ -576,13 +577,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _unsplashPreviewUrl({required String id, required String topic}) {
-    final cleanTitle = topic.trim().isEmpty ? 'education learning' : topic.trim();
+    final cleanTitle =
+        topic.trim().isEmpty ? 'education learning' : topic.trim();
     final prompt = Uri.encodeComponent(
       '$cleanTitle, educational topic illustration, high quality',
     );
     final seed = (id.isNotEmpty ? id : cleanTitle).hashCode.abs() % 1000000;
     // Title-based preview image for session cards (stable per session via seed).
-    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=flux';
+    return 'https://image.pollinations.ai/prompt/$prompt?width=800&height=600&nologo=true&seed=$seed&model=turbo';
   }
 
   DateTime? _parseDate(dynamic value) {
@@ -627,7 +629,8 @@ class _StartButton extends StatelessWidget {
                     style:
                         TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                 SizedBox(width: 4),
-                PwonyIcon(PwonyIconKind.startLearning, size: 16, color: AppColors.white),
+                PwonyIcon(PwonyIconKind.startLearning,
+                    size: 16, color: AppColors.white),
               ],
             ),
     );
@@ -719,7 +722,8 @@ class _RecentSessionCard extends StatelessWidget {
                     ),
                     onSelected: onMenuSelected,
                     color: AppColors.surfaceHigh,
-                    itemBuilder: (context) => const <PopupMenuEntry<_SessionMenuAction>>[
+                    itemBuilder: (context) =>
+                        const <PopupMenuEntry<_SessionMenuAction>>[
                       PopupMenuItem<_SessionMenuAction>(
                         value: _SessionMenuAction.rename,
                         child: Text('Rename'),

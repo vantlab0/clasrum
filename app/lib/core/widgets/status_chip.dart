@@ -62,13 +62,21 @@ class LessonStatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final (String label, Color color, IconData icon) = switch (status) {
       'live' => ('Live', AppColors.blue, Icons.radio_button_checked_rounded),
-      'paused' => ('Paused', AppColors.muted, Icons.pause_circle_outline_rounded),
+      'paused' => (
+          'Paused',
+          AppColors.muted,
+          Icons.pause_circle_outline_rounded
+        ),
       'completed' => (
           'Completed',
           AppColors.muted,
           Icons.check_circle_outline_rounded
         ),
-      'error' => ('Needs attention', AppColors.red, Icons.error_outline_rounded),
+      'error' => (
+          'Needs attention',
+          AppColors.red,
+          Icons.error_outline_rounded
+        ),
       'created' => ('Ready', AppColors.blue, Icons.bolt_rounded),
       _ => (
           status.isEmpty ? 'Draft' : status,

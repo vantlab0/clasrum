@@ -33,7 +33,8 @@ class AppConfig {
       'API_BASE_URL',
       defaultValue: defaultApiBaseUrl,
     );
-    const supabaseUrl = String.fromEnvironment('SUPABASE_URL', defaultValue: '');
+    const supabaseUrl =
+        String.fromEnvironment('SUPABASE_URL', defaultValue: '');
     // Accept either SUPABASE_ANON_KEY or SUPABASE_PUBLISHABLE_KEY.
     const anon = String.fromEnvironment('SUPABASE_ANON_KEY', defaultValue: '');
     const publishable =
@@ -120,9 +121,11 @@ class AppConfig {
     if (parsed == null || parsed.host.isEmpty) {
       throw ArgumentError.value(raw, 'apiBaseUrl', 'Not a valid server URL');
     }
-    var result = parsed.replace(
-      path: parsed.path.replaceAll(RegExp(r'/+$'), ''),
-    ).toString();
+    var result = parsed
+        .replace(
+          path: parsed.path.replaceAll(RegExp(r'/+$'), ''),
+        )
+        .toString();
     while (result.endsWith('/')) {
       result = result.substring(0, result.length - 1);
     }

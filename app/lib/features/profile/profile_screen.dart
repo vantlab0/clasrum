@@ -11,6 +11,7 @@ import '../../core/theme.dart';
 import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
 import '../../main.dart';
+import '../../services/auth_service.dart';
 import '../../services/realtime_client.dart';
 
 /// Profile screen: account, supported settings, and data controls.
@@ -34,14 +35,53 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _error;
   bool _deleting = false;
 
+  AuthService? _attachedAuth;
+  bool _authListenerAttached = false;
+  bool _loadRequested = false;
+
   @override
   void initState() {
     super.initState();
-    _loadMe();
+    // Note: context/AuthScope may not be read before didChangeDependencies.
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_authListenerAttached) {
+      _attachedAuth = _auth;
+      _attachedAuth?.addListener(_onAuthChanged);
+      _authListenerAttached = true;
+    }
+    if (!_loadRequested) {
+      _loadRequested = true;
+      _loadMe();
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_authListenerAttached) {
+      _attachedAuth?.removeListener(_onAuthChanged);
+    }
+    super.dispose();
+  }
+
+  AuthService? get _auth => AuthScope.maybeOf(context)?.authService;
+
+  /// Prefer the live Supabase session token over the mirrored storage token:
+  /// the mirror can lag behind session refreshes and cause false
+  /// "Not signed in" states.
+  String? get _token => _auth?.accessToken ?? widget.storage.token;
+
+  void _onAuthChanged() {
+    if (_token != null && _student == null && !_loading) {
+      _loadMe();
+    }
   }
 
   Map<String, String> get _authHeaders {
-    final token = widget.storage.token;
+    final token = _token;
     return <String, String>{
       if (token != null) 'Authorization': 'Bearer $token',
       'Content-Type': 'application/json',
@@ -60,7 +100,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _loadMe() async {
     try {
-      final token = widget.storage.token;
+      final token = _token;
       if (token == null) {
         if (mounted) setState(() => _loading = false);
         return;
@@ -90,7 +130,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           setState(() {
             _student = null;
             _loading = false;
-            _error = 'Unable to load profile from the server. Please try again later.';
+            _error =
+                'Unable to load profile from the server. Please try again later.';
           });
         }
       } else {
@@ -157,7 +198,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _error = null;
     });
     try {
-      final token = widget.storage.token;
+      final token = _token;
       if (token == null) throw ApiException.unauthorized();
       final response = await http.delete(
         widget.config.apiUri('/me/data'),
@@ -235,8 +276,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         _infoRow('Name',
                             _student!['display_name'] as String? ?? '—'),
                         _divider(),
-                        _infoRow(
-                            'Email', _student!['email'] as String? ?? '—'),
+                        _infoRow('Email', _student!['email'] as String? ?? '—'),
                       ],
                     ),
                     const SizedBox(height: 14),
@@ -245,10 +285,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       children: <Widget>[
                         _infoRow(
                           'Level',
-                          levelLabel(
-                              _student!['default_level'] as String? ??
-                                  widget.storage.defaultLearningLevel ??
-                                  'beginner'),
+                          levelLabel(_student!['default_level'] as String? ??
+                              widget.storage.defaultLearningLevel ??
+                              'beginner'),
                         ),
                         _divider(),
                         _infoRow(
@@ -273,7 +312,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         _divider(),
                         _actionRow(
                           icon: PwonyIconKind.delete,
-                          label: _deleting ? 'Deleting data…' : 'Delete all my data',
+                          label: _deleting
+                              ? 'Deleting data…'
+                              : 'Delete all my data',
                           subtitle:
                               'Removes lessons, transcripts, board history, notes and memory.',
                           onTap: _deleting ? null : _deleteMyData,
@@ -333,8 +374,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               if (email != null && email.isNotEmpty) ...[
                 const SizedBox(height: 2),
                 Text(email,
-                    style: const TextStyle(
-                        color: AppColors.muted, fontSize: 13)),
+                    style:
+                        const TextStyle(color: AppColors.muted, fontSize: 13)),
               ],
             ],
           ),
@@ -400,8 +441,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         children: <Widget>[
           Expanded(
             child: Text(label,
-                style:
-                    const TextStyle(color: AppColors.muted, fontSize: 14)),
+                style: const TextStyle(color: AppColors.muted, fontSize: 14)),
           ),
           const SizedBox(width: 12),
           Flexible(

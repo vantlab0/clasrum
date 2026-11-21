@@ -123,7 +123,8 @@ class _ConfigurationErrorScreen extends StatelessWidget {
                   children: [
                     const Row(
                       children: [
-                        PwonyIcon(PwonyIconKind.info, color: Colors.white, size: 22),
+                        PwonyIcon(PwonyIconKind.info,
+                            color: Colors.white, size: 22),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(

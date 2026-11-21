@@ -187,8 +187,7 @@ class BoardElement {
         if (color != null) 'color': color,
         'created_sequence': createdSequence,
         if (updatedSequence != null) 'updated_sequence': updatedSequence,
-        if (removedAtSequence != null)
-          'removed_at_sequence': removedAtSequence,
+        if (removedAtSequence != null) 'removed_at_sequence': removedAtSequence,
         if (animation.isNotEmpty) 'animation': animation,
       };
 
@@ -208,7 +207,8 @@ Map<String, dynamic>? _map(Object? value) {
   if (value is Map<String, dynamic>) return value;
   if (value is Map) {
     return value.map<String, dynamic>(
-      (dynamic key, dynamic val) => MapEntry<String, dynamic>(key.toString(), val),
+      (dynamic key, dynamic val) =>
+          MapEntry<String, dynamic>(key.toString(), val),
     );
   }
   return null;

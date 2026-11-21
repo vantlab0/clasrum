@@ -203,7 +203,8 @@ class AiAudioPlaybackController extends ChangeNotifier {
 
   /// Stops playback for the current (interrupted) response and clears only its
   /// buffered audio. Newer response audio (different response id) is preserved.
-  Future<void> interrupt({int? interruptedResponseId, bool keepNewer = true}) async {
+  Future<void> interrupt(
+      {int? interruptedResponseId, bool keepNewer = true}) async {
     if (_disposed) return;
     _playbackEnabled = false;
     _responseDone = false;
@@ -237,7 +238,9 @@ class AiAudioPlaybackController extends ChangeNotifier {
     if (remainingFrames == 0) {
       if (_queue.isEmpty && _responseDone && _playbackEnabled) {
         _completeIfDrained();
-      } else if (_queue.isEmpty && !_playbackEnabled && _state != AiPlaybackState.paused) {
+      } else if (_queue.isEmpty &&
+          !_playbackEnabled &&
+          _state != AiPlaybackState.paused) {
         // drained while paused/stopped feeding
       }
       return;

@@ -2,11 +2,44 @@ import 'dart:ui' show Color;
 
 import '../model/board_geometry.dart';
 
-// ———————————————————————————————————————————————————————————————————
-// Minimal Template class kept for backward compatibility.
-// The real system uses the generative drawing protocol (DrawingStep,
-// DrawingAction, DrawingPayload) defined in board_event.dart.
-// ———————————————————————————————————————————————————————————————————
+/// Drawing primitives supported by the legacy template system.
+enum TemplateDrawAction {
+  drawShape,
+  drawLine,
+  drawPath,
+  drawArrow,
+  drawText,
+  highlight,
+  fadeInLabel,
+}
+
+/// One legacy drawing step kept for compatibility with the educational
+/// templates.
+class TemplateStep {
+  const TemplateStep({
+    required this.id,
+    required this.action,
+    this.geometry = const <String, Object?>{},
+    required this.durationMs,
+    this.delayMs = 0,
+    this.strokeWidth = 2.0,
+    this.labelId,
+    this.targetId,
+    this.color,
+  });
+
+  final String id;
+  final TemplateDrawAction action;
+  final Map<String, Object?> geometry;
+  final int durationMs;
+  final int delayMs;
+  final double strokeWidth;
+  final String? labelId;
+  final String? targetId;
+  final dynamic color;
+}
+
+/// Unique category labels kept for template compatibility.
 
 /// A minimal template class kept for backward compatibility.
 /// Do not use for new development — use the generative drawing protocol
@@ -32,7 +65,7 @@ class Template {
   final String displayName;
 
   /// Ordered drawing steps (backward-compat only; use DrawingStep instead).
-  final List<DrawingStep> steps;
+  final List<TemplateStep> steps;
 
   /// Template labels keyed by label ID.
   final Map<String, TemplateLabel> labels;

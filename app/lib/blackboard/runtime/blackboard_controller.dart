@@ -120,8 +120,8 @@ class BlackboardController extends ChangeNotifier {
   /// animation — convenience for replay/restore screens and tests.
   void loadReplay(List<BoardEvent> events) {
     if (_disposed) return;
-    final replay = BoardDocument.empty(sessionId: _document.sessionId)
-        .applyAll(events);
+    final replay =
+        BoardDocument.empty(sessionId: _document.sessionId).applyAll(events);
     loadSnapshot(replay);
   }
 
@@ -232,7 +232,8 @@ class BlackboardController extends ChangeNotifier {
         }
 
         final targetElementId = _elementIdFor(event, updated);
-        final element = targetElementId == null ? null : updated[targetElementId];
+        final element =
+            targetElementId == null ? null : updated[targetElementId];
         final shouldAnimate = _animationsEnabled &&
             event.animate &&
             !_instantEventIds.contains(event.eventId) &&

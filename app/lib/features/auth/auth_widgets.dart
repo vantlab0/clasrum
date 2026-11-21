@@ -242,7 +242,8 @@ class AuthGlassField extends StatelessWidget {
             prefixIcon: prefixIcon == null
                 ? null
                 : Padding(
-                    padding: const EdgeInsetsDirectional.only(start: 12, end: 8),
+                    padding:
+                        const EdgeInsetsDirectional.only(start: 12, end: 8),
                     child: PwonyIcon(
                       prefixIcon!,
                       size: 18,
@@ -311,7 +312,8 @@ class AuthMessage extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.45),
+              style: const TextStyle(
+                  color: Colors.white70, fontSize: 13, height: 1.45),
             ),
           ),
         ],

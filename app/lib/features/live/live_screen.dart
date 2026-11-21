@@ -13,7 +13,6 @@ import '../../blackboard/model/board_event.dart';
 import '../../blackboard/model/board_geometry.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
 import '../../blackboard/runtime/board_viewport_controller.dart';
-import '../../blackboard/templates/template_registry.dart';
 import '../../core/theme.dart';
 import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
@@ -79,7 +78,6 @@ class _LiveScreenState extends State<LiveScreen>
     WidgetsBinding.instance.addObserver(this);
     _boardController = BlackboardController();
     _viewportController = BoardViewportController(tickerProvider: this);
-    TemplateRegistry.registerBuiltIns();
     // Track board content bounds so the viewport can clamp panning.
     _boardController.addListener(() {
       if (!mounted) return;
@@ -294,7 +292,7 @@ class _LiveScreenState extends State<LiveScreen>
     final scale = payload['scale'] is num
         ? (payload['scale'] as num).toDouble()
         : (payload['scale'] is String
-            ? double.tryParse(payload['scale'])
+            ? double.tryParse(payload['scale'].toString())
             : null);
     final animate = payload['animate'] != false;
 
@@ -388,7 +386,8 @@ class _LiveScreenState extends State<LiveScreen>
             const SizedBox(height: 10),
             const Text(
               'You can return to this lesson later. Your board and session state stay intact.',
-              style: TextStyle(color: AppColors.muted, fontSize: 14, height: 1.4),
+              style:
+                  TextStyle(color: AppColors.muted, fontSize: 14, height: 1.4),
             ),
             const SizedBox(height: 18),
             Row(
@@ -694,7 +693,9 @@ class _LiveScreenState extends State<LiveScreen>
 
   Future<void> _captureImage() async {
     final controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized || _imageSubmitting) {
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        _imageSubmitting) {
       return;
     }
     try {
@@ -756,12 +757,12 @@ class _LiveScreenState extends State<LiveScreen>
                 );
               },
               onPanEnd: (_) => _viewportController.onManualInteractionEnd(),
-              onScaleStart: (_) => _viewportController.onManualInteractionStart(),
+              onScaleStart: (_) =>
+                  _viewportController.onManualInteractionStart(),
               onScaleUpdate: (details) {
                 _viewportController.setViewport(
                   _viewportController.offset,
-                  (_viewportController.scale * details.scale)
-                      .clamp(0.5, 2.0),
+                  (_viewportController.scale * details.scale).clamp(0.5, 2.0),
                 );
               },
               onScaleEnd: (_) => _viewportController.onManualInteractionEnd(),
@@ -860,7 +861,8 @@ class _TopErrorBanner extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              style: const TextStyle(color: AppColors.white, fontSize: 12, height: 1.3),
+              style: const TextStyle(
+                  color: AppColors.white, fontSize: 12, height: 1.3),
             ),
           ),
           const SizedBox(width: 8),
@@ -869,7 +871,8 @@ class _TopErrorBanner extends StatelessWidget {
             behavior: HitTestBehavior.opaque,
             child: const Padding(
               padding: EdgeInsets.all(4),
-              child: PwonyIcon(PwonyIconKind.close, size: 16, color: AppColors.muted),
+              child: PwonyIcon(PwonyIconKind.close,
+                  size: 16, color: AppColors.muted),
             ),
           ),
         ],
@@ -1089,7 +1092,8 @@ class _MicControl extends StatelessWidget {
                 color: bg,
                 borderRadius: BorderRadius.circular(999),
                 border: Border.all(
-                  color: AppColors.white.withValues(alpha: listening ? 0.12 : 0.08),
+                  color: AppColors.white
+                      .withValues(alpha: listening ? 0.12 : 0.08),
                 ),
               ),
               child: Material(
@@ -1115,7 +1119,8 @@ class _MicControl extends StatelessWidget {
                                   height: 18,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2,
-                                    color: AppColors.white.withValues(alpha: 0.95),
+                                    color:
+                                        AppColors.white.withValues(alpha: 0.95),
                                   ),
                                 )
                               : const PwonyIcon(
@@ -1199,7 +1204,8 @@ class _CameraOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
     final bottomInset = media.padding.bottom;
-    final panelHeight = (media.size.height * 0.52).clamp(320.0, media.size.height * 0.7);
+    final panelHeight =
+        (media.size.height * 0.52).clamp(320.0, media.size.height * 0.7);
 
     return Stack(
       children: <Widget>[
@@ -1233,7 +1239,8 @@ class _CameraOverlay extends StatelessWidget {
                 child: SafeArea(
                   top: false,
                   child: Padding(
-                    padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomInset * 0.2),
+                    padding:
+                        EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomInset * 0.2),
                     child: Column(
                       children: <Widget>[
                         Container(
@@ -1261,8 +1268,10 @@ class _CameraOverlay extends StatelessWidget {
                               tooltip: 'Close camera',
                               onPressed: submitting ? null : onClose,
                               size: 34,
-                              background: AppColors.surface.withValues(alpha: 0.55),
-                              borderColor: AppColors.border.withValues(alpha: 0.55),
+                              background:
+                                  AppColors.surface.withValues(alpha: 0.55),
+                              borderColor:
+                                  AppColors.border.withValues(alpha: 0.55),
                               child: const PwonyIcon(
                                 PwonyIconKind.close,
                                 size: 16,
@@ -1308,7 +1317,8 @@ class _CameraOverlay extends StatelessWidget {
                                   shape: BoxShape.circle,
                                   color: AppColors.white,
                                   border: Border.all(
-                                    color: AppColors.white.withValues(alpha: 0.35),
+                                    color:
+                                        AppColors.white.withValues(alpha: 0.35),
                                     width: 4,
                                   ),
                                 ),
@@ -1340,7 +1350,8 @@ class _CameraOverlay extends StatelessWidget {
   Widget _buildPreview() {
     if (opening) {
       return const Center(
-        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.white),
+        child:
+            CircularProgressIndicator(strokeWidth: 2, color: AppColors.white),
       );
     }
     final c = controller;

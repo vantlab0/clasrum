@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:convert' as convert;
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -101,7 +102,8 @@ class AppStorage {
     }
   }
 
-  Future<void> _writeMeta(String key, Map<String, Map<String, dynamic>> value) async {
+  Future<void> _writeMeta(
+      String key, Map<String, Map<String, dynamic>> value) async {
     await _prefs.setString(key, convert.jsonEncode(value));
   }
 
@@ -220,5 +222,42 @@ class AppStorage {
     await _prefs.remove(_durationKey);
     await _prefs.remove(_lessonMetaKey);
     await _prefs.remove(_noteMetaKey);
+  }
+
+  // ------------------------------------------------------------- quiz persistence ----
+
+  /// Stores quiz completion data locally.
+  Future<void> setQuizData({
+    required String topic,
+    required int questionCount,
+    required int correctCount,
+    required int durationMinutes,
+    required Set<int> answeredIndices,
+  }) async {
+    final meta = <String, dynamic>{
+      'topic': topic,
+      'question_count': questionCount,
+      'correct_count': correctCount,
+      'duration_minutes': durationMinutes,
+      'answered_indices': answeredIndices.toList(),
+      'completed_at': DateTime.now().toIso8601String(),
+    };
+    await _prefs.setString('_quiz_meta_v1', jsonEncode(meta));
+  }
+
+  /// Retrieves stored quiz completion data, or returns null if none exists.
+  Map<String, dynamic>? get quizData {
+    final raw = _prefs.getString('_quiz_meta_v1');
+    if (raw == null) return null;
+    try {
+      return jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Clears stored quiz completion data.
+  Future<void> clearQuizData() async {
+    await _prefs.remove('_quiz_meta_v1');
   }
 }

@@ -36,7 +36,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   String? _validateEmail(String? value) {
     final v = (value ?? '').trim();
     if (v.isEmpty) return 'Enter your email address.';
-    if (!v.contains('@') || !v.contains('.')) return 'Enter a valid email address.';
+    if (!v.contains('@') || !v.contains('.'))
+      return 'Enter a valid email address.';
     return null;
   }
 
@@ -54,7 +55,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
       final auth = AuthScope.maybeOf(context)?.authService;
       if (auth == null) {
         if (!mounted) return;
-        setState(() => _error = 'Authentication is unavailable. Please try again.');
+        setState(
+            () => _error = 'Authentication is unavailable. Please try again.');
       } else {
         await auth.resetPassword(email: _emailController.text);
         if (!mounted) return;
@@ -132,7 +134,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
               child: AuthTextLink(
                 label: 'Back to login',
                 subtle: true,
-                onPressed: _loading ? null : () => Navigator.of(context).maybePop(),
+                onPressed:
+                    _loading ? null : () => Navigator.of(context).maybePop(),
               ),
             ),
           ],

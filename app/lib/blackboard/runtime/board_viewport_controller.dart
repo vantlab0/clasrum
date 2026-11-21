@@ -3,12 +3,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/animation.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/scheduler.dart';
-import 'package:flutter/ui.dart' show Offset, Size;
+
+import 'dart:ui' show Offset, Size;
 
 import '../model/board_document.dart';
-import '../model/board_element.dart';
-import '../model/board_event.dart';
 import '../model/board_geometry.dart';
 
 /// Intelligent blackboard viewport controller (Phase 3).
@@ -42,8 +40,7 @@ class BoardViewportController extends ChangeNotifier {
     this.maxScale = 2.0,
     this.forceAutoPan = false,
     TickerProvider? tickerProvider,
-  })  : _tickerProvider = tickerProvider,
-        _animationController = tickerProvider != null
+  }) : _animationController = tickerProvider != null
             ? AnimationController(
                 vsync: tickerProvider,
                 duration: animationDuration,
@@ -81,12 +78,12 @@ class BoardViewportController extends ChangeNotifier {
 
   // ------------------------------------------------------------------- state --
 
-  final TickerProvider? _tickerProvider;
-  final AnimationController? _animationController;
+  AnimationController? _animationController;
 
   Size? _viewportSize; // logical pixels
   BoardRect? _contentBounds; // normalized board bounds of all visible content
-  Offset _normalizedOffset = Offset.zero; // top-left of visible area in board coords
+  Offset _normalizedOffset =
+      Offset.zero; // top-left of visible area in board coords
   double _normalizedScale = 1.0;
 
   bool _manuallyInteracting = false;
@@ -142,8 +139,7 @@ class BoardViewportController extends ChangeNotifier {
     _animationController = AnimationController(
       vsync: provider,
       duration: animationDuration,
-    )
-      ..addStatusListener((status) {
+    )..addStatusListener((status) {
         if (status == AnimationStatus.completed ||
             status == AnimationStatus.dismissed) {
           _animationInProgress = false;
@@ -232,7 +228,7 @@ class BoardViewportController extends ChangeNotifier {
     if (rect == null || rect.isEmpty) {
       return Future<void>.value();
     }
-    return focusOnRect(rect, priority: priority, animate: animate);
+    return focusOnRect(rect!, priority: priority, animate: animate);
   }
 
   /// Focus the viewport on a list of board elements (their union bounds).
@@ -261,7 +257,7 @@ class BoardViewportController extends ChangeNotifier {
       }
       if (first) return Future<void>.value();
     }
-    return focusOnRect(rect, priority: priority, animate: animate);
+    return focusOnRect(rect!, priority: priority, animate: animate);
   }
 
   /// Focus the viewport on an arbitrary normalized board rect.
@@ -279,15 +275,13 @@ class BoardViewportController extends ChangeNotifier {
     // Already comfortably visible? Don't move.
     if (_isComfortablyVisible(rect)) return Future<void>.value();
 
-    final (Offset targetOffset, double targetScale) =
-        _computeTarget(rect);
+    final (Offset targetOffset, double targetScale) = _computeTarget(rect);
     return _animateTo(targetOffset, targetScale, animate: animate);
   }
 
   /// Return true if [rect] is already comfortably visible in the current
   /// viewport (respecting [comfortableMargin]).
-  bool isComfortablyVisible(BoardRect rect) =>
-      _isComfortablyVisible(rect);
+  bool isComfortablyVisible(BoardRect rect) => _isComfortablyVisible(rect);
 
   // ---------------------------------------------------------- animation --
 
@@ -301,7 +295,8 @@ class BoardViewportController extends ChangeNotifier {
     targetScale = math.min(math.max(targetScale, minScale), maxScale);
     _clampOffset(target: targetOffset);
 
-    if (!animate || _animationController == null) {
+    final controller = _animationController;
+    if (!animate || controller == null) {
       // Instant apply.
       _normalizedOffset = targetOffset;
       _normalizedScale = targetScale;
@@ -314,18 +309,17 @@ class BoardViewportController extends ChangeNotifier {
     final startOffset = _normalizedOffset;
     final startScale = _normalizedScale;
 
-    _animationController
+    controller
       ..value = 0.0
       ..addListener(() {
-        final t = _animationController!.value;
+        final t = controller.value;
         _normalizedOffset = Offset.lerp(startOffset, targetOffset, t)!;
-        _normalizedScale =
-            lerpDouble(startScale, targetScale, t)!;
+        _normalizedScale = startScale + (targetScale - startScale) * t;
         _clampOffset();
         notifyListeners();
       });
 
-    return _animationController.forward().then((_) {
+    return controller.forward().then((_) {
       _animationInProgress = false;
     });
   }
@@ -402,10 +396,12 @@ class BoardViewportController extends ChangeNotifier {
     var targetOffsetY = rect.centerY - visibleH / 2;
 
     targetOffsetX = targetOffsetX.clamp(
-      0.0, (1.0 - visibleW).clamp(0.0, 1.0),
+      0.0,
+      (1.0 - visibleW).clamp(0.0, 1.0),
     );
     targetOffsetY = targetOffsetY.clamp(
-      0.0, (1.0 - visibleH).clamp(0.0, 1.0),
+      0.0,
+      (1.0 - visibleH).clamp(0.0, 1.0),
     );
 
     return (Offset(targetOffsetX, targetOffsetY), effectiveScale);

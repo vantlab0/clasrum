@@ -129,7 +129,8 @@ class BoardEventQueue {
     _rememberToken(event);
     if (_buffered.length > maxBufferedEvents) {
       final overflow = _buffered.length - maxBufferedEvents;
-      final removable = _buffered.keys.toList().reversed.take(overflow).toList();
+      final removable =
+          _buffered.keys.toList().reversed.take(overflow).toList();
       for (final sequence in removable) {
         _buffered.remove(sequence);
         _warn('dropped far-future event seq=$sequence (buffer full)');

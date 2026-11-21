@@ -874,45 +874,6 @@ class MoveElementArgs(StrictModel):
         )
 
 
-class DrawTemplateArgs(StrictModel):
-    """``board_draw_template`` -> ``draw_template``; render an educational template."""
-
-    template_id: IdText = Field(
-        description="Template identifier (must match a registered template)."
-    )
-    region: Literal["left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"] | None = (
-        Field(default=None, description="Preferred board region for the template.")
-    )
-    position: Position | None = Field(
-        default=None, description="Template origin position, normalized 0..1."
-    )
-    size: Size | None = Field(
-        default=None, description="Template size, normalized 0..1."
-    )
-    labels: Annotated[
-        list[Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)]],
-        Field(min_length=0, max_length=MAX_ITEMS),
-    ] = Field(
-        default_factory=list,
-        description="Template label IDs to include (subset of the template's labels).",
-    )
-    animate: bool = Field(
-        default=True, description="Whether to animate the progressive drawing."
-    )
-
-    def build_payload(self) -> dict[str, Any]:
-        return _clean(
-            {
-                "template_id": self.template_id,
-                "region": self.region,
-                "position": self.position.to_payload() if self.position else None,
-                "size": self.size.to_payload() if self.size else None,
-                "labels": list(self.labels),
-                "animate": self.animate,
-            }
-        )
-
-
 # ---------------------------------------------------------------------------
 # lesson tool arguments (LangGraph actions, not board events)
 # ---------------------------------------------------------------------------
@@ -1268,17 +1229,6 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Move an existing element to an absolute normalized position or by a delta.",
         (),
     ),
-    (
-        "board_draw_template",
-        "draw_template",
-        "new",
-        DrawTemplateArgs,
-        "Render a registered educational drawing template (mitochondria, cell, "
-        "circuit, triangle, coordinate axes, atom, ...). The template is expanded "
-        "into individual board events on the client; this tool only validates the "
-        "template_id and passes the request through.",
-        (),
-    ),
 )
 
 _LESSON_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
@@ -1546,7 +1496,6 @@ __all__ = [
     "HighlightArgs",
     "ClearArgs",
     "MoveElementArgs",
-    "DrawTemplateArgs",
     "LessonNextConceptArgs",
     "LessonUpdateProgressArgs",
     "LessonAskQuestionArgs",

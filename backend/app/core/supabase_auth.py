@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import secrets
 import threading
+
+from sqlalchemy.exc import IntegrityError
 from typing import Any
 
 import jwt
@@ -57,7 +59,10 @@ def _decode_with_jwks(token: str) -> dict[str, Any] | None:
             or "authenticated",
             options={"require": ["exp", "sub"]},
         )
-    except Exception:
+    except Exception as exc:
+        import logging
+
+        logging.getLogger("app.auth").warning("supabase JWKS decode failed: %s", exc)
         return None
     return _validate_supabase_payload(payload)
 
@@ -161,7 +166,17 @@ async def get_or_create_user_for_supabase_payload(
         is_active=True,
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Lost a concurrent create race (parallel requests for a brand-new
+        # Supabase identity). Fall back to the winning row.
+        await db.rollback()
+        user = await repositories.get_user(db, sub)
+        if user is not None:
+            return user if user.is_active else None
+        user = await repositories.get_user_by_email(db, email)
+        return user if (user is not None and user.is_active) else None
     # Ensure companion learning profile exists, consistent with local registration.
     db.add(
         StudentLearningProfile(

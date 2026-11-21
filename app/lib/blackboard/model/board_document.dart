@@ -43,7 +43,8 @@ class BoardDocument {
   /// Parses a §5 `BoardDocument` snapshot. Tolerant: wrong shapes produce an
   /// empty document rather than an exception.
   factory BoardDocument.fromJson(Map<String, dynamic> json) {
-    final sessionId = (json['session_id'] ?? json['sessionId'] ?? '').toString();
+    final sessionId =
+        (json['session_id'] ?? json['sessionId'] ?? '').toString();
     final revision = asDouble(json['revision'])?.round() ?? 0;
     final lastSequence =
         asDouble(json['last_sequence'] ?? json['lastSequence'])?.round() ?? 0;
@@ -194,8 +195,7 @@ class BoardDocument {
     return result;
   }
 
-  BoardElement? elementById(String? id) =>
-      id == null ? null : _elements[id];
+  BoardElement? elementById(String? id) => id == null ? null : _elements[id];
 
   /// Union bounds of the given element ids, for highlight annotations.
   ///
@@ -299,6 +299,9 @@ class BoardDocument {
       case BoardEventType.moveElement:
         _applyMove(builder, event);
         break;
+      case BoardEventType.viewportFocus:
+        // Viewport focus is a rendering concern, not document content.
+        break;
       case BoardEventType.unknown:
         builder.warn('ignored unknown event type "${event.type}"');
         break;
@@ -340,8 +343,10 @@ class BoardDocument {
             _elements.values.map((element) => element.toJson()).toList(),
         if (_appliedEventIds.isNotEmpty)
           'applied_event_ids': _appliedEventIds.toList(growable: false),
-        if (createdAt != null) 'created_at': createdAt!.toUtc().toIso8601String(),
-        if (updatedAt != null) 'updated_at': updatedAt!.toUtc().toIso8601String(),
+        if (createdAt != null)
+          'created_at': createdAt!.toUtc().toIso8601String(),
+        if (updatedAt != null)
+          'updated_at': updatedAt!.toUtc().toIso8601String(),
       };
 
   BoardDocument withSession(String newSessionId) => BoardDocument(
@@ -415,8 +420,7 @@ class BoardDocument {
       element = element.copyWith(
         size: event.size ?? const BoardSize(0.5, 0.5),
       );
-    } else if (event.kind == BoardEventType.drawShape &&
-        element.size == null) {
+    } else if (event.kind == BoardEventType.drawShape && element.size == null) {
       element = element.copyWith(size: const BoardSize(0.2, 0.14));
     }
     builder.elements[id] = element;
@@ -556,7 +560,8 @@ class BoardDocument {
 
   static void _applyHighlight(_DocumentBuilder builder, BoardEvent event) {
     final payload = event.payloadParsed;
-    final targets = payload is HighlightPayload ? payload.targetIds : <String>[];
+    final targets =
+        payload is HighlightPayload ? payload.targetIds : <String>[];
     if (targets.isEmpty) {
       builder.warn('highlight: target_ids is empty');
       return;
@@ -607,10 +612,10 @@ class BoardDocument {
       return;
     }
     final payload = event.payloadParsed;
-    final style = payload is HighlightEquationPayload
-        ? (payload.style ?? 'box')
-        : 'box';
-    final id = 'hl_${event.eventId.isNotEmpty ? event.eventId : event.sequence}';
+    final style =
+        payload is HighlightEquationPayload ? (payload.style ?? 'box') : 'box';
+    final id =
+        'hl_${event.eventId.isNotEmpty ? event.eventId : event.sequence}';
     builder.elements[id] = BoardElement(
       elementId: id,
       type: BoardEventType.highlight.wireName,
@@ -691,7 +696,8 @@ class BoardDocument {
       return;
     }
     final current = existing.position ?? BoardPoint.zero;
-    final newPosition = payload.position ?? current + (payload.delta ?? BoardPoint.zero);
+    final newPosition =
+        payload.position ?? current + (payload.delta ?? BoardPoint.zero);
     final merged = Map<String, dynamic>.of(existing.payload);
     merged['position'] = newPosition.toJson();
     builder.elements[id!] = existing.copyWith(
@@ -722,8 +728,7 @@ class _DocumentBuilder {
     var any = false;
     for (final entry in elements.entries.toList(growable: false)) {
       if (!entry.value.isVisible) continue;
-      elements[entry.key] =
-          entry.value.copyWith(removedAtSequence: sequence);
+      elements[entry.key] = entry.value.copyWith(removedAtSequence: sequence);
       any = true;
     }
     if (!any) {
@@ -736,13 +741,16 @@ class _DocumentBuilder {
     for (final warning in <String>[...event.warnings, ..._warnings]) {
       warnings = BoardDocument._appendWarning(warnings, warning);
     }
-    final applied = Set<String>.of(document.appliedEventIds)..add(event.eventId);
+    final applied = Set<String>.of(document.appliedEventIds)
+      ..add(event.eventId);
     if (applied.length > 2048) {
       applied.removeAll(applied.take(applied.length - 2048).toList());
     }
-    final newRevision =
-        event.boardRevision > document.revision ? event.boardRevision : document.revision;
-    final revision = newRevision < event.sequence ? event.sequence : newRevision;
+    final newRevision = event.boardRevision > document.revision
+        ? event.boardRevision
+        : document.revision;
+    final revision =
+        newRevision < event.sequence ? event.sequence : newRevision;
     return BoardDocument(
       sessionId:
           document.sessionId.isNotEmpty ? document.sessionId : event.sessionId,
