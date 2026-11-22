@@ -284,19 +284,29 @@ class LessonRealtimeHub:
             qwen = self._qwen_factory() if self._qwen_factory else _FakeQwenSession()
             socket.qwen = qwen
             try:
-                await qwen.connect(
-                    instructions=_teacher_instructions(detail),
-                    tools=_openai_tools(),
+                await asyncio.wait_for(
+                    qwen.connect(
+                        instructions=_teacher_instructions(detail),
+                        tools=_openai_tools(),
+                    ),
+                    timeout=max(1.0, float(settings.qwen_connect_timeout_seconds)),
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Qwen realtime connect failed lesson=%s", lesson_id)
                 async with self._lock:
                     self._sockets.pop(lesson_id, None)
                     self._all.get(lesson_id, set()).discard(socket)
+                actual = f"{type(exc).__name__}: {exc}".strip()
+                if len(actual) > 240:
+                    actual = actual[:237] + "..."
+                message = (
+                    "Could not connect to the Qwen model. "
+                    f"{actual}"
+                )
                 await _send_error(
                     socket,
                     "qwen_unavailable",
-                    "The tutor voice service is unavailable right now. Please try again shortly.",
+                    message,
                     retryable=True,
                 )
                 try:

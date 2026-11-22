@@ -123,33 +123,38 @@ class _BoardPainter extends CustomPainter {
 
   @override
   void paint(ui.Canvas canvas, ui.Size size) {
-    final rect = transform.contentRect;
+    try {
+      final rect = transform.contentRect;
 
-    // 1. background — true black board (no border frame)
-    final bgPaint = Paint()..color = ChalkPalette.board;
-    canvas.drawRect(rect, bgPaint);
+      // 1. background — true black board (no border frame)
+      final bgPaint = Paint()..color = ChalkPalette.board;
+      canvas.drawRect(rect, bgPaint);
 
-    // Layer order: 2 text, 3 equation, 4 drawing, 5 graph, 6 annotation.
-    // Within a level, insertion order = z-order.
-    for (final layer in <int>[2, 3, 4, 5, 6]) {
-      final elements = document.elementsForLayer(layer);
-      for (final element in elements) {
-        _paintElement(canvas, element);
+      // Layer order: 2 text, 3 equation, 4 drawing, 5 graph, 6 annotation.
+      // Within a level, insertion order = z-order.
+      for (final layer in <int>[2, 3, 4, 5, 6]) {
+        final elements = document.elementsForLayer(layer);
+        for (final element in elements) {
+          _paintElement(canvas, element);
+        }
       }
+    } catch (_) {
+      // Never crash the board painter; keep the last stable frame.
+    } finally {
+      _textEngine.clear();
     }
-
-    _textEngine.clear();
   }
 
   void _paintElement(ui.Canvas canvas, BoardElement element) {
-    final progress = animations.progress(element.elementId);
-    final resolvedPosition = animations.resolvedPosition(
-      element.elementId,
-      element.position ?? BoardPoint.zero,
-    );
-    final color = ChalkPalette.resolve(element.color);
+    try {
+      final progress = animations.progress(element.elementId);
+      final resolvedPosition = animations.resolvedPosition(
+        element.elementId,
+        element.position ?? BoardPoint.zero,
+      );
+      final color = ChalkPalette.resolve(element.color);
 
-    switch (element.kind) {
+      switch (element.kind) {
       case BoardEventType.writeText:
       case BoardEventType.writeHeading:
       case BoardEventType.writeDefinition:
@@ -211,6 +216,9 @@ class _BoardPainter extends CustomPainter {
         break;
       case BoardEventType.unknown:
         break;
+    }
+    } catch (_) {
+      // Never crash the board painter due to a malformed element.
     }
   }
 

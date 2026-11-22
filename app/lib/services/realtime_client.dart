@@ -150,9 +150,13 @@ class RealtimeClient extends ChangeNotifier {
   String? _leaseId;
   String? get leaseId => _leaseId;
 
+  String? _lastError;
+  String? get lastError => _lastError;
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Timer? _heartbeat;
+  Timer? _connectTimeout;
   bool _disposed = false;
 
   // ----------------------------------------------------------------- connect --
@@ -164,6 +168,7 @@ class RealtimeClient extends ChangeNotifier {
   Future<void> connect({required String lessonId}) async {
     _disposed = false;
     _lessonId = lessonId;
+    _lastError = null;
     final token = storage.token;
     if (token == null) {
       _fail(ConnectionState.disconnected, 'unauthorized',
@@ -190,12 +195,21 @@ class RealtimeClient extends ChangeNotifier {
     );
 
     _startHeartbeat();
-    _setState(ConnectionState.connected);
+    _connectTimeout?.cancel();
+    _connectTimeout = Timer(const Duration(seconds: 20), () {
+      if (_disposed) return;
+      if (_state == ConnectionState.connecting) {
+        _fail(ConnectionState.error, 'timeout',
+            'Connection timed out while connecting to the tutor.');
+      }
+    });
   }
 
   /// Close the socket cleanly.
   Future<void> disconnect() async {
     _stopHeartbeat();
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
     await _subscription?.cancel();
     _subscription = null;
     await _channel?.sink.close();
@@ -298,6 +312,11 @@ class RealtimeClient extends ChangeNotifier {
     switch (type) {
       case RealtimeMessageType.sessionReady:
         _leaseId = decoded['lease_id'] as String?;
+        _connectTimeout?.cancel();
+        _connectTimeout = null;
+        if (_state == ConnectionState.connecting) {
+          _setState(ConnectionState.connected);
+        }
         break;
       case RealtimeMessageType.sessionInterrupted:
         _setState(ConnectionState.interrupted);
@@ -306,8 +325,26 @@ class RealtimeClient extends ChangeNotifier {
         _setState(ConnectionState.disconnected);
         break;
       case RealtimeMessageType.error:
-        _errorController.add(decoded['message'] as String? ??
-            'The classroom reported an error.');
+        final message =
+            decoded['message'] as String? ?? 'The classroom reported an error.';
+        final code = decoded['code'] as String?;
+        final details = decoded['details'];
+        final detailText = details is String
+            ? details
+            : (details is Map && details['error'] is String
+                ? details['error'] as String
+                : null);
+        final parts = <String>[
+          message,
+          if (code != null && code.isNotEmpty && !message.contains(code)) '[$code]',
+          if (detailText != null &&
+              detailText.isNotEmpty &&
+              !message.contains(detailText))
+            detailText,
+        ];
+        final full = parts.join(' ').trim();
+        _lastError = full;
+        _errorController.add(full);
         break;
       case RealtimeMessageType.pong:
         break;
@@ -330,10 +367,33 @@ class RealtimeClient extends ChangeNotifier {
   void _onDone() {
     if (_disposed) return;
     _stopHeartbeat();
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
+    final wasConnecting = _state == ConnectionState.connecting;
+    int? closeCode;
+    String? closeReason;
+    try {
+      final dynamic ch = _channel;
+      closeCode = ch?.closeCode as int?;
+      closeReason = ch?.closeReason as String?;
+    } catch (_) {}
     _channel = null;
     _subscription = null;
     _lessonId = null;
     _leaseId = null;
+    if (wasConnecting) {
+      if (_lastError == null) {
+        final detail = <String>[
+          'Connection closed before the session was ready.',
+          if (closeCode != null) 'code=$closeCode',
+          if (closeReason != null && closeReason.isNotEmpty) closeReason,
+        ].join(' ');
+        _lastError = detail;
+        _errorController.add(detail);
+      }
+      _setState(ConnectionState.error);
+      return;
+    }
     if (!_disposed) _setState(ConnectionState.disconnected);
   }
 
@@ -343,10 +403,13 @@ class RealtimeClient extends ChangeNotifier {
     String message,
   ) {
     _stopHeartbeat();
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
     _channel = null;
     _subscription = null;
     _lessonId = null;
     _leaseId = null;
+    _lastError = message;
     _errorController.add(message);
     _setState(next);
   }
@@ -417,6 +480,8 @@ class RealtimeClient extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _stopHeartbeat();
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
     unawaited(_subscription?.cancel());
     _subscription = null;
     _channel?.sink.close();

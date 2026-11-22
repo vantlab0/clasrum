@@ -36,6 +36,10 @@ class _LiveScreenState extends State<LiveScreen>
   String? _lessonId;
   bool _connecting = false;
   String? _error;
+  String _connectionStatus = 'Connecting to Qwen model...';
+  String _connectionDetail = 'Starting realtime classroom session...';
+  double? _connectionProgress;
+  Timer? _connectProgressTimer;
 
   final AudioRecorder _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _audioStreamSub;
@@ -91,6 +95,7 @@ class _LiveScreenState extends State<LiveScreen>
     _audioPlayback = AiAudioPlaybackController();
     _lessonId = widget.client.lessonId;
     _connecting = widget.client.state == ConnectionState.connecting;
+    _syncConnectionUi(widget.client.state);
 
     _connSub = widget.client.connectionState.listen((state) {
       if (!mounted) return;
@@ -104,19 +109,17 @@ class _LiveScreenState extends State<LiveScreen>
       }
       setState(() {
         _lessonId ??= widget.client.lessonId;
+        _syncConnectionUi(state);
         switch (state) {
           case ConnectionState.connected:
-            _connecting = false;
             _error = null;
           case ConnectionState.connecting:
-            _connecting = true;
+            break;
           case ConnectionState.interrupted:
-            _connecting = false;
             _error = 'Another device took over this lesson.';
           case ConnectionState.error:
-            _connecting = false;
           case ConnectionState.disconnected:
-            _connecting = false;
+            break;
         }
       });
     });
@@ -131,6 +134,7 @@ class _LiveScreenState extends State<LiveScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _vadTimer?.cancel();
+    _connectProgressTimer?.cancel();
     unawaited(_connSub?.cancel());
     unawaited(_errSub?.cancel());
     unawaited(_msgSub?.cancel());
@@ -163,6 +167,45 @@ class _LiveScreenState extends State<LiveScreen>
           _paused = true;
         }
       }
+    }
+  }
+
+  void _syncConnectionUi(ConnectionState state) {
+    switch (state) {
+      case ConnectionState.connecting:
+        _connecting = true;
+        _connectionStatus = 'Connecting to Qwen model...';
+        _connectionDetail =
+            'Establishing the realtime voice session. This may take a few seconds.';
+        if (_connectionProgress == null || _connectionProgress! <= 0.0) {
+          _connectionProgress = 0.15;
+        }
+        _connectProgressTimer ??=
+            Timer.periodic(const Duration(milliseconds: 350), (_) {
+          if (!mounted) return;
+          setState(() {
+            final current = _connectionProgress ?? 0.15;
+            // Ease toward 90% while waiting for session.ready.
+            _connectionProgress = current + ((0.9 - current) * 0.12);
+          });
+        });
+        break;
+      case ConnectionState.connected:
+        _connecting = false;
+        _connectionStatus = 'Connected';
+        _connectionDetail = 'Qwen model is ready.';
+        _connectionProgress = 1.0;
+        _connectProgressTimer?.cancel();
+        _connectProgressTimer = null;
+        break;
+      case ConnectionState.interrupted:
+      case ConnectionState.error:
+      case ConnectionState.disconnected:
+        _connecting = false;
+        _connectProgressTimer?.cancel();
+        _connectProgressTimer = null;
+        _connectionProgress = 0.0;
+        break;
     }
   }
 
@@ -244,8 +287,12 @@ class _LiveScreenState extends State<LiveScreen>
     try {
       final doc = BoardDocument.fromSnapshotEnvelope(envelope);
       _boardController.loadSnapshot(doc);
-    } catch (_) {
-      // Keep board stable on malformed snapshots.
+    } catch (e) {
+      // Keep board stable on malformed snapshots, but surface the actual error.
+      if (!mounted) return;
+      setState(() {
+        _error = 'Board update failed: $e';
+      });
     }
   }
 
@@ -800,7 +847,73 @@ class _LiveScreenState extends State<LiveScreen>
             ),
           ),
 
-          // Connection indicator removed per UI request.
+          if (_connecting)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 64,
+              left: 24,
+              right: 24,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: GlassContainer(
+                    radius: 16,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    blurSigma: 10,
+                    backgroundOpacity: 0.55,
+                    borderColor: AppColors.border.withValues(alpha: 0.6),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                color: AppColors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                _connectionStatus,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.white,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(999),
+                          child: LinearProgressIndicator(
+                            value: _connectionProgress,
+                            minHeight: 4,
+                            backgroundColor: const Color(0x33FFFFFF),
+                            valueColor:
+                                const AlwaysStoppedAnimation<Color>(AppColors.white),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _connectionDetail,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppColors.white.withValues(alpha: 0.72),
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
 
           Positioned(
             left: 0,

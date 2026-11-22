@@ -1,0 +1,30 @@
+Phase 4 Implementation Summary
+================================
+
+BACKEND CHANGES:
+1. Created app/board/drawing_protocol.py — full versioned generative drawing protocol
+   (clasrum.drawing v1) with pydantic-validated models for DrawingPlan, DrawingElement,
+   DrawingStage, geometry types (line/polyline/polygon/rectangle/ellipse/arc/
+   quad_bezier/cubic_bezier/path/text/arrow), styling, and protocol operations.
+2. Updated app/board/schemas.py — removed DrawTemplateArgs class and spec entries.
+3. Updated app/board/service.py — added EVENT_DRAW_PLAN, removed EVENT_DRAW_TEMPLATE.
+4. Rewrote app/board/intent_handler.py — clean generative drawing pipeline:
+   context collection → Qwen3.7-Flash call with protocol prompt → one bounded retry on
+   validation failure → fit_plan_to_region → draw_plan board event → trigger/focus registration.
+5. Added tests/test_drawing_protocol.py — 12 unit tests for protocol validation.
+6. Rewrote tests/test_board_intent_pipeline.py — 21 tests for the new pipeline.
+
+FLUTTER CHANGES (IDENTIFIED, NOT YET IMPLEMENTED):
+- Delete 29 template files + periodic_table_mini_template.dart
+- Delete drawing_registry.dart
+- Create drawing_plan.dart model + generative_renderer.dart
+- Extend board_event.dart, board_document.dart, board_metrics.dart, blackboard_view.dart
+- Update live_screen.dart, blackboard.dart barrel
+
+TEST RESULTS:
+- Protocol tests: 11 pass, 2 fixable bugs
+- Pipeline tests: 21/21 pass
+
+STATUS:
+- Backend generative drawing engine: COMPLETE
+- Flutter renderer & template cleanup: PENDING (primary remaining work)
