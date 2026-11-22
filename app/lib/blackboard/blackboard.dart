@@ -11,6 +11,7 @@ export 'model/board_event.dart';
 export 'model/board_geometry.dart';
 export 'model/board_metrics.dart';
 export 'model/chalk_palette.dart';
+export 'model/drawing_plan.dart';
 export 'render/board_render_cache.dart' hide BoardBoundsRegistry;
 export 'render/chalk_text.dart';
 export 'runtime/animation_scheduler.dart';

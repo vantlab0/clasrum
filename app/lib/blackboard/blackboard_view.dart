@@ -8,13 +8,14 @@ import 'model/board_event.dart';
 import 'model/board_geometry.dart';
 import 'model/board_transform.dart';
 import 'model/chalk_palette.dart';
+import 'model/drawing_plan.dart';
 import 'render/chalk_text.dart';
 import 'render/board_render_cache.dart';
+import 'render/generative_renderer.dart';
+import 'render/legacy_drawing_renderer.dart';
 import 'runtime/animation_scheduler.dart';
 import 'runtime/blackboard_controller.dart';
 import 'runtime/board_viewport_controller.dart';
-import 'templates/template_definition.dart';
-import 'templates/template_renderer.dart';
 
 /// The tutorial board widget (CONTRACTS §10).
 ///
@@ -180,6 +181,9 @@ class _BoardPainter extends CustomPainter {
       case BoardEventType.drawDiagram:
         _paintDrawing(canvas, element, resolvedPosition, progress, color);
         _paintDrawDiagram(canvas, element, resolvedPosition, progress, color);
+        break;
+      case BoardEventType.drawPlan:
+        _paintDrawPlan(canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.createCoordinateSystem:
         _paintCoordinateSystem(
@@ -1001,6 +1005,35 @@ class _BoardPainter extends CustomPainter {
       if (b != null) {
         bounds.put(id, b);
       }
+    }
+  }
+
+  void _paintDrawPlan(
+    ui.Canvas canvas,
+    BoardElement element,
+    BoardPoint position,
+    double progress,
+    Color color,
+  ) {
+    final plan = DrawingPlan.tryParse(element.payload);
+    if (plan == null) return;
+    final result = GenerativeDrawingRenderer.render(
+      canvas,
+      plan,
+      transform,
+      progress: progress,
+    );
+    for (final entry in result.elementBounds.entries) {
+      bounds.put(entry.key, entry.value);
+    }
+    // Also register the overall plan bounds for the board element id.
+    final boxes = result.elementBounds.values.toList(growable: false);
+    if (boxes.isNotEmpty) {
+      var union = boxes.first;
+      for (final b in boxes.skip(1)) {
+        union = union.union(b);
+      }
+      bounds.put(element.elementId, union.clamp01());
     }
   }
 

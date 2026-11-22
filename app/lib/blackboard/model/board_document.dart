@@ -4,6 +4,7 @@ import 'board_element.dart';
 import 'board_event.dart';
 import 'board_geometry.dart';
 import 'board_metrics.dart';
+import 'drawing_plan.dart';
 
 /// Immutable board document (CONTRACTS §5) with the pure event reducer.
 ///
@@ -265,6 +266,7 @@ class BoardDocument {
       case BoardEventType.drawPath:
       case BoardEventType.drawArrow:
       case BoardEventType.drawDiagram:
+      case BoardEventType.drawPlan:
       case BoardEventType.createCoordinateSystem:
         _applyCreate(builder, event);
         break;
@@ -422,6 +424,24 @@ class BoardDocument {
       );
     } else if (event.kind == BoardEventType.drawShape && element.size == null) {
       element = element.copyWith(size: const BoardSize(0.2, 0.14));
+    } else if (event.kind == BoardEventType.drawPlan) {
+      final parsed = event.payloadParsed;
+      final plan = parsed is DrawPlanPayload ? parsed.plan : DrawingPlan.tryParse(event.payload);
+      if (plan != null) {
+        final bounds = plan.elementBounds;
+        BoardRect? union;
+        for (final b in bounds) {
+          union = union == null ? b : union.union(b);
+        }
+        element = element.copyWith(
+          position: union == null ? element.position : BoardPoint(union.x, union.y),
+          size: union == null ? element.size : BoardSize(union.w, union.h),
+          animation: <String, dynamic>{
+            ...element.animation,
+            'duration_ms': plan.totalDurationMs,
+          },
+        );
+      }
     }
     builder.elements[id] = element;
   }

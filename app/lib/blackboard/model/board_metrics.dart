@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'board_element.dart';
 import 'board_event.dart';
 import 'board_geometry.dart';
+import 'drawing_plan.dart';
 
 /// Normalized text style metrics shared by the document (for deterministic
 /// annotation bounds estimates) and the chalk text renderer (as a fallback when
@@ -82,6 +83,8 @@ class BoardBoundsEstimator {
         return _estimatePath(element);
       case BoardEventType.drawDiagram:
         return _estimateDiagram(element);
+      case BoardEventType.drawPlan:
+        return _estimateDrawPlan(element);
       case BoardEventType.createCoordinateSystem:
         return _estimateCoordinateSystem(element, position);
       case BoardEventType.plotFunction:
@@ -277,6 +280,18 @@ class BoardBoundsEstimator {
     final top = title.isEmpty ? bounds.y : bounds.y - 0.045;
     final height = bounds.h + (title.isEmpty ? 0 : 0.045);
     return BoardRect(bounds.x, top, bounds.w, height).clamp01();
+  }
+
+  static BoardRect? _estimateDrawPlan(BoardElement element) {
+    final plan = DrawingPlan.tryParse(element.payload);
+    if (plan == null) return null;
+    final boxes = plan.elementBounds;
+    if (boxes.isEmpty) return null;
+    var union = boxes.first;
+    for (final box in boxes.skip(1)) {
+      union = union.union(box);
+    }
+    return union.clamp01();
   }
 
   static BoardRect? _estimateCoordinateSystem(

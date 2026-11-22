@@ -317,6 +317,8 @@ class BoardAnimationScheduler {
         return const Duration(milliseconds: 660);
       case BoardEventType.drawDiagram:
         return const Duration(milliseconds: 1450);
+      case BoardEventType.drawPlan:
+        return const Duration(milliseconds: 1800);
       case BoardEventType.createCoordinateSystem:
         return const Duration(milliseconds: 720);
       case BoardEventType.plotFunction:
