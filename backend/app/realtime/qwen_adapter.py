@@ -115,6 +115,9 @@ class QwenRealtimeSession:
             {"type": "input_audio_buffer.append", "audio": payload_b64}
         )
 
+    async def commit_audio(self) -> None:
+        await self._send({"type": "input_audio_buffer.commit"})
+
     async def create_response(self) -> None:
         await self._send({"type": "response.create"})
 
@@ -204,6 +207,10 @@ class FakeQwenSession:
     async def append_audio(self, payload_b64: str) -> None:
         # Student spoke; after a short pause, the tutor replies.
         asyncio.create_task(self._reply_after_student_speech())
+
+    async def commit_audio(self) -> None:
+        # No-op for fake; response creation is driven by create_response.
+        return None
 
     async def create_response(self) -> None:
         # Explicit client turn-end: tutor replies now.

@@ -1016,6 +1016,8 @@ class _BoardPainter extends CustomPainter {
     }
   }
 
+  static final Set<String> _loggedPlanRenders = <String>{};
+
   void _paintDrawPlan(
     ui.Canvas canvas,
     BoardElement element,
@@ -1025,6 +1027,11 @@ class _BoardPainter extends CustomPainter {
   ) {
     final plan = DrawingPlan.tryParse(element.payload);
     if (plan == null) return;
+    if (_loggedPlanRenders.add(element.elementId)) {
+      debugPrint(
+        '[BlackboardView] renderer received valid drawing plan element=${element.elementId} elements=${plan.elements.length} stages=${plan.stages.length}',
+      );
+    }
     final result = GenerativeDrawingRenderer.render(
       canvas,
       plan,

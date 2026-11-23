@@ -43,6 +43,11 @@ def configure_hub(
     hub = get_hub()
     if board_service is not None:
         hub.set_board_service(board_service)
+        # Ensure committed board events are broadcast to live websocket clients.
+        try:
+            board_service.set_publisher(hub)
+        except Exception:  # pragma: no cover - defensive wiring
+            logger.warning("failed to set board publisher on hub wiring", exc_info=True)
     if qwen_factory is not None:
         hub.set_qwen_factory(qwen_factory)
     return hub

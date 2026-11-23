@@ -75,9 +75,9 @@ class _LiveScreenState extends State<LiveScreen>
   StreamSubscription<String>? _errSub;
   StreamSubscription<RealtimeMessage>? _msgSub;
 
-  static const Duration _silenceThreshold = Duration(milliseconds: 1200);
+  static const Duration _silenceThreshold = Duration(milliseconds: 1400);
   static const Duration _maxListeningDuration = Duration(seconds: 20);
-  static const double _speechDbThreshold = -38;
+  static const double _speechDbThreshold = -45; // more robust to quiet voices
 
   @override
   void initState() {
@@ -198,7 +198,7 @@ class _LiveScreenState extends State<LiveScreen>
     _tutorStartTimer?.cancel();
     _receivedTeachingContent = false;
     _waitingForTutor = false;
-    _tutorStartTimer = Timer(const Duration(seconds: 20), () {
+    _tutorStartTimer = Timer(const Duration(seconds: 12), () {
       if (!mounted || _receivedTeachingContent) return;
       setState(() {
         _waitingForTutor = true;
@@ -330,6 +330,9 @@ class _LiveScreenState extends State<LiveScreen>
     } else if (board is Map) {
       _applyBoardEnvelope(Map<String, dynamic>.from(board));
     }
+    if (_boardController.document.elements.isNotEmpty) {
+      _markTeachingContentReceived();
+    }
   }
 
   void _applyBoardSnapshot(Map<String, dynamic> payload) {
@@ -359,7 +362,9 @@ class _LiveScreenState extends State<LiveScreen>
     if (raw is! Map) return;
     try {
       final event = BoardEvent.fromJson(Map<String, dynamic>.from(raw));
+      debugPrint('[LiveScreen] board event received type=${event.type} seq=${event.sequence} id=${event.eventId}');
       _boardController.enqueue(event);
+      debugPrint('[LiveScreen] board event enqueued/applied seq=${event.sequence}');
     } catch (e, st) {
       debugPrint('[LiveScreen] Failed to apply board event: $e\n$st');
     }
@@ -553,6 +558,15 @@ class _LiveScreenState extends State<LiveScreen>
     await _startListening();
   }
 
+  Future<void> _cancelListening() async {
+    if (_micPhase != _MicPhase.listening) return;
+    await _stopMic(discard: true, silent: false);
+    if (!mounted) return;
+    setState(() {
+      _micPhase = _MicPhase.idle;
+    });
+  }
+
   Future<void> _startListening() async {
     if (_lessonId == null || _micPhase != _MicPhase.idle || _submittingTurn) {
       return;
@@ -678,9 +692,10 @@ class _LiveScreenState extends State<LiveScreen>
 
   Future<void> _finishListening({bool manualStop = false}) async {
     if (_micPhase != _MicPhase.listening || _submittingTurn) return;
-    final hasAudio = _capturedBytes >= 3200; // ~100ms at 16kHz mono PCM16
-    final shouldSubmit =
-        hasAudio && (_speechDetected || manualStop || _capturedBytes >= 16000);
+    final minBytesForSubmit = manualStop ? 1600 : 3200; // 50ms manual, 100ms auto
+    final hasAudio = _capturedBytes >= minBytesForSubmit;
+    final shouldSubmit = hasAudio &&
+        (_speechDetected || manualStop || _capturedBytes >= 8000);
     if (!shouldSubmit) {
       await _stopMic(discard: true, silent: false);
       return;
@@ -973,7 +988,7 @@ class _LiveScreenState extends State<LiveScreen>
               bottom: MediaQuery.of(context).padding.bottom + 88,
               child: IgnorePointer(
                 child: Text(
-                  'Tutor is starting the lesson...',
+                  'Tutor connected. Waiting for first board activity...',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
@@ -997,6 +1012,7 @@ class _LiveScreenState extends State<LiveScreen>
                   connecting: _connecting,
                   onPauseToggle: _togglePause,
                   onMicPressed: _onMicPressed,
+                  onMicCancel: _cancelListening,
                   onCameraPressed: _openCamera,
                   pulse: _pulseController,
                   waveLevels: _waveLevels,
@@ -1136,6 +1152,7 @@ class _BottomControls extends StatelessWidget {
     required this.connecting,
     required this.onPauseToggle,
     required this.onMicPressed,
+    required this.onMicCancel,
     required this.onCameraPressed,
     required this.pulse,
     required this.waveLevels,
@@ -1146,6 +1163,7 @@ class _BottomControls extends StatelessWidget {
   final bool connecting;
   final VoidCallback onPauseToggle;
   final VoidCallback onMicPressed;
+  final VoidCallback onMicCancel;
   final VoidCallback onCameraPressed;
   final Animation<double> pulse;
   final List<double> waveLevels;
@@ -1175,6 +1193,7 @@ class _BottomControls extends StatelessWidget {
           phase: micPhase,
           enabled: !connecting,
           onPressed: onMicPressed,
+          onCancel: onMicCancel,
           pulse: pulse,
           waveLevels: waveLevels,
         ),
@@ -1254,6 +1273,7 @@ class _MicControl extends StatelessWidget {
     required this.phase,
     required this.enabled,
     required this.onPressed,
+    required this.onCancel,
     required this.pulse,
     required this.waveLevels,
   });
@@ -1261,6 +1281,7 @@ class _MicControl extends StatelessWidget {
   final _MicPhase phase;
   final bool enabled;
   final VoidCallback onPressed;
+  final VoidCallback onCancel;
   final Animation<double> pulse;
   final List<double> waveLevels;
 
@@ -1278,7 +1299,7 @@ class _MicControl extends StatelessWidget {
       button: true,
       label: listening ? 'Listening' : 'Speak',
       child: Tooltip(
-        message: listening ? 'Listening… tap to cancel' : 'Tap to speak',
+        message: listening ? 'Listening… tap to send, long press to cancel' : 'Tap to speak',
         child: ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: BackdropFilter(
@@ -1300,6 +1321,7 @@ class _MicControl extends StatelessWidget {
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: enabled ? onPressed : null,
+                  onLongPress: enabled && listening ? onCancel : null,
                   borderRadius: BorderRadius.circular(999),
                   child: Center(
                     child: AnimatedSwitcher(

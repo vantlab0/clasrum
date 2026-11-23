@@ -348,50 +348,100 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
         "response_format": {"type": "json_object"},
     }
     timeout = min(float(settings.board_director_timeout_seconds), MODEL_TIMEOUT_SECONDS)
-    t0 = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                settings.board_director_base_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=body,
-            )
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.info(
-            "board_director request_ok duration_ms=%.1f status=%s", duration_ms, response.status_code
-        )
-        if response.status_code == 429:
-            raise IntentHandlingError(
-                "Board director is rate limited", code="qwen_rate_limited", retryable=True
-            )
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-    except IntentHandlingError:
-        raise
-    except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
-        logger.warning("board_director timeout: %s", exc)
-        raise IntentHandlingError("Board director timed out", code="qwen_unavailable", retryable=True) from exc
-    except httpx.HTTPStatusError as exc:
-        logger.warning("board_director http_error status=%s", exc.response.status_code)
-        raise IntentHandlingError(
-            f"Board director returned HTTP {exc.response.status_code}",
-            code="qwen_unavailable",
-            retryable=True,
-        ) from exc
-    except httpx.HTTPError as exc:
-        logger.warning("board_director request_failed: %s", exc)
-        raise IntentHandlingError("Board director request failed", code="qwen_unavailable", retryable=True) from exc
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        logger.warning("board_director bad_response_shape: %s", exc)
-        raise IntentHandlingError("Board director response shape was invalid", retryable=True) from exc
+    url = settings.board_director_base_url.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    max_attempts = 3
+    last_exc: IntentHandlingError | None = None
 
-    try:
-        plan = _extract_json(content if isinstance(content, str) else json.dumps(content))
-    except Exception as exc:
-        logger.warning("board_director json_parse_failed: %s", exc)
-        raise IntentHandlingError("Board director returned invalid JSON", retryable=True) from exc
-    return plan
+    for attempt in range(1, max_attempts + 1):
+        t0 = time.perf_counter()
+        logger.info(
+            "board_director request_started model=%s timeout_s=%.1f intent_chars=%s attempt=%s/%s",
+            settings.board_director_model,
+            timeout,
+            len(context.intent),
+            attempt,
+            max_attempts,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, json=body)
+            duration_ms = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "board_director response_received duration_ms=%.1f status=%s model=%s attempt=%s",
+                duration_ms,
+                response.status_code,
+                settings.board_director_model,
+                attempt,
+            )
+            if response.status_code == 429:
+                raise IntentHandlingError(
+                    "Board director is rate limited", code="qwen_rate_limited", retryable=True
+                )
+            if response.status_code >= 500:
+                raise IntentHandlingError(
+                    f"Board director returned HTTP {response.status_code}",
+                    code="qwen_unavailable",
+                    retryable=True,
+                )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except IntentHandlingError as exc:
+            last_exc = exc
+            if exc.retryable and attempt < max_attempts:
+                backoff = 0.4 * attempt
+                logger.warning(
+                    "board_director retrying attempt=%s/%s code=%s backoff_s=%.1f",
+                    attempt,
+                    max_attempts,
+                    exc.code,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                continue
+            raise
+        except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+            last_exc = IntentHandlingError("Board director timed out", code="qwen_unavailable", retryable=True)
+            logger.warning("board_director timeout attempt=%s: %s", attempt, exc)
+            if attempt < max_attempts:
+                await asyncio.sleep(0.4 * attempt)
+                continue
+            raise last_exc from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            retryable = status >= 500 or status == 429
+            last_exc = IntentHandlingError(
+                f"Board director returned HTTP {status}",
+                code="qwen_unavailable",
+                retryable=retryable,
+            )
+            logger.warning("board_director http_error status=%s attempt=%s", status, attempt)
+            if retryable and attempt < max_attempts:
+                await asyncio.sleep(0.4 * attempt)
+                continue
+            raise last_exc from exc
+        except httpx.HTTPError as exc:
+            last_exc = IntentHandlingError("Board director request failed", code="qwen_unavailable", retryable=True)
+            logger.warning("board_director request_failed attempt=%s: %s", attempt, exc)
+            if attempt < max_attempts:
+                await asyncio.sleep(0.4 * attempt)
+                continue
+            raise last_exc from exc
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.warning("board_director bad_response_shape attempt=%s: %s", attempt, exc)
+            raise IntentHandlingError("Board director response shape was invalid", retryable=True) from exc
+
+        try:
+            plan = _extract_json(content if isinstance(content, str) else json.dumps(content))
+        except Exception as exc:
+            logger.warning("board_director json_parse_failed attempt=%s: %s", attempt, exc)
+            raise IntentHandlingError("Board director returned invalid JSON", retryable=True) from exc
+        return plan
+
+    if last_exc is not None:
+        raise last_exc
+    raise IntentHandlingError("Board director failed", code="qwen_unavailable", retryable=True)
 
 
 def validate_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -651,12 +701,22 @@ class BoardIntentHandler:
                 # Transport/model failures are not corrected by re-prompting.
                 return None, exc
             try:
-                return validate_drawing_plan(raw_plan), None
+                validated = validate_drawing_plan(raw_plan)
+                logger.info(
+                    "drawing plan validation_result ok=true attempt=%d elements=%s stages=%s",
+                    attempt + 1,
+                    len(validated.get("elements", [])) if isinstance(validated, dict) else None,
+                    len(validated.get("stages", [])) if isinstance(validated, dict) else None,
+                )
+                return validated, None
             except IntentHandlingError as exc:
                 last_error = exc
                 feedback = str(exc.message)[:400]
                 logger.warning(
-                    "drawing plan validation failed attempt=%d: %s", attempt + 1, exc.message
+                    "drawing plan validation_result ok=false attempt=%d code=%s message=%s",
+                    attempt + 1,
+                    exc.code,
+                    feedback,
                 )
         return None, last_error
 

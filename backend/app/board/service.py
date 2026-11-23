@@ -780,6 +780,15 @@ class BoardService:
                     await db.refresh(row)
                 await db.commit()
                 record = BoardEventRecord.from_row(row)
+                logger.info(
+                    "board event persisted lesson=%s seq=%s type=%s event_id=%s element_id=%s source=%s",
+                    lesson_id,
+                    record.sequence,
+                    record.type,
+                    record.event_id,
+                    record.element_id,
+                    record.source,
+                )
                 await self._publish_event(lesson_id, record)
                 await self._maybe_snapshot(db, lesson_id, record.sequence)
                 return record
