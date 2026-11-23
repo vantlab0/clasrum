@@ -39,6 +39,9 @@ class _LiveScreenState extends State<LiveScreen>
   String _connectionStatus = 'Connecting to Qwen model...';
   String _connectionDetail = 'Starting realtime classroom session...';
   double? _connectionProgress;
+  bool _waitingForTutor = false;
+  bool _receivedTeachingContent = false;
+  Timer? _tutorStartTimer;
   Timer? _connectProgressTimer;
 
   final AudioRecorder _recorder = AudioRecorder();
@@ -138,6 +141,7 @@ class _LiveScreenState extends State<LiveScreen>
     WidgetsBinding.instance.removeObserver(this);
     _vadTimer?.cancel();
     _connectProgressTimer?.cancel();
+    _tutorStartTimer?.cancel();
     unawaited(_connSub?.cancel());
     unawaited(_errSub?.cancel());
     unawaited(_msgSub?.cancel());
@@ -190,6 +194,26 @@ class _LiveScreenState extends State<LiveScreen>
     await widget.client.connect(lessonId: lessonId);
   }
 
+  void _startTutorWaitTimer() {
+    _tutorStartTimer?.cancel();
+    _receivedTeachingContent = false;
+    _waitingForTutor = false;
+    _tutorStartTimer = Timer(const Duration(seconds: 20), () {
+      if (!mounted || _receivedTeachingContent) return;
+      setState(() {
+        _waitingForTutor = true;
+      });
+    });
+  }
+
+  void _markTeachingContentReceived() {
+    if (_receivedTeachingContent) return;
+    _receivedTeachingContent = true;
+    _waitingForTutor = false;
+    _tutorStartTimer?.cancel();
+    _tutorStartTimer = null;
+  }
+
   void _syncConnectionUi(ConnectionState state) {
     switch (state) {
       case ConnectionState.connecting:
@@ -213,6 +237,8 @@ class _LiveScreenState extends State<LiveScreen>
         _connectProgressTimer?.cancel();
         _connectProgressTimer = null;
         _connectionProgress = null;
+        _tutorStartTimer?.cancel();
+        _waitingForTutor = false;
         break;
       case ConnectionState.error:
       case ConnectionState.disconnected:
@@ -220,6 +246,8 @@ class _LiveScreenState extends State<LiveScreen>
         _connectProgressTimer?.cancel();
         _connectProgressTimer = null;
         _connectionProgress = null;
+        _tutorStartTimer?.cancel();
+        _waitingForTutor = false;
         break;
     }
   }
@@ -240,15 +268,21 @@ class _LiveScreenState extends State<LiveScreen>
         break;
       case RealtimeMessageType.sessionReady:
         _applySessionReady(message.payload);
+        _startTutorWaitTimer();
         break;
       case RealtimeMessageType.boardSnapshot:
         _applyBoardSnapshot(message.payload);
+        if (_boardController.document.elements.isNotEmpty) {
+          _markTeachingContentReceived();
+        }
         break;
       case RealtimeMessageType.boardEvent:
         _applyBoardEvent(message.payload);
+        _markTeachingContentReceived();
         break;
       case RealtimeMessageType.boardEvents:
         _applyBoardEvents(message.payload);
+        _markTeachingContentReceived();
         break;
       case RealtimeMessageType.lessonState:
         // Lesson metadata updates are ignored by the minimal classroom UI.
@@ -258,6 +292,7 @@ class _LiveScreenState extends State<LiveScreen>
         break;
       case RealtimeMessageType.audioDelta:
         _handleAudioDelta(message);
+        _markTeachingContentReceived();
         break;
       case RealtimeMessageType.audioDone:
         _audioPlayback.markDone(
@@ -512,7 +547,7 @@ class _LiveScreenState extends State<LiveScreen>
   Future<void> _onMicPressed() async {
     if (_connecting || _submittingTurn) return;
     if (_micPhase == _MicPhase.listening) {
-      await _stopMic(discard: true, silent: false);
+      await _finishListening(manualStop: true);
       return;
     }
     await _startListening();
@@ -641,9 +676,12 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
-  Future<void> _finishListening() async {
+  Future<void> _finishListening({bool manualStop = false}) async {
     if (_micPhase != _MicPhase.listening || _submittingTurn) return;
-    if (!_speechDetected || _capturedBytes < 800) {
+    final hasAudio = _capturedBytes >= 3200; // ~100ms at 16kHz mono PCM16
+    final shouldSubmit =
+        hasAudio && (_speechDetected || manualStop || _capturedBytes >= 16000);
+    if (!shouldSubmit) {
       await _stopMic(discard: true, silent: false);
       return;
     }
@@ -924,6 +962,24 @@ class _LiveScreenState extends State<LiveScreen>
                       ),
                     ),
                   ],
+                ),
+              ),
+            ),
+
+          if (!_connecting && _error == null && _waitingForTutor)
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: MediaQuery.of(context).padding.bottom + 88,
+              child: IgnorePointer(
+                child: Text(
+                  'Tutor is starting the lesson...',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.white.withValues(alpha: 0.62),
+                    height: 1.3,
+                  ),
                 ),
               ),
             ),

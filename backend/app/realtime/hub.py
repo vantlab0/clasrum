@@ -48,6 +48,7 @@ from app.graph import service as graph_service
 from app.lessons import service as lessons_service
 from app.lessons.board_reads import get_board_snapshot, get_transcript_cursor
 from app.lessons.transcripts import append_transcript_entry
+from app.realtime.qwen_adapter import FakeQwenSession
 from app.realtime.transcript_triggers import TranscriptTriggerSystem
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,10 @@ class QwenSession(Protocol):
     async def function_call_output(
         self, call_id: str, output: str
     ) -> None:
+        ...
+
+    async def prompt_text(self, text: str) -> None:
+        """Send a text instruction into the conversation and request a response."""
         ...
 
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
@@ -168,11 +173,13 @@ class LessonRealtimeHub:
         """Publish a committed board event to the live socket (best-effort)."""
         socket = await self._active_socket(lesson_id)
         if socket is None:
+            logger.info("board event publish skipped (no socket) lesson=%s seq=%s", lesson_id, event.get("sequence"))
             return  # no live client; event is still persisted
         try:
             await socket.websocket.send_json(
                 {MSG_TYPE: MSG_BOARD_EVENT, "event": event}
             )
+            logger.info("board event broadcast lesson=%s seq=%s type=%s", lesson_id, event.get("sequence"), (event.get("event") or {}).get("type") if isinstance(event.get("event"), dict) else event.get("type"))
         except Exception:  # pragma: no cover - a dead socket must not roll back
             logger.warning(
                 "board event publish failed (socket gone) lesson=%s seq=%s",
@@ -282,7 +289,7 @@ class LessonRealtimeHub:
 
             # Open Qwen Realtime (real or fake).
             settings = get_settings()
-            qwen = self._qwen_factory() if self._qwen_factory else _FakeQwenSession()
+            qwen = self._qwen_factory() if self._qwen_factory else FakeQwenSession()
             socket.qwen = qwen
             try:
                 await asyncio.wait_for(
@@ -337,6 +344,12 @@ class LessonRealtimeHub:
 
             # Bridge Qwen -> client in the background.
             socket.qwen_task = asyncio.create_task(self._qwen_loop(socket, lesson_id))
+
+            # Kick off initial teaching for fresh lessons (no duplicate on resume).
+            try:
+                await self._maybe_start_initial_teaching(socket, lesson, detail, board_envelope, cursor)
+            except Exception:  # pragma: no cover - must not kill the session
+                logger.exception("initial teaching start failed lesson=%s", lesson_id)
 
             # Client -> Qwen loop.
             await self._client_loop(socket, lesson_id)
@@ -518,6 +531,7 @@ class LessonRealtimeHub:
                 continue
 
             if etype == "response.audio.done":
+                logger.info("qwen audio.done lesson=%s response_id=%s", lesson_id, event.get("response_id"))
                 await socket.websocket.send_json({MSG_TYPE: MSG_AUDIO_DONE, "response_id": event.get("response_id")})
                 continue
 
@@ -575,6 +589,7 @@ class LessonRealtimeHub:
         arguments = event.get("arguments", "{}")
         if not call_id or not name:
             return
+        logger.info("qwen function_call lesson=%s name=%s call_id=%s", lesson_id, name, call_id)
 
         if name == "board_intent":
             logger.info("board_intent tool_call received lesson=%s", lesson_id)
@@ -616,6 +631,67 @@ class LessonRealtimeHub:
             logger.warning("qwen function_call_output failed lesson=%s", lesson_id, exc_info=True)
 
     # -- helpers ----------------------------------------------------------
+
+    async def _maybe_start_initial_teaching(
+        self,
+        socket: LessonSocket,
+        lesson: Lesson,
+        detail: dict[str, Any],
+        board_envelope: dict[str, Any],
+        transcript_cursor: Any,
+    ) -> None:
+        if socket.qwen is None or socket.closed.is_set():
+            return
+        status = str(getattr(lesson, "status", "") or "").lower()
+        if status in {"completed", "ended", "cancelled", "canceled"}:
+            logger.info("skip initial teaching: lesson ended lesson=%s status=%s", lesson.id, status)
+            return
+
+        last_seq = 0
+        try:
+            last_seq = int(board_envelope.get("last_sequence") or board_envelope.get("revision") or 0)
+        except Exception:
+            last_seq = 0
+        cursor_val = 0
+        try:
+            if isinstance(transcript_cursor, dict):
+                cursor_val = int(transcript_cursor.get("cursor") or transcript_cursor.get("sequence") or 0)
+            else:
+                cursor_val = int(transcript_cursor or 0)
+        except Exception:
+            cursor_val = 0
+
+        is_fresh = last_seq <= 0 and cursor_val <= 0
+        topic = str(detail.get("topic") or getattr(lesson, "topic", None) or "this lesson")
+        subject = str(detail.get("subject") or getattr(lesson, "subject", None) or "General")
+        level = str(detail.get("learning_level") or getattr(lesson, "learning_level", None) or "beginner")
+        plan = detail.get("plan") or detail.get("lesson_plan") or {}
+
+        if is_fresh:
+            prompt = (
+                "System instruction: Start the live lesson now. "
+                f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
+                f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
+                "Begin teaching immediately without waiting for the student to speak first. "
+                "Introduce the selected topic, start with an intuitive explanation, write the lesson heading on the board, "
+                "explain the first concept, write important definitions/equations/diagrams progressively, "
+                "and ask the student a question after explaining the first concept. "
+                "Use board_intent tool calls whenever you teach a visual concept."
+            )
+            logger.info("initial teaching start lesson=%s fresh=true topic=%s", lesson.id, topic)
+        else:
+            prompt = (
+                "System instruction: Resume this live lesson without restarting from the beginning. "
+                f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
+                f"Current lesson state: {json.dumps(detail.get('lesson_state') or {}, ensure_ascii=False)[:1500]}. "
+                f"Board last_sequence={last_seq}, transcript_cursor={cursor_val}. "
+                "Briefly reorient the student and continue from the current progress. "
+                "Do not repeat already completed content; use board_intent only for new or resumed visuals."
+            )
+            logger.info("initial teaching resume lesson=%s fresh=false topic=%s seq=%s cursor=%s", lesson.id, topic, last_seq, cursor_val)
+
+        await socket.qwen.prompt_text(prompt)
+        logger.info("initial teaching instruction submitted lesson=%s fresh=%s", lesson.id, is_fresh)
 
     async def _active_socket(self, lesson_id: str) -> LessonSocket | None:
         async with self._lock:

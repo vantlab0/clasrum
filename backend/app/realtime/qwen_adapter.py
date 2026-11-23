@@ -134,6 +134,19 @@ class QwenRealtimeSession:
         )
         await self.create_response()
 
+    async def prompt_text(self, text: str) -> None:
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            }
+        )
+        await self.create_response()
+
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
         while True:
             event = await self._queue.get()
@@ -207,6 +220,10 @@ class FakeQwenSession:
     async def function_call_output(self, call_id: str, output: str) -> None:
         # Tool result acknowledged; continue speaking (no-op in fake).
         logger.debug("fake function_call_output %s -> %s", call_id, output[:80])
+
+    async def prompt_text(self, text: str) -> None:
+        logger.info("fake prompt_text: %s", text[:120])
+        asyncio.create_task(self._reply_after_student_speech(delay=0.2))
 
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
         while True:
