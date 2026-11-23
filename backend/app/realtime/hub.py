@@ -174,10 +174,11 @@ class LessonRealtimeHub:
                 {MSG_TYPE: MSG_BOARD_EVENT, "event": event}
             )
         except Exception:  # pragma: no cover - a dead socket must not roll back
-            logger.debug(
+            logger.warning(
                 "board event publish failed (socket gone) lesson=%s seq=%s",
                 lesson_id,
                 event.get("sequence"),
+                exc_info=True,
             )
 
     async def publish_lesson_state(
@@ -192,7 +193,7 @@ class LessonRealtimeHub:
                 {MSG_TYPE: MSG_LESSON_STATE, "lesson": detail}
             )
         except Exception:  # pragma: no cover
-            logger.debug("lesson state publish failed lesson=%s", lesson_id)
+            logger.warning("lesson state publish failed lesson=%s", lesson_id, exc_info=True)
 
     async def publish_lesson_event(
         self,
@@ -208,7 +209,7 @@ class LessonRealtimeHub:
                 {MSG_TYPE: MSG_LESSON_STATE, "event": event_type, "payload": payload}
             )
         except Exception:  # pragma: no cover
-            logger.debug("lesson event publish failed lesson=%s", lesson_id)
+            logger.warning("lesson event publish failed lesson=%s", lesson_id, exc_info=True)
 
     # -- connection lifecycle --------------------------------------------
 
@@ -257,7 +258,7 @@ class LessonRealtimeHub:
                     )
                     await old.websocket.close(code=CLOSE_SUPERSEDED)
                 except Exception:  # pragma: no cover - best effort
-                    logger.debug("failed to close superseded socket lesson=%s", lesson_id)
+                    logger.warning("failed to close superseded socket lesson=%s", lesson_id, exc_info=True)
                 old.closed.set()
             self._sockets[lesson_id] = socket
             self._all.setdefault(lesson_id, set()).add(socket)
@@ -351,7 +352,7 @@ class LessonRealtimeHub:
             try:
                 await socket.qwen.aclose()
             except Exception:  # pragma: no cover
-                logger.debug("qwen close failed lesson=%s", socket.lesson_id)
+                logger.warning("qwen close failed lesson=%s", socket.lesson_id, exc_info=True)
         socket.closed.set()
         async with self._lock:
             self._all.setdefault(socket.lesson_id, set()).discard(socket)
@@ -374,7 +375,7 @@ class LessonRealtimeHub:
             except WebSocketDisconnect:
                 break
             except Exception:  # pragma: no cover - transport error
-                logger.debug("client receive failed lesson=%s", lesson_id, exc_info=True)
+                logger.warning("client receive failed lesson=%s", lesson_id, exc_info=True)
                 break
 
             if message.get("type") == "websocket.receive":
@@ -388,7 +389,7 @@ class LessonRealtimeHub:
                     try:
                         await socket.qwen.append_audio(b64)
                     except Exception:  # pragma: no cover
-                        logger.debug("qwen append_audio failed lesson=%s", lesson_id)
+                        logger.warning("qwen append_audio failed lesson=%s", lesson_id, exc_info=True)
                     continue
                 if text is not None:
                     await self._handle_client_text(socket, db, lesson_id, text)
@@ -399,7 +400,7 @@ class LessonRealtimeHub:
             if socket.qwen is not None:
                 await socket.qwen.create_response()
         except Exception:  # pragma: no cover
-            logger.debug("qwen create_response on end failed lesson=%s", lesson_id)
+            logger.warning("qwen create_response on end failed lesson=%s", lesson_id, exc_info=True)
 
     async def _handle_client_text(
         self,
@@ -430,7 +431,7 @@ class LessonRealtimeHub:
                 if socket.qwen is not None:
                     await socket.qwen.create_response()
             except Exception:  # pragma: no cover
-                logger.debug("qwen create_response failed lesson=%s", lesson_id)
+                logger.warning("qwen create_response failed lesson=%s", lesson_id, exc_info=True)
             return
 
         if msg_type == CLIENT_SESSION_INTERRUPT:
@@ -439,7 +440,7 @@ class LessonRealtimeHub:
                 if socket.qwen is not None:
                     await socket.qwen.cancel_response()
             except Exception:  # pragma: no cover
-                logger.debug("qwen cancel_response failed lesson=%s", lesson_id)
+                logger.warning("qwen cancel_response failed lesson=%s", lesson_id, exc_info=True)
             try:
                 await socket.websocket.send_json(
                     {MSG_TYPE: MSG_AUDIO_TRUNCATED, "response_id": None, "played_ms": 0}
@@ -465,7 +466,7 @@ class LessonRealtimeHub:
                     {MSG_TYPE: MSG_BOARD_SNAPSHOT, "board": _jsonable(envelope_board)}
                 )
             except Exception as exc:  # pragma: no cover
-                logger.debug("snapshot request failed lesson=%s", lesson_id, exc_info=True)
+                logger.exception("snapshot request failed lesson=%s", lesson_id)
                 await _send_error(socket, "internal_error", "could not produce snapshot")
             return
 
@@ -485,7 +486,7 @@ class LessonRealtimeHub:
                     }
                 )
             except Exception as exc:  # pragma: no cover
-                logger.debug("backfill failed lesson=%s", lesson_id, exc_info=True)
+                logger.exception("backfill failed lesson=%s", lesson_id)
                 await _send_error(socket, "internal_error", "could not backfill events")
             return
 
@@ -614,7 +615,7 @@ class LessonRealtimeHub:
             if socket.qwen is not None:
                 await socket.qwen.function_call_output(call_id, json.dumps(result))
         except Exception:  # pragma: no cover
-            logger.debug("qwen function_call_output failed lesson=%s", lesson_id)
+            logger.warning("qwen function_call_output failed lesson=%s", lesson_id, exc_info=True)
 
     # -- helpers ----------------------------------------------------------
 
@@ -690,7 +691,7 @@ class LessonRealtimeHub:
                 ended_at=ended,
             )
         except Exception:  # pragma: no cover - transcript must not block audio
-            logger.debug("transcript persist failed lesson=%s", lesson_id, exc_info=True)
+            logger.warning("transcript persist failed lesson=%s", lesson_id, exc_info=True)
 
 
 def _MSG_TYPE() -> str:

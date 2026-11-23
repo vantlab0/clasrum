@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:record/record.dart';
 
@@ -302,7 +303,9 @@ class _LiveScreenState extends State<LiveScreen>
     try {
       final event = BoardEvent.fromJson(Map<String, dynamic>.from(raw));
       _boardController.enqueue(event);
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Failed to apply board event: $e\n$st');
+    }
   }
 
   void _applyBoardEvents(Map<String, dynamic> payload) {
@@ -313,7 +316,9 @@ class _LiveScreenState extends State<LiveScreen>
       if (item is! Map) continue;
       try {
         events.add(BoardEvent.fromJson(Map<String, dynamic>.from(item)));
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[LiveScreen] Failed to parse board event in batch: $e\n$st');
+      }
     }
     if (events.isNotEmpty) _boardController.enqueueAll(events);
   }
@@ -400,8 +405,8 @@ class _LiveScreenState extends State<LiveScreen>
         // Keep buffered safely while preserving playback position/state.
         await _audioPlayback.pause();
       }
-    } catch (_) {
-      // Malformed frames/playback errors must not crash the classroom.
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Audio frame/playback error: $e\n$st');
     }
   }
 
@@ -563,12 +568,13 @@ class _LiveScreenState extends State<LiveScreen>
         if (!mounted || _micPhase != _MicPhase.listening) return;
         _evaluateVad(DateTime.now());
       });
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Microphone start failed: $e\n$st');
       await _stopMic(discard: true, silent: true);
       if (!mounted) return;
       setState(() {
         _micPhase = _MicPhase.idle;
-        _error = 'Microphone access failed.';
+        _error = 'Microphone access failed: $e';
       });
     }
   }
@@ -645,7 +651,9 @@ class _LiveScreenState extends State<LiveScreen>
       if (await _recorder.isRecording()) {
         await _recorder.stop();
       }
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Failed to stop recorder: $e\n$st');
+    }
 
     if (_micPhase == _MicPhase.listening || _micPhase == _MicPhase.submitting) {
       if (!discard) {
@@ -706,13 +714,14 @@ class _LiveScreenState extends State<LiveScreen>
         _cameraOpening = false;
         _cameraActive = true;
       });
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Camera open failed: $e\n$st');
       await _disposeCamera();
       if (!mounted) return;
       setState(() {
         _cameraOpening = false;
         _cameraActive = false;
-        _cameraError = 'Camera is unavailable.';
+        _cameraError = 'Camera is unavailable: $e';
       });
     }
   }
@@ -723,7 +732,9 @@ class _LiveScreenState extends State<LiveScreen>
     if (controller != null) {
       try {
         await controller.dispose();
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('[LiveScreen] Camera dispose failed: $e\n$st');
+      }
     }
   }
 
@@ -767,11 +778,12 @@ class _LiveScreenState extends State<LiveScreen>
           ),
         ),
       );
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[LiveScreen] Image capture failed: $e\n$st');
       if (!mounted) return;
       setState(() {
         _imageSubmitting = false;
-        _cameraError = 'Could not capture image.';
+        _cameraError = 'Could not capture image: $e';
       });
     }
   }
