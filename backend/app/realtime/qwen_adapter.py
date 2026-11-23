@@ -50,44 +50,65 @@ class QwenRealtimeSession:
             "Authorization": f"Bearer {self._api_key}",
             "X-DashScope-DataInspection": "disable",
         }
-        self._ws = await websockets.connect(url, additional_headers=headers)
+        handshake_timeout = max(1.0, float(getattr(settings, "qwen_handshake_timeout_seconds", 20.0)))
+        try:
+            self._ws = await asyncio.wait_for(
+                websockets.connect(url, additional_headers=headers),
+                timeout=handshake_timeout,
+            )
+        except Exception:
+            await self.aclose()
+            raise
+
         self._reader_task = asyncio.create_task(self._read_loop())
 
-        await self._send(
-            {
-                "type": "session.update",
-                "session": {
-                    "instructions": instructions,
-                    "modalities": ["audio", "text"],
-                    "voice": VOICE,
-                    "input_audio_format": "pcm",
-                    "output_audio_format": "pcm",
-                    "turn_detection": {
-                        "type": settings.qwen_turn_detection,
-                        "threshold": 0.5,
-                        "silence_duration_ms": 800,
+        try:
+            await self._send(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "instructions": instructions,
+                        "modalities": ["audio", "text"],
+                        "voice": VOICE,
+                        "input_audio_format": "pcm",
+                        "output_audio_format": "pcm",
+                        "turn_detection": {
+                            "type": settings.qwen_turn_detection,
+                            "threshold": 0.5,
+                            "silence_duration_ms": 800,
+                        },
+                        "input_audio_transcription": {
+                            "model": "qwen3-asr-flash-realtime",
+                        },
+                        "tools": tools,
                     },
-                    "input_audio_transcription": {
-                        "model": "qwen3-asr-flash-realtime",
-                    },
-                    "tools": tools,
-                },
-            }
-        )
-        # Wait for session.updated (readiness) with a timeout.
-        deadline = asyncio.get_event_loop().time() + 15.0
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                raise TimeoutError("Qwen session.update readiness timed out")
-            try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=remaining)
-            except asyncio.TimeoutError:
-                raise TimeoutError("Qwen session.update readiness timed out")
-            if event is None:
-                raise ConnectionError("Qwen WebSocket closed before session.updated")
-            if event.get("type") == "session.updated":
-                return
+                }
+            )
+            # Wait for session.updated (readiness) with a timeout.
+            deadline = asyncio.get_event_loop().time() + handshake_timeout
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError("Qwen session.update readiness timed out")
+                try:
+                    event = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    raise TimeoutError("Qwen session.update readiness timed out")
+                if event is None:
+                    raise ConnectionError("Qwen WebSocket closed before session.updated")
+                etype = event.get("type")
+                if etype == "session.updated":
+                    return
+                if etype == "error":
+                    err = event.get("error") if isinstance(event.get("error"), dict) else {}
+                    msg = err.get("message") or event.get("message") or "Qwen realtime error"
+                    code = err.get("code") or event.get("code")
+                    detail = f"{code}: {msg}" if code else str(msg)
+                    raise ConnectionError(f"Qwen error during handshake: {detail}")
+                # Ignore other events during handshake (e.g. session.created).
+        except Exception:
+            await self.aclose()
+            raise
 
     async def append_audio(self, payload_b64: str) -> None:
         await self._send(

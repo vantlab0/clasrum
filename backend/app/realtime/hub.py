@@ -336,10 +336,10 @@ class LessonRealtimeHub:
             )
 
             # Bridge Qwen -> client in the background.
-            socket.qwen_task = asyncio.create_task(self._qwen_loop(socket, db, lesson_id))
+            socket.qwen_task = asyncio.create_task(self._qwen_loop(socket, lesson_id))
 
             # Client -> Qwen loop.
-            await self._client_loop(socket, db, lesson_id)
+            await self._client_loop(socket, lesson_id)
         except WebSocketDisconnect:
             pass
         finally:
@@ -364,7 +364,6 @@ class LessonRealtimeHub:
     async def _client_loop(
         self,
         socket: LessonSocket,
-        db: AsyncSession,
         lesson_id: str,
     ) -> None:
         """Read client messages: audio frames + control messages."""
@@ -392,7 +391,7 @@ class LessonRealtimeHub:
                         logger.warning("qwen append_audio failed lesson=%s", lesson_id, exc_info=True)
                     continue
                 if text is not None:
-                    await self._handle_client_text(socket, db, lesson_id, text)
+                    await self._handle_client_text(socket, lesson_id, text)
                     continue
 
         # End of client stream: signal Qwen we're done sending audio for this turn.
@@ -405,7 +404,6 @@ class LessonRealtimeHub:
     async def _handle_client_text(
         self,
         socket: LessonSocket,
-        db: AsyncSession,
         lesson_id: str,
         text: str,
     ) -> None:
@@ -451,7 +449,7 @@ class LessonRealtimeHub:
 
         if msg_type == CLIENT_SESSION_END:
             reason = str(envelope.get("reason") or "student")
-            await self._end_lesson(socket, db, lesson_id, reason)
+            await self._end_lesson(socket, lesson_id, reason)
             return
 
         if msg_type == CLIENT_BOARD_REQUEST_SNAPSHOT:
@@ -495,7 +493,6 @@ class LessonRealtimeHub:
     async def _qwen_loop(
         self,
         socket: LessonSocket,
-        db: AsyncSession,
         lesson_id: str,
     ) -> None:
         """Bridge Qwen server events -> client + tool call execution."""
@@ -530,19 +527,20 @@ class LessonRealtimeHub:
             }:
                 entry = self._transcript_entry_from_qwen(lesson_id, event)
                 if entry is not None:
-                    await self._persist_transcript(db, lesson_id, entry)
+                    await self._persist_transcript(lesson_id, entry)
                     await socket.websocket.send_json({MSG_TYPE: MSG_TRANSCRIPT_ENTRY, "entry": entry})
                     # Non-blocking transcript trigger matching (deterministic, local).
                     if self._trigger_system is not None:
                         try:
                             is_final = etype == "conversation.item.input_audio_transcription.completed"
-                            await self._trigger_system.handle_transcript(
-                                db,
-                                lesson_id,
-                                str(entry.get("text") or ""),
-                                speaker=str(entry.get("speaker") or Speaker.TUTOR),
-                                is_final=is_final,
-                            )
+                            async with session_scope() as db:
+                                await self._trigger_system.handle_transcript(
+                                    db,
+                                    lesson_id,
+                                    str(entry.get("text") or ""),
+                                    speaker=str(entry.get("speaker") or Speaker.TUTOR),
+                                    is_final=is_final,
+                                )
                         except Exception:  # pragma: no cover - triggers must not block audio
                             logger.exception(
                                 "transcript trigger processing failed lesson=%s", lesson_id
@@ -550,7 +548,7 @@ class LessonRealtimeHub:
                 continue
 
             if etype == "response.function_call_arguments.done":
-                await self._handle_qwen_tool_call(socket, db, lesson_id, event)
+                await self._handle_qwen_tool_call(socket, lesson_id, event)
                 continue
 
             if etype == "teacher.state":
@@ -564,7 +562,6 @@ class LessonRealtimeHub:
     async def _handle_qwen_tool_call(
         self,
         socket: LessonSocket,
-        db: AsyncSession,
         lesson_id: str,
         event: dict[str, Any],
     ) -> None:
@@ -589,9 +586,10 @@ class LessonRealtimeHub:
         registry.set_lesson_publisher(self)
         started = time.perf_counter()
         try:
-            result = await registry.execute_structured(
-                db, lesson_id, name, arguments, source="qwen_tool"
-            )
+            async with session_scope() as db:
+                result = await registry.execute_structured(
+                    db, lesson_id, name, arguments, source="qwen_tool"
+                )
         except BoardValidationError as exc:
             result = exc.to_tool_result()
         except Exception:  # pragma: no cover - registry must not kill the socket
@@ -626,7 +624,6 @@ class LessonRealtimeHub:
     async def _end_lesson(
         self,
         socket: LessonSocket,
-        db: AsyncSession,
         lesson_id: str,
         reason: str,
     ) -> None:
@@ -672,9 +669,7 @@ class LessonRealtimeHub:
             "ended_at": now.isoformat(),
         }
 
-    async def _persist_transcript(
-        self, db: AsyncSession, lesson_id: str, entry: dict[str, Any]
-    ) -> None:
+    async def _persist_transcript(self, lesson_id: str, entry: dict[str, Any]) -> None:
         try:
             started_at = entry.get("started_at")
             ended_at = entry.get("ended_at")
@@ -682,14 +677,15 @@ class LessonRealtimeHub:
 
             started = datetime.fromisoformat(started_at) if started_at else None
             ended = datetime.fromisoformat(ended_at) if ended_at else None
-            await append_transcript_entry(
-                db,
-                lesson_id,
-                entry["speaker"],
-                entry["text"],
-                started_at=started,
-                ended_at=ended,
-            )
+            async with session_scope() as db:
+                await append_transcript_entry(
+                    db,
+                    lesson_id,
+                    entry["speaker"],
+                    entry["text"],
+                    started_at=started,
+                    ended_at=ended,
+                )
         except Exception:  # pragma: no cover - transcript must not block audio
             logger.warning("transcript persist failed lesson=%s", lesson_id, exc_info=True)
 

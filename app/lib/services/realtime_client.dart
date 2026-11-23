@@ -13,6 +13,7 @@ import '../blackboard/model/board_geometry.dart';
 
 /// Streamed message from the server (CONTRACTS §6 server→client).
 enum RealtimeMessageType {
+  connected,
   sessionReady,
   boardEvent,
   boardEvents,
@@ -28,6 +29,7 @@ enum RealtimeMessageType {
   error,
   pong,
   viewportFocus,
+  unknown,
 }
 
 /// A normalized message received from the realtime WebSocket.
@@ -183,7 +185,7 @@ class RealtimeClient extends ChangeNotifier {
       _channel = WebSocketChannel.connect(uri);
     } catch (e) {
       _fail(ConnectionState.disconnected, 'network_error',
-          'Could not open the classroom socket.');
+          'Unable to connect. Check your internet connection.');
       return;
     }
 
@@ -196,11 +198,11 @@ class RealtimeClient extends ChangeNotifier {
 
     _startHeartbeat();
     _connectTimeout?.cancel();
-    _connectTimeout = Timer(const Duration(seconds: 20), () {
+    _connectTimeout = Timer(const Duration(seconds: 30), () {
       if (_disposed) return;
       if (_state == ConnectionState.connecting) {
         _fail(ConnectionState.error, 'timeout',
-            'Connection timed out while connecting to the tutor.');
+            'The realtime session timed out. Try reconnecting.');
       }
     });
   }
@@ -306,10 +308,15 @@ class RealtimeClient extends ChangeNotifier {
 
   void _handle(Map<String, dynamic> decoded) {
     final rawType = decoded['type'] as String?;
-    final type = _parseType(rawType);
+    final type = parseType(rawType);
     final message = RealtimeMessage(type: type, payload: decoded);
 
     switch (type) {
+      case RealtimeMessageType.connected:
+        _leaseId = decoded['lease_id'] as String? ?? _leaseId;
+        _debug(
+            'ws connected ack lesson=${decoded['lesson_id']} lease=$_leaseId');
+        break;
       case RealtimeMessageType.sessionReady:
         _leaseId = decoded['lease_id'] as String?;
         _connectTimeout?.cancel();
@@ -336,7 +343,8 @@ class RealtimeClient extends ChangeNotifier {
                 : null);
         final parts = <String>[
           message,
-          if (code != null && code.isNotEmpty && !message.contains(code)) '[$code]',
+          if (code != null && code.isNotEmpty && !message.contains(code))
+            '[$code]',
           if (detailText != null &&
               detailText.isNotEmpty &&
               !message.contains(detailText))
@@ -347,6 +355,9 @@ class RealtimeClient extends ChangeNotifier {
         _errorController.add(full);
         break;
       case RealtimeMessageType.pong:
+        break;
+      case RealtimeMessageType.unknown:
+        _debug('ignored unknown ws message type=${decoded['type']}');
         break;
       default:
         break;
@@ -361,7 +372,7 @@ class RealtimeClient extends ChangeNotifier {
     if (_disposed) return;
     _debug('ws error: $error');
     _fail(ConnectionState.error, 'network_error',
-        'The classroom connection encountered an error.');
+        'Voice connection interrupted. Check your internet connection and retry.');
   }
 
   void _onDone() {
@@ -384,7 +395,7 @@ class RealtimeClient extends ChangeNotifier {
     if (wasConnecting) {
       if (_lastError == null) {
         final detail = <String>[
-          'Connection closed before the session was ready.',
+          'The realtime session ended before it was ready. Try reconnecting.',
           if (closeCode != null) 'code=$closeCode',
           if (closeReason != null && closeReason.isNotEmpty) closeReason,
         ].join(' ');
@@ -415,8 +426,12 @@ class RealtimeClient extends ChangeNotifier {
   }
 
   void _setState(ConnectionState next) {
+    if (_disposed) return;
     if (_state == next) return;
     _state = next;
+    if (!_connectionController.isClosed) {
+      _connectionController.add(next);
+    }
     notifyListeners();
   }
 
@@ -439,8 +454,11 @@ class RealtimeClient extends ChangeNotifier {
     }
   }
 
-  static RealtimeMessageType _parseType(String? raw) {
+  @visibleForTesting
+  static RealtimeMessageType parseType(String? raw) {
     switch (raw) {
+      case 'connected':
+        return RealtimeMessageType.connected;
       case 'session.ready':
         return RealtimeMessageType.sessionReady;
       case 'board.event':
@@ -468,11 +486,15 @@ class RealtimeClient extends ChangeNotifier {
       case 'viewport.focus':
         return RealtimeMessageType.viewportFocus;
       case 'error':
+      case 'session.error':
         return RealtimeMessageType.error;
       case 'pong':
         return RealtimeMessageType.pong;
+      case 'session.updated':
+      case 'session.created':
+        return RealtimeMessageType.unknown;
       default:
-        return RealtimeMessageType.error;
+        return RealtimeMessageType.unknown;
     }
   }
 

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
@@ -89,6 +88,9 @@ class _LiveScreenState extends State<LiveScreen>
       final bounds = _boardController.document.allVisibleBounds;
       _viewportController.onContentBoundsChanged(bounds);
     });
+    _boardController.onBackfillRequested = (afterSequence) {
+      unawaited(widget.client.backfill(afterSequence: afterSequence));
+    };
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
@@ -171,25 +173,32 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
+  bool get _canRetryConnection {
+    final lessonId = _lessonId ?? widget.client.lessonId;
+    return lessonId != null;
+  }
+
+  Future<void> _retryConnection() async {
+    final lessonId = _lessonId ?? widget.client.lessonId;
+    if (lessonId == null) return;
+    setState(() {
+      _error = null;
+    });
+    try {
+      await widget.client.disconnect();
+    } catch (_) {}
+    await widget.client.connect(lessonId: lessonId);
+  }
+
   void _syncConnectionUi(ConnectionState state) {
     switch (state) {
       case ConnectionState.connecting:
         _connecting = true;
-        _connectionStatus = 'Connecting to Qwen model...';
-        _connectionDetail =
-            'Establishing the realtime voice session. This may take a few seconds.';
-        if (_connectionProgress == null || _connectionProgress! <= 0.0) {
-          _connectionProgress = 0.15;
-        }
-        _connectProgressTimer ??=
-            Timer.periodic(const Duration(milliseconds: 350), (_) {
-          if (!mounted) return;
-          setState(() {
-            final current = _connectionProgress ?? 0.15;
-            // Ease toward 90% while waiting for session.ready.
-            _connectionProgress = current + ((0.9 - current) * 0.12);
-          });
-        });
+        _connectionStatus = 'Connecting to Qwen...';
+        _connectionDetail = 'Establishing realtime session...';
+        _connectionProgress = null; // indeterminate - no fake progress
+        _connectProgressTimer?.cancel();
+        _connectProgressTimer = null;
         break;
       case ConnectionState.connected:
         _connecting = false;
@@ -200,12 +209,17 @@ class _LiveScreenState extends State<LiveScreen>
         _connectProgressTimer = null;
         break;
       case ConnectionState.interrupted:
+        _connecting = false;
+        _connectProgressTimer?.cancel();
+        _connectProgressTimer = null;
+        _connectionProgress = null;
+        break;
       case ConnectionState.error:
       case ConnectionState.disconnected:
         _connecting = false;
         _connectProgressTimer?.cancel();
         _connectProgressTimer = null;
-        _connectionProgress = 0.0;
+        _connectionProgress = null;
         break;
     }
   }
@@ -216,6 +230,14 @@ class _LiveScreenState extends State<LiveScreen>
       _lessonId ??= widget.client.lessonId ?? message.lessonId;
     });
     switch (message.type) {
+      case RealtimeMessageType.connected:
+        if (mounted && _connecting) {
+          setState(() {
+            _connectionStatus = 'Connecting to Qwen...';
+            _connectionDetail = 'Establishing realtime session...';
+          });
+        }
+        break;
       case RealtimeMessageType.sessionReady:
         _applySessionReady(message.payload);
         break;
@@ -317,7 +339,8 @@ class _LiveScreenState extends State<LiveScreen>
       try {
         events.add(BoardEvent.fromJson(Map<String, dynamic>.from(item)));
       } catch (e, st) {
-        debugPrint('[LiveScreen] Failed to parse board event in batch: $e\n$st');
+        debugPrint(
+            '[LiveScreen] Failed to parse board event in batch: $e\n$st');
       }
     }
     if (events.isNotEmpty) _boardController.enqueueAll(events);
@@ -832,14 +855,15 @@ class _LiveScreenState extends State<LiveScreen>
             ),
           ),
 
-          if (_error != null)
-            Positioned(
-              left: 16,
-              right: 16,
-              top: MediaQuery.of(context).padding.top + 64,
-              child: _TopErrorBanner(
-                message: _error!,
-                onDismiss: () => setState(() => _error = null),
+          if (_error != null && !_connecting)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: _InlineErrorStatus(
+                  message: _error!,
+                  onDismiss: () => setState(() => _error = null),
+                  onRetry: _canRetryConnection ? _retryConnection : null,
+                ),
               ),
             ),
 
@@ -860,69 +884,46 @@ class _LiveScreenState extends State<LiveScreen>
           ),
 
           if (_connecting)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 64,
-              left: 24,
-              right: 24,
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 420),
-                  child: GlassContainer(
-                    radius: 16,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    blurSigma: 10,
-                    backgroundOpacity: 0.55,
-                    borderColor: AppColors.border.withValues(alpha: 0.6),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
-                          children: <Widget>[
-                            const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.2,
-                                color: AppColors.white,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                _connectionStatus,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.white,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(999),
-                          child: LinearProgressIndicator(
-                            value: _connectionProgress,
-                            minHeight: 4,
-                            backgroundColor: const Color(0x33FFFFFF),
-                            valueColor:
-                                const AlwaysStoppedAnimation<Color>(AppColors.white),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _connectionDetail,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.white.withValues(alpha: 0.72),
-                            height: 1.3,
-                          ),
-                        ),
-                      ],
+            Center(
+              child: IgnorePointer(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(
+                      _connectionStatus,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: AppColors.white.withValues(alpha: 0.92),
+                        letterSpacing: 0.2,
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: 220,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(
+                          value: _connectionProgress,
+                          minHeight: 2,
+                          backgroundColor:
+                              AppColors.red.withValues(alpha: 0.18),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                              AppColors.red),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      _connectionDetail,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.white.withValues(alpha: 0.58),
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -965,40 +966,58 @@ class _LiveScreenState extends State<LiveScreen>
   }
 }
 
-class _TopErrorBanner extends StatelessWidget {
-  const _TopErrorBanner({required this.message, required this.onDismiss});
+class _InlineErrorStatus extends StatelessWidget {
+  const _InlineErrorStatus({
+    required this.message,
+    required this.onDismiss,
+    this.onRetry,
+  });
 
   final String message;
   final VoidCallback onDismiss;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
-    return GlassContainer(
-      radius: 14,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      blurSigma: 10,
-      backgroundOpacity: 0.45,
-      borderColor: AppColors.red.withValues(alpha: 0.45),
-      child: Row(
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 520),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const PwonyIcon(PwonyIconKind.info, size: 16, color: AppColors.muted),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              message,
-              style: const TextStyle(
-                  color: AppColors.white, fontSize: 12, height: 1.3),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.white.withValues(alpha: 0.92),
+              fontSize: 13,
+              height: 1.4,
+              fontWeight: FontWeight.w500,
             ),
           ),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: onDismiss,
-            behavior: HitTestBehavior.opaque,
-            child: const Padding(
-              padding: EdgeInsets.all(4),
-              child: PwonyIcon(PwonyIconKind.close,
-                  size: 16, color: AppColors.muted),
-            ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (onRetry != null)
+                TextButton(
+                  onPressed: onRetry,
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.red,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  child: const Text('Retry'),
+                ),
+              TextButton(
+                onPressed: onDismiss,
+                style: TextButton.styleFrom(
+                  foregroundColor: AppColors.white.withValues(alpha: 0.72),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                ),
+                child: const Text('Dismiss'),
+              ),
+            ],
           ),
         ],
       ),

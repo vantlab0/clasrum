@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     # When no API key is configured (or fake mode is on) the backend serves a
     # deterministic offline tutor. Useful for local dev, CI and demos.
     qwen_fake_mode: bool = False
-    qwen_connect_timeout_seconds: float = 10.0
+    # Backend-side timeout wrapping the full Qwen connect + session readiness.
+    qwen_connect_timeout_seconds: float = 25.0
+    # Qwen adapter handshake/session.updated readiness timeout.
+    qwen_handshake_timeout_seconds: float = 20.0
 
     # --- Structured notes generation -------------------------------------
     notes_model: str = "qwen-plus"
