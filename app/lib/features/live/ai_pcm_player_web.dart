@@ -13,7 +13,7 @@ class AiPcmPlayer {
   void Function(int remainingFrames)? _feedCallback;
   Timer? _monitor;
   double _nextPlayTime = 0;
-  final List<html.AudioBufferSourceNode> _activeSources = <html.AudioBufferSourceNode>[];
+  final List<dynamic> _activeSources = <dynamic>[];
 
   int get sampleRate => _sampleRate;
   bool get isSetup => _setup;
@@ -92,7 +92,7 @@ class AiPcmPlayer {
   }
 
   Future<void> stop() async {
-    for (final s in List<html.AudioBufferSourceNode>.from(_activeSources)) {
+    for (final s in List<dynamic>.from(_activeSources)) {
       try {
         s.stop();
       } catch (_) {}
@@ -107,7 +107,7 @@ class AiPcmPlayer {
   Future<void> release() async {
     _monitor?.cancel();
     _monitor = null;
-    for (final s in List<html.AudioBufferSourceNode>.from(_activeSources)) {
+    for (final s in List<dynamic>.from(_activeSources)) {
       try {
         s.stop();
       } catch (_) {}
