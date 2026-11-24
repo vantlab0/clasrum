@@ -292,6 +292,30 @@ def _extract_json(text: str) -> dict[str, Any]:
     return payload
 
 
+def _fake_board_plan(context: IntentContext) -> dict[str, Any]:
+    topic = str(context.lesson_state.get("topic") or context.intent or "Lesson").strip()[:60]
+    concept = str(context.lesson_state.get("current_concept") or context.lesson_state.get("current_concept_title") or "Key concept").strip()[:60]
+    return {
+        "protocol": "clasrum.drawing",
+        "version": 1,
+        "title": topic or "Lesson",
+        "elements": [
+            {"id": "heading", "kind": "text", "geometry": {"text": topic or "Lesson", "position": {"x": 0.08, "y": 0.08}, "align": "left", "font_scale": 1.2}, "style": {"stroke_color": "primary", "stroke_width": 1.0, "stroke_opacity": 1.0}, "layer": 1, "stage": 1, "duration_ms": 500, "delay_ms": 0},
+            {"id": "intro", "kind": "text", "geometry": {"text": f"Introduction to {topic}", "position": {"x": 0.08, "y": 0.14}, "align": "left", "font_scale": 0.8}, "style": {"stroke_color": "secondary", "stroke_width": 0.8, "stroke_opacity": 0.9}, "layer": 1, "stage": 1, "duration_ms": 450, "delay_ms": 80},
+            {"id": "concept_heading", "kind": "text", "geometry": {"text": concept, "position": {"x": 0.08, "y": 0.24}, "align": "left", "font_scale": 1.0}, "style": {"stroke_color": "yellow", "stroke_width": 1.0, "stroke_opacity": 1.0}, "layer": 1, "stage": 2, "duration_ms": 450, "delay_ms": 0},
+            {"id": "definition", "kind": "text", "geometry": {"text": f"{concept} is a core idea we will explore step by step.", "position": {"x": 0.08, "y": 0.31}, "align": "left", "font_scale": 0.75}, "style": {"stroke_color": "primary", "stroke_width": 0.8, "stroke_opacity": 0.95}, "layer": 1, "stage": 2, "duration_ms": 700, "delay_ms": 60},
+            {"id": "diagram_box", "kind": "rectangle", "geometry": {"position": {"x": 0.58, "y": 0.28}, "size": {"w": 0.28, "h": 0.2}, "corner_radius": 0.01}, "style": {"stroke_color": "blue", "stroke_width": 1.4, "stroke_opacity": 0.95, "fill_color": "#4A90D9", "fill_opacity": 0.08}, "layer": 2, "stage": 3, "duration_ms": 700, "delay_ms": 0},
+            {"id": "diagram_arrow", "kind": "arrow", "geometry": {"start": {"x": 0.62, "y": 0.38}, "end": {"x": 0.82, "y": 0.38}, "curve": 0.0}, "style": {"stroke_color": "green", "stroke_width": 1.4, "stroke_opacity": 0.95}, "layer": 2, "stage": 3, "duration_ms": 500, "delay_ms": 120},
+            {"id": "diagram_label", "kind": "text", "geometry": {"text": concept[:24], "position": {"x": 0.64, "y": 0.34}, "align": "left", "font_scale": 0.7}, "style": {"stroke_color": "primary", "stroke_width": 0.8, "stroke_opacity": 0.95}, "layer": 3, "stage": 3, "duration_ms": 350, "delay_ms": 180},
+        ],
+        "stages": [
+            {"stage": 1, "description": "Lesson heading and introduction", "element_ids": ["heading", "intro"], "pause_ms": 150},
+            {"stage": 2, "description": "First concept and definition", "element_ids": ["concept_heading", "definition"], "pause_ms": 150},
+            {"stage": 3, "description": "Simple concept diagram", "element_ids": ["diagram_box", "diagram_arrow", "diagram_label"], "pause_ms": 0},
+        ],
+    }
+
+
 async def call_board_director(context: IntentContext) -> dict[str, Any]:
     """Call Qwen3.7-Flash (OpenAI-compatible) and return the raw plan dict.
 
@@ -301,6 +325,9 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     settings = get_settings()
     api_key = settings.effective_board_director_api_key
     if not api_key:
+        if settings.qwen_fake_mode:
+            logger.info("board_director fake fallback used (qwen_fake_mode=true)")
+            return _fake_board_plan(context)
         raise IntentHandlingError(
             "Board director model is not configured", code="qwen_unavailable", retryable=False
         )

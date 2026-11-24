@@ -29,6 +29,7 @@ enum RealtimeMessageType {
   error,
   pong,
   viewportFocus,
+  startupStatus,
   unknown,
 }
 
@@ -485,6 +486,8 @@ class RealtimeClient extends ChangeNotifier {
         return RealtimeMessageType.sessionEnded;
       case 'viewport.focus':
         return RealtimeMessageType.viewportFocus;
+      case 'startup.status':
+        return RealtimeMessageType.startupStatus;
       case 'error':
       case 'session.error':
         return RealtimeMessageType.error;

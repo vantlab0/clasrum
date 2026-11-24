@@ -27,6 +27,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from fastapi import WebSocket, WebSocketDisconnect, status
@@ -120,6 +121,30 @@ class QwenSession(Protocol):
         ...
 
 
+class LessonStartupPhase(str, Enum):
+    IDLE = "idle"
+    PROMPT_SENT = "prompt_sent"
+    RESPONSE_STARTED = "response_started"
+    AUDIO_STARTED = "audio_started"
+    TOOL_CALL_RECEIVED = "tool_call_received"
+    BOARD_DIRECTOR_STARTED = "board_director_started"
+    BOARD_EVENT_PERSISTED = "board_event_persisted"
+    READY = "ready"
+    FAILED = "failed"
+
+
+@dataclass
+class ResponseLifecycle:
+    response_id: str
+    created_at: float
+    completed_at: float | None = None
+    status: str | None = None
+    has_audio: bool = False
+    has_text: bool = False
+    has_function_call: bool = False
+    function_call_executed_ok: bool | None = None
+
+
 @dataclass(eq=False)
 class LessonSocket:
     """One live client socket for a lesson.
@@ -139,6 +164,23 @@ class LessonSocket:
     initial_teaching_started: bool = False
     last_board_event_at: float = 0.0
     last_qwen_event_at: float = 0.0
+    last_qwen_response_created_at: float = 0.0
+    last_qwen_audio_at: float = 0.0
+    last_qwen_transcript_at: float = 0.0
+    last_tool_call_at: float = 0.0
+    last_board_director_started_at: float = 0.0
+    last_board_director_finished_at: float = 0.0
+    last_board_director_error: str | None = None
+    startup_phase: LessonStartupPhase = LessonStartupPhase.IDLE
+    startup_attempt: int = 0
+    startup_nudge_count: int = 0
+    startup_response_ids: set[str] = field(default_factory=set)
+    startup_has_board_tool_call: bool = False
+    startup_has_board_event: bool = False
+    startup_last_nudge_at: float = 0.0
+    startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    response_lifecycles: dict[str, ResponseLifecycle] = field(default_factory=dict)
+    active_response_id: str | None = None
 
 
 class LessonRealtimeHub:
@@ -157,7 +199,12 @@ class LessonRealtimeHub:
         self._board: BoardService | None = None
         self._qwen_factory: type[QwenSession] | None = None
         self._trigger_system: TranscriptTriggerSystem | None = None
-        self._initial_prompted_lessons: set[str] = set()
+        # Lessons that have successfully produced initial board content.
+        self._startup_completed_lessons: set[str] = set()
+        # Per-lesson startup lock to prevent duplicate startup across reconnects.
+        self._startup_locks: dict[str, asyncio.Lock] = {}
+        # Lease id currently attempting startup for a lesson (if any).
+        self._startup_active_lease: dict[str, str] = {}
 
     # -- wiring -----------------------------------------------------------
 
@@ -192,6 +239,15 @@ class LessonRealtimeHub:
                 {MSG_TYPE: MSG_BOARD_EVENT, "event": event}
             )
             socket.last_board_event_at = time.monotonic()
+            socket.startup_has_board_event = True
+            socket.startup_phase = LessonStartupPhase.BOARD_EVENT_PERSISTED
+            socket.last_board_director_error = None
+            if socket.last_board_director_finished_at == 0.0 and socket.last_board_director_started_at > 0:
+                socket.last_board_director_finished_at = time.monotonic()
+            async with self._lock:
+                self._startup_completed_lessons.add(lesson_id)
+                if self._startup_active_lease.get(lesson_id) == socket.lease_id:
+                    self._startup_active_lease.pop(lesson_id, None)
             event_type = event.get("type") if isinstance(event, dict) else None
             logger.info(
                 "board event broadcast lesson=%s seq=%s type=%s event_id=%s",
@@ -406,6 +462,10 @@ class LessonRealtimeHub:
             self._all.setdefault(socket.lesson_id, set()).discard(socket)
             if self._sockets.get(socket.lesson_id) is socket:
                 self._sockets.pop(socket.lesson_id, None)
+            # If this socket owned startup and startup never completed, allow retry.
+            if self._startup_active_lease.get(socket.lesson_id) == socket.lease_id:
+                if socket.lesson_id not in self._startup_completed_lessons and not socket.startup_has_board_event:
+                    self._startup_active_lease.pop(socket.lesson_id, None)
 
     # -- loops -----------------------------------------------------------
 
@@ -551,6 +611,7 @@ class LessonRealtimeHub:
         """Bridge Qwen server events -> client + tool call execution."""
         assert socket.qwen is not None
         audio_delta_count = 0
+        response_has_board_tool_call: dict[str, bool] = {}
         async for event in socket.qwen.iterate():
             if socket.closed.is_set():
                 break
@@ -561,18 +622,47 @@ class LessonRealtimeHub:
                 err = event.get("error") if isinstance(event.get("error"), dict) else {}
                 code = err.get("code") or event.get("code") or "qwen_error"
                 msg = err.get("message") or event.get("message") or "Qwen error"
-                logger.warning("qwen event error lesson=%s code=%s message=%s", lesson_id, code, msg)
+                resp_id = err.get("response_id") or event.get("response_id")
+                logger.warning("qwen error lesson=%s code=%s response_id=%s message=%s", lesson_id, code, resp_id, msg)
+                if resp_id and resp_id in socket.response_lifecycles:
+                    socket.response_lifecycles[resp_id].status = "failed"
                 await _send_error(socket, "qwen_unavailable", str(msg), retryable=True)
                 continue
 
             if etype == "response.created":
-                logger.info("qwen response.created lesson=%s response_id=%s", lesson_id, (event.get("response") or {}).get("id") if isinstance(event.get("response"), dict) else event.get("response_id"))
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                response_id = str(response.get("id") or event.get("response_id") or "")
+                socket.last_qwen_response_created_at = time.monotonic()
+                socket.active_response_id = response_id or socket.active_response_id
+                if response_id:
+                    socket.response_lifecycles[response_id] = ResponseLifecycle(response_id=response_id, created_at=time.monotonic(), status="created")
+                    response_has_board_tool_call.setdefault(response_id, False)
+                    socket.startup_response_ids.add(response_id)
+                    if socket.startup_phase in {LessonStartupPhase.IDLE, LessonStartupPhase.PROMPT_SENT}:
+                        socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED
+                logger.info("qwen response.created lesson=%s response_id=%s", lesson_id, response_id)
                 continue
 
-            if etype == "response.audio.delta":
+            if etype == "response.output_item.added":
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                item_type = str(item.get("type") or "")
+                logger.info("qwen output_item.added lesson=%s response_id=%s item_type=%s", lesson_id, response_id, item_type)
+                if response_id and response_id in socket.response_lifecycles and item_type == "function_call":
+                    socket.response_lifecycles[response_id].has_function_call = True
+                continue
+
+            if etype in {"response.audio.delta", "response.output_audio.delta"}:
                 audio_delta_count += 1
+                socket.last_qwen_audio_at = time.monotonic()
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                if response_id and response_id in socket.response_lifecycles:
+                    socket.response_lifecycles[response_id].has_audio = True
+                if socket.startup_phase in {LessonStartupPhase.PROMPT_SENT, LessonStartupPhase.RESPONSE_STARTED}:
+                    socket.startup_phase = LessonStartupPhase.AUDIO_STARTED
+                    await self._send_startup_status(socket, "audio_started", "Preparing your first lesson...")
                 if audio_delta_count == 1 or audio_delta_count % 50 == 0:
-                    logger.info("qwen audio.delta lesson=%s count=%s response_id=%s", lesson_id, audio_delta_count, event.get("response_id"))
+                    logger.info("qwen audio.delta lesson=%s count=%s response_id=%s type=%s", lesson_id, audio_delta_count, response_id, etype)
                 await socket.websocket.send_json(
                     {
                         MSG_TYPE: MSG_AUDIO_DELTA,
@@ -583,8 +673,9 @@ class LessonRealtimeHub:
                 )
                 continue
 
-            if etype == "response.audio.done":
-                logger.info("qwen audio.done lesson=%s response_id=%s", lesson_id, event.get("response_id"))
+            if etype in {"response.audio.done", "response.output_audio.done"}:
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                logger.info("qwen audio.done lesson=%s response_id=%s type=%s", lesson_id, response_id, etype)
                 await socket.websocket.send_json({MSG_TYPE: MSG_AUDIO_DONE, "response_id": event.get("response_id")})
                 continue
 
@@ -595,18 +686,22 @@ class LessonRealtimeHub:
                 "response.output_audio_transcript.delta",
                 "response.output_audio_transcript.done",
             }:
+                socket.last_qwen_transcript_at = time.monotonic()
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                if response_id and response_id in socket.response_lifecycles:
+                    socket.response_lifecycles[response_id].has_text = True
                 entry = self._transcript_entry_from_qwen(lesson_id, event)
                 if entry is not None:
                     logger.info(
-                        "qwen transcript received lesson=%s speaker=%s final=%s chars=%s",
+                        "qwen transcript lesson=%s speaker=%s final=%s chars=%s response_id=%s",
                         lesson_id,
                         entry.get("speaker"),
                         etype in {"conversation.item.input_audio_transcription.completed", "response.audio_transcript.done", "response.output_audio_transcript.done"},
                         len(str(entry.get("text") or "")),
+                        response_id,
                     )
                     await self._persist_transcript(lesson_id, entry)
                     await socket.websocket.send_json({MSG_TYPE: MSG_TRANSCRIPT_ENTRY, "entry": entry})
-                    # Non-blocking transcript trigger matching (deterministic, local).
                     if self._trigger_system is not None:
                         try:
                             is_final = etype in {
@@ -622,14 +717,103 @@ class LessonRealtimeHub:
                                     speaker=str(entry.get("speaker") or Speaker.TUTOR),
                                     is_final=is_final,
                                 )
-                        except Exception:  # pragma: no cover - triggers must not block audio
-                            logger.exception(
-                                "transcript trigger processing failed lesson=%s", lesson_id
-                            )
+                        except Exception:  # pragma: no cover
+                            logger.exception("transcript trigger processing failed lesson=%s", lesson_id)
+                continue
+
+            if etype == "response.function_call_arguments.delta":
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                call_id = str(event.get("call_id") or "")
+                name = str(event.get("name") or "")
+                logger.debug("qwen function_call_arguments.delta lesson=%s response_id=%s call_id=%s name=%s", lesson_id, response_id, call_id, name)
                 continue
 
             if etype == "response.function_call_arguments.done":
-                await self._handle_qwen_tool_call(socket, lesson_id, event)
+                response_id = str(event.get("response_id") or socket.active_response_id or "")
+                if response_id and response_id in socket.response_lifecycles:
+                    socket.response_lifecycles[response_id].has_function_call = True
+                response_has_board_tool_call[response_id] = response_has_board_tool_call.get(response_id, False) or str(event.get("name") or "") == "board_intent"
+                await self._handle_qwen_tool_call(socket, lesson_id, event, response_id=response_id)
+                continue
+
+            if etype == "response.done":
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                response_id = str(response.get("id") or event.get("response_id") or socket.active_response_id or "")
+                status = str(response.get("status") or "")
+                lifecycle = socket.response_lifecycles.get(response_id)
+                if lifecycle is not None:
+                    lifecycle.completed_at = time.monotonic()
+                    lifecycle.status = status or lifecycle.status or "done"
+                socket.active_response_id = None if socket.active_response_id == response_id else socket.active_response_id
+                has_board_call_in_response = response_has_board_tool_call.get(response_id, False)
+                board_satisfied = socket.startup_has_board_event or socket.last_board_event_at > 0
+                logger.info(
+                    "qwen response.done lesson=%s response_id=%s status=%s has_audio=%s has_text=%s has_function_call=%s board_tool_call=%s board_satisfied=%s",
+                    lesson_id, response_id, status,
+                    bool(lifecycle.has_audio) if lifecycle else None,
+                    bool(lifecycle.has_text) if lifecycle else None,
+                    bool(lifecycle.has_function_call) if lifecycle else None,
+                    has_board_call_in_response,
+                    board_satisfied,
+                )
+                if status in {"failed", "cancelled", "incomplete"}:
+                    logger.warning(
+                        "qwen response incomplete lesson=%s response_id=%s status=%s board_satisfied=%s",
+                        lesson_id, response_id, status, board_satisfied,
+                    )
+
+                # Controlled recovery during startup: if no board content yet, nudge for board_intent.
+                # Do not nudge when a board_intent/director is already in progress or another response is active.
+                now_mono = time.monotonic()
+                director_busy = (
+                    socket.last_board_director_started_at > 0
+                    and socket.last_board_director_finished_at < socket.last_board_director_started_at
+                    and (now_mono - socket.last_board_director_started_at) < 45
+                )
+                can_nudge = (
+                    not socket.closed.is_set()
+                    and not board_satisfied
+                    and socket.qwen is not None
+                    and socket.active_response_id is None
+                    and not director_busy
+                    and socket.startup_nudge_count < 3
+                    and (now_mono - socket.startup_last_nudge_at) >= 3.0
+                )
+                if can_nudge and not has_board_call_in_response:
+                    socket.startup_nudge_count += 1
+                    socket.startup_last_nudge_at = now_mono
+                    socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED if (socket.last_qwen_audio_at or socket.last_qwen_transcript_at) else LessonStartupPhase.PROMPT_SENT
+                    logger.warning(
+                        "response.done without board tool call during startup lesson=%s response_id=%s nudge=%s",
+                        lesson_id, response_id, socket.startup_nudge_count,
+                    )
+                    await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
+                    try:
+                        await socket.qwen.prompt_text(
+                            "System instruction: You responded, but no board visual was created. "
+                            "Call board_intent now to draw the lesson heading and the first concept visual, then continue explaining aloud. "
+                            "Do not wait for the student."
+                        )
+                    except Exception:  # pragma: no cover
+                        logger.warning("startup recovery nudge failed lesson=%s", lesson_id, exc_info=True)
+                elif can_nudge and has_board_call_in_response and not board_satisfied:
+                    # board_intent was attempted in this response but did not result in a board event.
+                    socket.startup_nudge_count += 1
+                    socket.startup_last_nudge_at = now_mono
+                    logger.warning(
+                        "response.done had board_intent but no board event lesson=%s response_id=%s nudge=%s director_error=%s",
+                        lesson_id, response_id, socket.startup_nudge_count, socket.last_board_director_error,
+                    )
+                    await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
+                    try:
+                        await socket.qwen.prompt_text(
+                            "System instruction: The previous board drawing attempt did not produce a visible board update. "
+                            "Call board_intent again with a clear intent for the lesson heading, a short introduction, "
+                            "the first concept heading, one meaningful explanation, and a simple relevant diagram. "
+                            "Then continue teaching aloud."
+                        )
+                    except Exception:  # pragma: no cover
+                        logger.warning("startup recovery nudge after failed board_intent failed lesson=%s", lesson_id, exc_info=True)
                 continue
 
             if etype == "teacher.state":
@@ -645,9 +829,10 @@ class LessonRealtimeHub:
         socket: LessonSocket,
         lesson_id: str,
         event: dict[str, Any],
+        response_id: str | None = None,
     ) -> None:
         """Execute a Qwen tool call via the registry and return the result."""
-        import time
+        import time as _time
 
         from app.board.registry import ToolRegistry
 
@@ -656,17 +841,27 @@ class LessonRealtimeHub:
         arguments = event.get("arguments", "{}")
         if not call_id or not name:
             return
-        logger.info("qwen function_call lesson=%s name=%s call_id=%s", lesson_id, name, call_id)
+        socket.last_tool_call_at = _time.monotonic()
+        response_id = str(response_id or event.get("response_id") or socket.active_response_id or "")
+        if response_id and response_id in socket.response_lifecycles:
+            socket.response_lifecycles[response_id].has_function_call = True
+        logger.info("qwen function_call lesson=%s name=%s call_id=%s response_id=%s", lesson_id, name, call_id, response_id)
 
         if name == "board_intent":
-            logger.info("board_intent tool_call received lesson=%s", lesson_id)
+            socket.startup_has_board_tool_call = True
+            socket.startup_phase = LessonStartupPhase.TOOL_CALL_RECEIVED
+            socket.last_board_director_started_at = _time.monotonic()
+            socket.last_board_director_finished_at = 0.0
+            socket.last_board_director_error = None
+            await self._send_startup_status(socket, "board_intent", "Creating the first board illustration...")
+            logger.info("board_intent tool_call received lesson=%s call_id=%s response_id=%s", lesson_id, call_id, response_id)
 
         registry = ToolRegistry(
             board=self._board or BoardService(),
             trigger_system=self._trigger_system,
         )
         registry.set_lesson_publisher(self)
-        started = time.perf_counter()
+        started = _time.perf_counter()
         try:
             async with session_scope() as db:
                 result = await registry.execute_structured(
@@ -683,13 +878,30 @@ class LessonRealtimeHub:
                 "retryable": False,
             }
         finally:
+            ok = bool(result.get("ok")) if isinstance(result, dict) else False
+            if response_id and response_id in socket.response_lifecycles:
+                socket.response_lifecycles[response_id].function_call_executed_ok = ok
             if name == "board_intent":
+                socket.last_board_director_finished_at = _time.monotonic()
+                if not ok:
+                    socket.last_board_director_error = str((result or {}).get("message") or (result or {}).get("error") or "board_intent_failed")
+                else:
+                    socket.last_board_director_error = None
+                    socket.startup_has_board_event = True
+                    socket.startup_phase = LessonStartupPhase.BOARD_EVENT_PERSISTED
+                    if socket.last_board_event_at == 0:
+                        socket.last_board_event_at = _time.monotonic()
+                    async with self._lock:
+                        self._startup_completed_lessons.add(lesson_id)
+                        if self._startup_active_lease.get(lesson_id) == socket.lease_id:
+                            self._startup_active_lease.pop(lesson_id, None)
                 logger.info(
-                    "board_intent handled lesson=%s ok=%s duration_ms=%.1f error=%s",
+                    "board_intent handled lesson=%s ok=%s duration_ms=%.1f error=%s seq=%s",
                     lesson_id,
-                    bool(result.get("ok")) if isinstance(result, dict) else False,
-                    (time.perf_counter() - started) * 1000,
-                    (result.get("error") if isinstance(result, dict) and not result.get("ok") else None),
+                    ok,
+                    (_time.perf_counter() - started) * 1000,
+                    (result.get("error") if isinstance(result, dict) and not ok else None),
+                    (result.get("sequence") if isinstance(result, dict) else None),
                 )
 
         if isinstance(result, dict) and not result.get("ok"):
@@ -703,13 +915,17 @@ class LessonRealtimeHub:
                 str(result.get("message") or "")[:240],
             )
             if name == "board_intent":
-                # Do not terminate the voice session; report drawing failure to client.
+                # Allow controlled recovery: a failed board_intent does not satisfy startup.
+                socket.startup_has_board_tool_call = False
+                socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED if (socket.last_qwen_audio_at or socket.last_qwen_transcript_at) else LessonStartupPhase.PROMPT_SENT
                 try:
                     await socket.websocket.send_json(
                         {
-                            MSG_TYPE: MSG_ERROR,
+                            MSG_TYPE: "startup.status",
+                            "phase": "board_intent_failed",
+                            "message": "Preparing your first lesson...",
+                            "error": str(result.get("message") or "Board drawing failed"),
                             "code": str(result.get("error") or "board_intent_failed"),
-                            "message": f"Board drawing failed: {result.get('message') or 'unknown error'}",
                             "retryable": bool(result.get("retryable", True)),
                         }
                     )
@@ -734,12 +950,6 @@ class LessonRealtimeHub:
     ) -> None:
         if socket.qwen is None or socket.closed.is_set():
             return
-        if socket.initial_teaching_started:
-            logger.info("skip initial teaching: already started lesson=%s lease=%s", lesson.id, socket.lease_id)
-            return
-        if lesson.id in self._initial_prompted_lessons:
-            logger.info("skip initial teaching: already prompted in process lesson=%s lease=%s", lesson.id, socket.lease_id)
-            return
         status = str(getattr(lesson, "status", "") or "").lower()
         if status in {"completed", "ended", "cancelled", "canceled"}:
             logger.info("skip initial teaching: lesson ended lesson=%s status=%s", lesson.id, status)
@@ -759,83 +969,265 @@ class LessonRealtimeHub:
         except Exception:
             cursor_val = 0
 
-        is_fresh = last_seq <= 0 and cursor_val <= 0
-        topic = str(detail.get("topic") or getattr(lesson, "topic", None) or "this lesson")
-        subject = str(detail.get("subject") or getattr(lesson, "subject", None) or "General")
-        level = str(detail.get("learning_level") or getattr(lesson, "learning_level", None) or "beginner")
-        plan = detail.get("plan") or detail.get("lesson_plan") or {}
-
-        if is_fresh:
-            prompt = (
-                "System instruction: Start the live lesson now. "
-                f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
-                f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
-                "Begin teaching immediately without waiting for the student to speak first. "
-                "Introduce the selected topic, start with an intuitive explanation, write the lesson heading on the board, "
-                "explain the first concept, write important definitions/equations/diagrams progressively, "
-                "and ask the student a question after explaining the first concept. "
-                "Use board_intent tool calls whenever you teach a visual concept."
+        # If board content already exists from this session/startup, don't restart.
+        if lesson.id in self._startup_completed_lessons or socket.startup_has_board_event:
+            logger.info(
+                "skip initial teaching: startup already satisfied lesson=%s lease=%s last_seq=%s",
+                lesson.id, socket.lease_id, last_seq,
             )
-            logger.info("initial teaching start lesson=%s fresh=true topic=%s", lesson.id, topic)
-        else:
-            prompt = (
-                "System instruction: Resume this live lesson without restarting from the beginning. "
-                f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
-                f"Current lesson state: {json.dumps(detail.get('lesson_state') or {}, ensure_ascii=False)[:1500]}. "
-                f"Board last_sequence={last_seq}, transcript_cursor={cursor_val}. "
-                "Briefly reorient the student and continue from the current progress. "
-                "Do not repeat already completed content; use board_intent only for new or resumed visuals."
-            )
-            logger.info("initial teaching resume lesson=%s fresh=false topic=%s seq=%s cursor=%s", lesson.id, topic, last_seq, cursor_val)
+            socket.startup_phase = LessonStartupPhase.READY
+            return
+        # Same socket already prompted and not failed - prevent duplicates.
+        if socket.initial_teaching_started and socket.startup_phase not in {LessonStartupPhase.FAILED, LessonStartupPhase.IDLE}:
+            logger.info("skip initial teaching: already started on socket lesson=%s lease=%s phase=%s", lesson.id, socket.lease_id, socket.startup_phase.value)
+            return
 
-        socket.initial_teaching_started = True
-        self._initial_prompted_lessons.add(lesson.id)
-        await socket.qwen.prompt_text(prompt)
-        logger.info("initial teaching instruction submitted lesson=%s fresh=%s", lesson.id, is_fresh)
+        startup_lock = self._startup_locks.setdefault(lesson.id, asyncio.Lock())
+        async with startup_lock:
+            # Re-check under lock.
+            if socket.closed.is_set() or socket.qwen is None:
+                return
+            async with self._lock:
+                active_lease = self._startup_active_lease.get(lesson.id)
+                current = self._sockets.get(lesson.id)
+                if lesson.id in self._startup_completed_lessons:
+                    socket.startup_phase = LessonStartupPhase.READY
+                    return
+                if active_lease and active_lease != socket.lease_id and current is not None and not current.closed.is_set():
+                    logger.info(
+                        "skip initial teaching: another lease is starting lesson=%s active=%s current=%s",
+                        lesson.id, active_lease, socket.lease_id,
+                    )
+                    return
+                self._startup_active_lease[lesson.id] = socket.lease_id
+
+            socket.startup_attempt += 1
+            socket.startup_phase = LessonStartupPhase.PROMPT_SENT
+            socket.initial_teaching_started = True
+            socket.startup_has_board_tool_call = False
+            socket.startup_has_board_event = socket.startup_has_board_event or socket.last_board_event_at > 0
+            socket.startup_nudge_count = 0
+            socket.startup_last_nudge_at = 0.0
+            socket.last_board_director_error = None
+            socket.last_board_director_started_at = 0.0
+            socket.last_board_director_finished_at = 0.0
+
+            is_fresh = last_seq <= 0 and cursor_val <= 0
+            topic = str(detail.get("topic") or getattr(lesson, "topic", None) or "this lesson")
+            subject = str(detail.get("subject") or getattr(lesson, "subject", None) or "General")
+            level = str(detail.get("learning_level") or getattr(lesson, "learning_level", None) or "beginner")
+            plan = detail.get("plan") or detail.get("lesson_plan") or {}
+
+            if is_fresh:
+                prompt = (
+                    "System instruction: Start the live lesson now. "
+                    f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
+                    f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
+                    "Begin teaching immediately without waiting for the student to speak first. "
+                    "Your first response must include a board_intent tool call that creates the lesson heading and first visual teaching content. "
+                    "write the lesson heading on the board, give a short introduction, write the first concept heading, "
+                    "explain the first concept with at least one meaningful definition or explanation, and include a relevant diagram when the concept requires one. "
+                    "Use the board_intent tool for the visual board content. "
+                    "After the visual is on the board, explain it aloud and ask the student a question after explaining the first concept."
+                )
+            else:
+                prompt = (
+                    "System instruction: Resume this live lesson without restarting from the beginning. "
+                    f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
+                    f"Current lesson state: {json.dumps(detail.get('lesson_state') or {}, ensure_ascii=False)[:1500]}. "
+                    f"Board last_sequence={last_seq}, transcript_cursor={cursor_val}. "
+                    "Briefly reorient the student and continue from the current progress. "
+                    "Do not repeat already completed content; use board_intent only for new or resumed visuals."
+                )
+
+            logger.info(
+                "initial teaching prompt lesson=%s fresh=%s attempt=%s lease=%s topic=%s",
+                lesson.id, is_fresh, socket.startup_attempt, socket.lease_id, topic,
+            )
+            await self._send_startup_status(socket, "prompt_sent", "Preparing your first lesson...")
+            if socket.active_response_id is not None:
+                logger.warning("initial teaching prompt deferred: active response lesson=%s response=%s", lesson.id, socket.active_response_id)
+                # Watchdog/response.done will handle recovery; do not create duplicate response.
+                return
+            try:
+                await socket.qwen.prompt_text(prompt)
+                logger.info("initial teaching instruction submitted lesson=%s fresh=%s attempt=%s", lesson.id, is_fresh, socket.startup_attempt)
+            except Exception:
+                socket.startup_phase = LessonStartupPhase.FAILED
+                async with self._lock:
+                    if self._startup_active_lease.get(lesson.id) == socket.lease_id:
+                        self._startup_active_lease.pop(lesson.id, None)
+                logger.exception("initial teaching prompt failed lesson=%s", lesson.id)
+                raise
+
+    async def _send_startup_status(self, socket: LessonSocket, phase: str, message: str) -> None:
+        if socket.closed.is_set():
+            return
+        payload = {
+            MSG_TYPE: "startup.status",
+            "phase": phase,
+            "message": message,
+        }
+        try:
+            await socket.websocket.send_json(payload)
+        except Exception:  # pragma: no cover
+            logger.debug("startup status send failed lesson=%s phase=%s", socket.lesson_id, phase)
+
+    def _director_busy(self, socket: LessonSocket, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        started = socket.last_board_director_started_at
+        if started <= 0:
+            return False
+        finished = socket.last_board_director_finished_at
+        if finished >= started:
+            return False
+        return (now - started) < 45
+
+    def _startup_status_message(self, socket: LessonSocket) -> str:
+        if socket.last_board_event_at > 0 or socket.startup_has_board_event:
+            return "Restoring your classroom..."
+        if self._director_busy(socket):
+            return "Creating the first board illustration..."
+        if socket.last_board_director_error and not (socket.last_qwen_audio_at or socket.last_qwen_transcript_at):
+            return "Preparing your first lesson..."
+        if socket.last_qwen_audio_at > 0 or socket.last_qwen_transcript_at > 0:
+            # Tutor is speaking/responding but board not ready yet.
+            return "Creating the first board illustration..."
+        if socket.last_qwen_response_created_at > 0:
+            return "Waiting for tutor response..."
+        return "Connecting to the tutor..."
+
+    def _startup_failure_message(self, socket: LessonSocket) -> tuple[str, str, bool]:
+        """Return (code, message, fatal_error) for a startup failure.
+
+        fatal_error=False means show inline status only; do not raise a scary centered error.
+        """
+        if socket.last_board_director_error:
+            return "board_start_failed", f"The board illustration could not be created: {socket.last_board_director_error}", True
+        if socket.last_tool_call_at > 0 and socket.last_board_event_at == 0:
+            return "board_start_failed", "A board drawing request was received, but no board update was shown. Please retry.", True
+        if socket.last_qwen_audio_at > 0 or socket.last_qwen_transcript_at > 0:
+            return "board_start_delayed", "The tutor is speaking, but the first board visual is still being prepared.", False
+        if socket.last_qwen_response_created_at > 0:
+            return "tutor_start_delayed", "The tutor started responding, but the first board visual is still being prepared.", False
+        return "tutor_start_delayed", "The tutor connection was established, but the lesson did not start. Please retry.", True
+
+    async def _safe_prompt_text(self, socket: LessonSocket, text: str, *, reason: str) -> bool:
+        if socket.closed.is_set() or socket.qwen is None:
+            return False
+        if socket.active_response_id is not None:
+            logger.info("skip prompt_text reason=%s lesson=%s active_response=%s", reason, socket.lesson_id, socket.active_response_id)
+            return False
+        now = time.monotonic()
+        if (now - socket.startup_last_nudge_at) < 2.0:
+            logger.info("skip prompt_text cooldown reason=%s lesson=%s", reason, socket.lesson_id)
+            return False
+        socket.startup_last_nudge_at = now
+        try:
+            await socket.qwen.prompt_text(text)
+            logger.info("prompt_text sent reason=%s lesson=%s lease=%s", reason, socket.lesson_id, socket.lease_id)
+            return True
+        except Exception:  # pragma: no cover
+            logger.warning("prompt_text failed reason=%s lesson=%s", reason, socket.lesson_id, exc_info=True)
+            return False
 
     def _schedule_startup_watchdog(self, socket: LessonSocket, lesson_id: str) -> None:
         async def _watch() -> None:
             try:
-                await asyncio.sleep(12)
-                if socket.closed.is_set():
-                    return
-                # If we've already seen board/audio/transcript activity, nothing to do.
-                if socket.last_board_event_at > 0 or socket.last_qwen_event_at > time.monotonic() - 12:
-                    # last_qwen_event_at is updated on any qwen event; check for actual content
-                    pass
-                has_content = socket.last_board_event_at > 0
-                if has_content:
-                    return
-                logger.warning(
-                    "tutor startup watchdog: no board event yet lesson=%s lease=%s",
-                    lesson_id,
-                    socket.lease_id,
-                )
-                try:
-                    await socket.websocket.send_json(
-                        {
-                            MSG_TYPE: MSG_ERROR,
-                            "code": "tutor_start_delayed",
-                            "message": "The tutor is connected but has not started drawing yet. Retrying lesson start...",
-                            "retryable": True,
-                        }
+                checkpoints = [6.0, 12.0, 20.0, 30.0]
+                prev = 0.0
+                for checkpoint in checkpoints:
+                    await asyncio.sleep(max(0.0, checkpoint - prev))
+                    prev = checkpoint
+                    if socket.closed.is_set():
+                        return
+                    if socket.last_board_event_at > 0 or socket.startup_has_board_event:
+                        socket.startup_phase = LessonStartupPhase.READY
+                        return
+
+                    now = time.monotonic()
+                    if self._director_busy(socket, now):
+                        await self._send_startup_status(socket, "board_director", "Creating the first board illustration...")
+                        continue
+
+                    status_msg = self._startup_status_message(socket)
+                    has_response_activity = bool(
+                        socket.last_qwen_response_created_at
+                        or socket.last_qwen_audio_at
+                        or socket.last_qwen_transcript_at
                     )
-                except Exception:  # pragma: no cover
-                    pass
-                # One bounded nudge: re-send initial instruction if still no board content.
-                if not socket.closed.is_set() and socket.qwen is not None and socket.last_board_event_at == 0:
-                    try:
-                        await socket.qwen.prompt_text(
-                            "System instruction: The classroom is connected. Begin teaching now. "
-                            "Start by writing the lesson heading on the board with board_intent and explaining the first concept aloud."
-                        )
-                        logger.info("tutor startup nudge sent lesson=%s", lesson_id)
-                    except Exception:  # pragma: no cover
-                        logger.warning("tutor startup nudge failed lesson=%s", lesson_id, exc_info=True)
+                    logger.warning(
+                        "startup watchdog lesson=%s lease=%s attempt=%s nudges=%s phase=%s status=%r resp_created=%s audio=%s transcript=%s tool=%s director_started=%s director_finished=%s director_error=%s board=%s active_resp=%s",
+                        lesson_id, socket.lease_id, socket.startup_attempt, socket.startup_nudge_count, socket.startup_phase.value,
+                        status_msg,
+                        bool(socket.last_qwen_response_created_at), bool(socket.last_qwen_audio_at),
+                        bool(socket.last_qwen_transcript_at), bool(socket.last_tool_call_at),
+                        bool(socket.last_board_director_started_at), bool(socket.last_board_director_finished_at),
+                        socket.last_board_director_error,
+                        bool(socket.last_board_event_at),
+                        socket.active_response_id,
+                    )
+
+                    await self._send_startup_status(socket, "waiting", status_msg)
+
+                    # Bounded recovery nudges. Do not nudge while director/response is active.
+                    if socket.startup_nudge_count < 3 and socket.active_response_id is None and not self._director_busy(socket, now):
+                        if not has_response_activity:
+                            nudge = (
+                                "System instruction: The classroom is connected. Begin teaching now. "
+                                "Start by calling board_intent to write the lesson heading and first concept on the board, then explain it aloud. "
+                                "Do not wait for the student."
+                            )
+                            reason = "watchdog_nudge_start"
+                        else:
+                            nudge = (
+                                "System instruction: Continue teaching, but you must create the first visible board content now. "
+                                "Call board_intent with a clear intent for the lesson heading, a short introduction, "
+                                "the first concept heading, one meaningful explanation, and a simple relevant diagram. "
+                                "Then continue explaining aloud. Do not wait for the student."
+                            )
+                            reason = "watchdog_nudge_board_intent"
+                        sent = await self._safe_prompt_text(socket, nudge, reason=reason)
+                        if sent:
+                            socket.startup_nudge_count += 1
+                            await self._send_startup_status(socket, reason, "Preparing your first lesson...")
+
+                # Final check: if still no board event, report clear failure but keep session alive for retry.
+                if not socket.closed.is_set() and socket.last_board_event_at == 0 and not socket.startup_has_board_event:
+                    if self._director_busy(socket):
+                        await self._send_startup_status(socket, "board_director", "Creating the first board illustration...")
+                        logger.info("startup watchdog final check deferred: director busy lesson=%s", lesson_id)
+                        return
+                    code, message, fatal_error = self._startup_failure_message(socket)
+                    socket.startup_phase = LessonStartupPhase.FAILED if fatal_error else socket.startup_phase
+                    async with self._lock:
+                        if self._startup_active_lease.get(lesson_id) == socket.lease_id:
+                            self._startup_active_lease.pop(lesson_id, None)
+                    logger.error(
+                        "startup incomplete: no board event lesson=%s lease=%s attempt=%s nudges=%s code=%s fatal=%s msg=%s resp=%s audio=%s transcript=%s tool=%s director_err=%s",
+                        lesson_id, socket.lease_id, socket.startup_attempt, socket.startup_nudge_count, code, fatal_error, message,
+                        bool(socket.last_qwen_response_created_at), bool(socket.last_qwen_audio_at),
+                        bool(socket.last_qwen_transcript_at), bool(socket.last_tool_call_at),
+                        socket.last_board_director_error,
+                    )
+                    await self._send_startup_status(socket, "failed" if fatal_error else "delayed", message)
+                    if fatal_error:
+                        try:
+                            await socket.websocket.send_json(
+                                {
+                                    MSG_TYPE: MSG_ERROR,
+                                    "code": code,
+                                    "message": message,
+                                    "retryable": True,
+                                    "phase": "startup",
+                                }
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
             except asyncio.CancelledError:
                 return
             except Exception:  # pragma: no cover
-                logger.exception("tutor startup watchdog failed lesson=%s", lesson_id)
+                logger.exception("startup watchdog failed lesson=%s", lesson_id)
 
         asyncio.create_task(_watch())
 
@@ -860,7 +1252,9 @@ class LessonRealtimeHub:
                 board_envelope = await get_board_snapshot(
                     fresh_db, lesson, include_events=False
                 )
-            self._initial_prompted_lessons.discard(lesson_id)
+            async with self._lock:
+                self._startup_completed_lessons.discard(lesson_id)
+                self._startup_active_lease.pop(lesson_id, None)
             await socket.websocket.send_json(
                 {
                     MSG_TYPE: MSG_SESSION_ENDED,

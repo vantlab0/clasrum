@@ -322,5 +322,37 @@ void main() {
       }));
       expect(doc.visibleElements, isEmpty);
     });
+
+    test('realtime board.event draw_plan is applied by BlackboardController and renderable', () {
+      final controller = BlackboardController(animationsEnabled: false);
+      addTearDown(controller.dispose);
+
+      final event = BoardEvent.fromJson({
+        'event_id': 'evt_rt_1',
+        'session_id': 'lesson_1',
+        'sequence': 1,
+        'type': 'draw_plan',
+        'element_id': 'dp_1',
+        'payload': _basePlan(),
+        'created_at': '2026-11-22T00:00:00.000Z',
+        'board_revision': 1,
+        'depends_on': <String>[],
+        'animate': true,
+      });
+
+      controller.enqueue(event);
+
+      expect(controller.document.lastSequence, 1);
+      expect(controller.document.visibleElements, hasLength(1));
+      expect(controller.document.visibleElements.first.type, 'draw_plan');
+
+      final plan = DrawingPlan.parse(controller.document.visibleElements.first.payload);
+      final transform = BoardTransform.fromSize(const ui.Size(800, 600));
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      final result = GenerativeDrawingRenderer.render(canvas, plan, transform, progress: 1.0);
+      recorder.endRecording();
+      expect(result.elementBounds.length, plan.elements.length);
+    });
   });
 }

@@ -188,36 +188,34 @@ class QwenRealtimeSession:
 
 
 class FakeQwenSession:
-    """Deterministic offline tutor that still flows audio + board events.
+    """Deterministic offline tutor that flows audio + board events through the real pipeline.
 
-    Generates a few chalk-text board events via the registry-driven path is the
-    hub's job; here we only emit audio deltas + a transcript so the full
-    client->server->client pipeline can be exercised end to end.
+    It simulates Qwen Realtime by emitting response lifecycle events and
+    board_intent tool calls. Board events are still produced by the real
+    BoardIntentHandler/BoardService pipeline.
     """
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._started = False
         self._rng = random.Random(42)
+        self._board_calls = 0
+        self._response_seq = 0
 
     async def connect(self, instructions: str, tools: list[dict[str, Any]]) -> None:
         self._started = True
         logger.info("FakeQwenSession connected (no API key)")
 
     async def append_audio(self, payload_b64: str) -> None:
-        # Student spoke; after a short pause, the tutor replies.
         asyncio.create_task(self._reply_after_student_speech())
 
     async def commit_audio(self) -> None:
-        # No-op for fake; response creation is driven by create_response.
         return None
 
     async def create_response(self) -> None:
-        # Explicit client turn-end: tutor replies now.
-        asyncio.create_task(self._reply_after_student_speech(delay=0.0))
+        asyncio.create_task(self._reply_after_student_speech(delay=0.0, include_board=False))
 
     async def cancel_response(self) -> None:
-        # Best-effort: drop any in-flight reply.
         try:
             while True:
                 self._queue.get_nowait()
@@ -225,12 +223,14 @@ class FakeQwenSession:
             pass
 
     async def function_call_output(self, call_id: str, output: str) -> None:
-        # Tool result acknowledged; continue speaking (no-op in fake).
         logger.debug("fake function_call_output %s -> %s", call_id, output[:80])
+        # Simulate Qwen continuing after tool output.
+        asyncio.create_task(self._reply_after_student_speech(delay=0.1, include_board=False))
 
     async def prompt_text(self, text: str) -> None:
         logger.info("fake prompt_text: %s", text[:120])
-        asyncio.create_task(self._reply_after_student_speech(delay=0.2))
+        include_board = self._board_calls == 0 or "board_intent" in text.lower() or "heading" in text.lower()
+        asyncio.create_task(self._reply_after_student_speech(delay=0.2, include_board=include_board))
 
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
         while True:
@@ -245,39 +245,68 @@ class FakeQwenSession:
         except asyncio.QueueFull:
             pass
 
-    # -- internals -------------------------------------------------------
-
-    async def _reply_after_student_speech(self, delay: float = 0.8) -> None:
-        if self._started is False:
+    async def _reply_after_student_speech(self, delay: float = 0.8, include_board: bool = False) -> None:
+        if not self._started:
             return
         await asyncio.sleep(delay)
-        lines = [
+        self._response_seq += 1
+        response_id = f"fake_resp_{self._response_seq}"
+        await self._queue.put({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}})
+
+        if include_board:
+            self._board_calls += 1
+            call_id = f"fake_call_{self._board_calls}"
+            intent = (
+                "Create a lesson heading and first concept visual for the current topic. "
+                "Include the lesson title, a short introduction, the first key concept heading, "
+                "one clear definition or explanation, and a simple relevant diagram."
+            )
+            await self._queue.put(
+                {
+                    "type": "response.output_item.added",
+                    "response_id": response_id,
+                    "item": {"type": "function_call", "call_id": call_id, "name": "board_intent"},
+                }
+            )
+            await self._queue.put(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "response_id": response_id,
+                    "call_id": call_id,
+                    "name": "board_intent",
+                    "arguments": json.dumps({"intent": intent, "focus": "new_content", "region_hint": "center"}),
+                }
+            )
+            # The hub will execute the tool and call function_call_output, which triggers a follow-up response.
+            return
+
+        line = self._rng.choice([
             "Great question. Let me write that out on the board so we can look at it together.",
             "Here is the key idea: the rate of change tells us how fast the output moves as the input changes.",
             "Written as a derivative, that is d y over d x — the slope of the tangent line at any point.",
             "Try it yourself: what do you think happens when x equals zero?",
             "Well done. You've grasped the core idea. Shall we move to the next concept?",
-        ]
-        line = self._rng.choice(lines)
+        ])
         await self._emit_transcript(line, speaker="tutor")
-        # Emit a few audio delta frames (silence is fine; client just plays them).
-        pcm = bytes(320)  # 20 ms of silence at 16 kHz mono PCM16
-        for _ in range(3):
+        pcm = bytes(320)
+        for i in range(3):
             await asyncio.sleep(0.06)
             await self._queue.put(
                 {
                     "type": "response.audio.delta",
+                    "response_id": response_id,
                     "delta": base64.b64encode(pcm).decode("ascii"),
-                    "sequence": self._rng.randint(0, 10_000),
+                    "sequence": i,
                 }
             )
-        await self._queue.put({"type": "response.audio.done", "response_id": "fake-" + str(self._rng.randint(0, 9999))})
+        await self._queue.put({"type": "response.audio.done", "response_id": response_id})
+        await self._queue.put({"type": "response.done", "response": {"id": response_id, "status": "completed"}})
 
     async def _emit_transcript(self, text: str, speaker: str = "tutor") -> None:
         now = datetime.now(timezone.utc).isoformat()
         await self._queue.put(
             {
-                "type": "conversation.item.input_audio_transcription.completed",
+                "type": "response.audio_transcript.done",
                 "speaker": speaker,
                 "transcript": text,
                 "started_at": now,

@@ -41,6 +41,9 @@ class _LiveScreenState extends State<LiveScreen>
   double? _connectionProgress;
   bool _waitingForTutor = false;
   bool _receivedTeachingContent = false;
+  bool _receivedBoardContent = false;
+  bool _tutorAudioStarted = false;
+  String _startupStatusMessage = 'Preparing your first lesson...';
   Timer? _tutorStartTimer;
   Timer? _connectProgressTimer;
 
@@ -131,6 +134,21 @@ class _LiveScreenState extends State<LiveScreen>
     });
     _errSub = widget.client.errors.listen((message) {
       if (!mounted) return;
+      final lower = message.toLowerCase();
+      final isStartupDelay = lower.contains('not started drawing yet') ||
+          lower.contains('tutor_start_delayed') ||
+          lower.contains('first board visual is still being prepared');
+      if (isStartupDelay && !_receivedBoardContent) {
+        setState(() {
+          _startupStatusMessage = _tutorAudioStarted
+              ? 'Creating the first board illustration...'
+              : 'Preparing your first lesson...';
+          _waitingForTutor = true;
+          // Do not show a scary centered error for startup delays.
+          _error = null;
+        });
+        return;
+      }
       setState(() => _error = message);
     });
     _msgSub = widget.client.messages.listen(_handleMessage);
@@ -197,21 +215,52 @@ class _LiveScreenState extends State<LiveScreen>
   void _startTutorWaitTimer() {
     _tutorStartTimer?.cancel();
     _receivedTeachingContent = false;
+    _receivedBoardContent = false;
+    _tutorAudioStarted = false;
     _waitingForTutor = false;
-    _tutorStartTimer = Timer(const Duration(seconds: 12), () {
-      if (!mounted || _receivedTeachingContent) return;
+    _tutorStartTimer = Timer(const Duration(seconds: 8), () {
+      if (!mounted || _receivedBoardContent) return;
       setState(() {
         _waitingForTutor = true;
+        if (_tutorAudioStarted) {
+          _startupStatusMessage = 'Creating the first board illustration...';
+        } else if (_receivedTeachingContent) {
+          _startupStatusMessage = 'Preparing your first lesson...';
+        } else {
+          _startupStatusMessage = 'Waiting for tutor response...';
+        }
       });
     });
   }
 
-  void _markTeachingContentReceived() {
-    if (_receivedTeachingContent) return;
+  void _markTeachingContentReceived({bool triggerSetState = true}) {
+    final wasWaiting = _waitingForTutor;
+    final oldMsg = _startupStatusMessage;
+    _receivedTeachingContent = true;
+    if (_receivedBoardContent) {
+      _waitingForTutor = false;
+      _tutorStartTimer?.cancel();
+      _tutorStartTimer = null;
+    } else {
+      _waitingForTutor = true;
+      if (_tutorAudioStarted) {
+        _startupStatusMessage = 'Creating the first board illustration...';
+      } else {
+        _startupStatusMessage = 'Preparing your first lesson...';
+      }
+    }
+    final changed = wasWaiting != _waitingForTutor || oldMsg != _startupStatusMessage;
+    if (triggerSetState && mounted && changed) setState(() {});
+  }
+
+  void _markBoardContentReceived({bool triggerSetState = true}) {
+    if (_receivedBoardContent) return;
+    _receivedBoardContent = true;
     _receivedTeachingContent = true;
     _waitingForTutor = false;
     _tutorStartTimer?.cancel();
     _tutorStartTimer = null;
+    if (triggerSetState && mounted) setState(() {});
   }
 
   void _syncConnectionUi(ConnectionState state) {
@@ -273,16 +322,16 @@ class _LiveScreenState extends State<LiveScreen>
       case RealtimeMessageType.boardSnapshot:
         _applyBoardSnapshot(message.payload);
         if (_boardController.document.elements.isNotEmpty) {
-          _markTeachingContentReceived();
+          _markBoardContentReceived();
         }
         break;
       case RealtimeMessageType.boardEvent:
         _applyBoardEvent(message.payload);
-        _markTeachingContentReceived();
+        _markBoardContentReceived();
         break;
       case RealtimeMessageType.boardEvents:
         _applyBoardEvents(message.payload);
-        _markTeachingContentReceived();
+        _markBoardContentReceived();
         break;
       case RealtimeMessageType.lessonState:
         // Lesson metadata updates are ignored by the minimal classroom UI.
@@ -291,6 +340,7 @@ class _LiveScreenState extends State<LiveScreen>
         // Teacher state is reflected implicitly by streamed audio/playback.
         break;
       case RealtimeMessageType.audioDelta:
+        _tutorAudioStarted = true;
         _handleAudioDelta(message);
         _markTeachingContentReceived();
         break;
@@ -313,6 +363,22 @@ class _LiveScreenState extends State<LiveScreen>
         break;
       case RealtimeMessageType.viewportFocus:
         _applyViewportFocus(message.payload);
+        break;
+      case RealtimeMessageType.startupStatus:
+        final msg = message.payload['message']?.toString();
+        final phase = message.payload['phase']?.toString();
+        if (msg != null && msg.isNotEmpty) {
+          setState(() {
+            _startupStatusMessage = msg;
+            if (!_receivedBoardContent) _waitingForTutor = true;
+            if (phase == 'audio_started' || phase == 'recovering') {
+              _receivedTeachingContent = true;
+            }
+          });
+          if (phase == 'board_event_persisted' || phase == 'ready') {
+            _markBoardContentReceived(triggerSetState: true);
+          }
+        }
         break;
       case RealtimeMessageType.sessionInterrupted:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
@@ -988,7 +1054,7 @@ class _LiveScreenState extends State<LiveScreen>
               bottom: MediaQuery.of(context).padding.bottom + 88,
               child: IgnorePointer(
                 child: Text(
-                  'Tutor connected. Waiting for first board activity...',
+                  _startupStatusMessage,
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
