@@ -154,6 +154,17 @@ WantedBy=multi-user.target
     listen 80;
     server_name {DOMAIN};
 
+    location = /classroom {{
+        return 301 /classroom/;
+    }}
+
+    location /classroom/ {{
+        alias /var/www/pwony-classroom/;
+        index index.html;
+        try_files $uri $uri/ /classroom/index.html;
+        add_header Cache-Control "no-cache";
+    }}
+
     location / {{
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;

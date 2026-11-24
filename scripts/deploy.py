@@ -1,9 +1,10 @@
-"""Deploy the AI Personal Classroom backend to the VPS.
+"""Deploy the AI Personal Classroom backend and Flutter web app to the VPS.
 
-Idempotent-ish: safe to re-run. Uploads a snapshot of ./backend, sets up a
-Python 3.12 virtualenv with uv, runs Alembic, installs a systemd service and
-adds a path-scoped nginx reverse proxy for realtime.avelut.xyz so the existing
-Node realtime proxy on port 10000 keeps working at the domain root.
+Idempotent-ish: safe to re-run. Uploads snapshots of ./backend and ./app, sets up
+a Python 3.12 virtualenv with uv, runs Alembic, installs a systemd service,
+builds the Flutter web app for /classroom/, and configures nginx for
+realtime.avelut.xyz so the backend, Flutter classroom, and existing Node realtime
+proxy can coexist.
 """
 from __future__ import annotations
 
@@ -25,11 +26,28 @@ DOMAIN = "realtime.avelut.xyz"
 REMOTE_ROOT = "/opt/pwony"
 REMOTE_BACKEND = REMOTE_ROOT + "/backend"
 REMOTE_DATA = REMOTE_ROOT + "/data"
+REMOTE_WEB = "/var/www/pwony-classroom"
 UPLOAD_TMP = "/tmp/pwony-backend.tar.gz"
+UPLOAD_WEB_TMP = "/tmp/pwony-app.tar.gz"
 
-LOCAL_BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOCAL_BACKEND = os.path.join(REPO_ROOT, "backend")
+LOCAL_APP = os.path.join(REPO_ROOT, "app")
 
 EXCLUDES = {".venv", "__pycache__", ".pytest_cache", ".git", "node_modules", "data"}
+WEB_EXCLUDES = {
+    ".dart_tool",
+    ".git",
+    ".idea",
+    ".vscode",
+    "build",
+    "android",
+    "ios",
+    "linux",
+    "macos",
+    "windows",
+    "test",
+}
 
 
 def connect() -> paramiko.SSHClient:
@@ -58,16 +76,16 @@ def shquote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-def make_tarball() -> bytes:
+def make_tarball(local_dir: str, excludes: set[str], *, skip_suffixes: tuple[str, ...] = ()) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for root, dirs, files in os.walk(LOCAL_BACKEND):
-            dirs[:] = [d for d in dirs if d not in EXCLUDES]
+        for root, dirs, files in os.walk(local_dir):
+            dirs[:] = [d for d in dirs if d not in excludes]
             for name in files:
-                if name.endswith((".pyc", ".db", ".db-wal", ".db-shm")):
+                if skip_suffixes and name.endswith(skip_suffixes):
                     continue
                 path = os.path.join(root, name)
-                arcname = os.path.relpath(path, LOCAL_BACKEND).replace("\\", "/")
+                arcname = os.path.relpath(path, local_dir).replace("\\", "/")
                 tar.add(path, arcname=arcname)
     data = buf.getvalue()
     print(f"  tarball: {len(data) / 1024:.1f} KiB")
@@ -92,7 +110,7 @@ def main() -> int:
         run(client, f"mkdir -p {REMOTE_BACKEND} {REMOTE_DATA} && chown -R {USER}:{USER} {REMOTE_ROOT}", sudo=True)
 
         print("==> Uploading backend snapshot")
-        payload = make_tarball()
+        payload = make_tarball(LOCAL_BACKEND, EXCLUDES, skip_suffixes=(".pyc", ".db", ".db-wal", ".db-shm"))
         sftp = client.open_sftp()
         with sftp.file(UPLOAD_TMP, "w") as f:
             f.write(payload)
@@ -139,6 +157,10 @@ JWT_SECRET={jwt_secret}
 JWT_EXPIRES_MINUTES=20160
 CORS_ORIGINS=["*"]
 
+SUPABASE_URL=https://sazpockqjxeuthewdtku.supabase.co
+SUPABASE_JWKS_URL=https://sazpockqjxeuthewdtku.supabase.co/auth/v1/.well-known/jwks.json
+SUPABASE_JWT_AUDIENCE=authenticated
+
 QWEN_API_KEY=sk-ws-H.DIRPHXX.6d6q.MEUCIQCb-XKQ7aL93idHDFZY96NkuciY_tz39Ze4ZdC8Gmes1AIgBwqx-FTHxu7D3R8oLJHzBydhYVVqF3bn7gzr-fuXvaE
 QWEN_REALTIME_URL=wss://ws-o3v6mh0i8y9tqdfx.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
 QWEN_MODEL=qwen-omni-turbo-realtime
@@ -165,6 +187,42 @@ BOARD_SNAPSHOT_KEEP=5
         print("==> Running database migrations")
         out = run(client, f"cd {REMOTE_BACKEND} && .venv/bin/python -m alembic upgrade head", timeout=300)
         print("    " + out.strip().splitlines()[-1] if out.strip() else "    done")
+
+        print("==> Building and deploying Flutter web (/classroom/)")
+        run(client, f"mkdir -p {REMOTE_WEB} /opt/pwony/app-src", sudo=True)
+        run(client, "chown -R {user}:{user} /opt/pwony/app-src".format(user=USER), sudo=True)
+        web_payload = make_tarball(LOCAL_APP, WEB_EXCLUDES)
+        with sftp.file(UPLOAD_WEB_TMP, "w") as f:
+            f.write(web_payload)
+        run(client, f"rm -rf /opt/pwony/app-src/* && tar -xzf {UPLOAD_WEB_TMP} -C /opt/pwony/app-src && rm -f {UPLOAD_WEB_TMP}")
+        flutter_bin = run(
+            client,
+            "test -x /snap/bin/flutter && echo /snap/bin/flutter "
+            "|| (command -v flutter >/dev/null 2>&1 && command -v flutter) "
+            "|| echo MISSING",
+            check=False,
+        ).strip().splitlines()[-1]
+        if flutter_bin == "MISSING":
+            raise RuntimeError("Flutter is not installed on the VPS; cannot build web app")
+        run(client, f"cd /opt/pwony/app-src && {flutter_bin} pub get", timeout=900)
+        supabase_url = "https://sazpockqjxeuthewdtku.supabase.co"
+        supabase_anon_key = "sb_publishable_08eKb2lUGqluBUsG5Kb4Tg_cL9alEO-"
+        run(
+            client,
+            f"cd /opt/pwony/app-src && {flutter_bin} build web --release --base-href /classroom/ "
+            f"--dart-define=SUPABASE_URL={supabase_url} "
+            f"--dart-define=SUPABASE_ANON_KEY={supabase_anon_key}",
+            timeout=1800,
+        )
+        run(
+            client,
+            f"test -f /opt/pwony/app-src/build/web/index.html && "
+            f"rm -rf {REMOTE_WEB}/* && cp -r /opt/pwony/app-src/build/web/* {REMOTE_WEB}/ && "
+            f"chown -R www-data:www-data {REMOTE_WEB}",
+            sudo=True,
+            timeout=300,
+        )
+        print("    web deployed")
 
         print("==> Installing systemd service")
         unit = """[Unit]
@@ -201,11 +259,12 @@ WantedBy=multi-user.target
         )
         print("    service started")
 
-        print("==> Configuring nginx (path-scoped; existing proxy kept at /)")
+        print("==> Configuring nginx (path-scoped; /classroom/ static, /permit2/ proxy, existing proxy kept at /)")
         nginx = f"""# Managed by Pwony deploy script.
 # The hosting panel maps realtime.avelut.xyz -> this VM's port 10000, so nginx
 # listens there and splits traffic: /api, /healthz and docs go to the FastAPI
-# backend, everything else (the LiveTeacher websocket proxy) stays on Node.
+# backend, /classroom/ serves the Flutter web app, /permit2/ proxies to the
+# Permit2 app, everything else (the LiveTeacher websocket proxy) stays on Node.
 server {{
     listen 80;
     listen 10000;
@@ -253,6 +312,36 @@ server {{
         proxy_set_header Host $host;
     }}
 
+    # --- AI Personal Classroom web (Flutter, /classroom/) ---------------
+    location = /classroom {{
+        return 301 /classroom/;
+    }}
+
+    location /classroom/ {{
+        alias {REMOTE_WEB}/;
+        index index.html;
+        try_files $uri $uri/ /classroom/index.html;
+        add_header Cache-Control "no-cache";
+    }}
+
+    # --- Permit2 Realtime app (/permit2/) --------------------------------
+    location = /permit2 {{
+        return 301 /permit2/;
+    }}
+
+    location /permit2/ {{
+        proxy_pass http://127.0.0.1:3020/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }}
+
     # --- existing Avelut realtime proxy (LiveTeacher) ------------------
     location / {{
         proxy_pass http://127.0.0.1:10001;
@@ -293,15 +382,28 @@ server {{
         time.sleep(3)
         local_health = run(client, "curl -sS -m 10 http://127.0.0.1:8000/healthz", check=False)
         proxy_health = run(client, "curl -sS -m 10 -H 'Host: realtime.avelut.xyz' http://127.0.0.1/healthz", check=False)
+        classroom_head = run(
+            client,
+            "curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: realtime.avelut.xyz' http://127.0.0.1/classroom/",
+            check=False,
+        ).strip()
+        classroom_bootstrap = run(
+            client,
+            "curl -sS -m 10 -o /dev/null -w '%{http_code}' -H 'Host: realtime.avelut.xyz' http://127.0.0.1/classroom/flutter_bootstrap.js",
+            check=False,
+        ).strip()
         status = run(client, "systemctl is-active pwony", check=False).strip()
         print(f"    service: {status}")
         print(f"    direct:  {local_health.strip()[:200]}")
         print(f"    via nginx: {proxy_health.strip()[:200]}")
+        print(f"    classroom /: {classroom_head}")
+        print(f"    classroom flutter_bootstrap.js: {classroom_bootstrap}")
 
         print("\n==> Done")
         print(f"    REST base:  https://{DOMAIN}/api/v1")
         print(f"    Health:     https://{DOMAIN}/healthz")
         print(f"    Docs:       https://{DOMAIN}/docs")
+        print(f"    Classroom:  https://{DOMAIN}/classroom/")
         sftp.close()
         return 0
     finally:
