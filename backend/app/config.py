@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     notes_max_transcript_chars: int = 60000
 
     # --- Board Director (intent -> structured board plan) ------------------
-    board_director_model: str = "qwen-flash"  # Qwen3.7-Flash / flash-tier director
+    board_director_model: str = "qwen3.8-flash"  # Flash-tier director for drawing plans
     board_director_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     board_director_api_key: str = ""  # falls back to effective_notes_api_key / qwen_api_key
     board_director_timeout_seconds: float = 20.0

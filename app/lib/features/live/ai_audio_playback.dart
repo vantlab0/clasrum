@@ -4,7 +4,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+
+import 'ai_pcm_player.dart';
 
 /// Playback lifecycle for incoming AI (tutor) audio.
 enum AiPlaybackState {
@@ -46,6 +47,8 @@ class AiAudioPlaybackController extends ChangeNotifier {
   final int defaultSampleRate;
   final int feedThresholdMs;
 
+  final AiPcmPlayer _player = AiPcmPlayer();
+
   AiPlaybackState _state = AiPlaybackState.idle;
   AiPlaybackState get state => _state;
 
@@ -82,16 +85,17 @@ class AiAudioPlaybackController extends ChangeNotifier {
 
     try {
       if (_setup) {
-        await FlutterPcmSound.release();
+        await _player.release();
         _setup = false;
       }
       _sampleRate = desired;
-      await FlutterPcmSound.setup(sampleRate: _sampleRate, channelCount: 1);
       final thresholdFrames =
           (_sampleRate * feedThresholdMs / 1000).round().clamp(256, 48000);
-      await FlutterPcmSound.setFeedThreshold(thresholdFrames);
-      FlutterPcmSound.setFeedCallback(_onFeedCallback);
-      FlutterPcmSound.start();
+      _player.setFeedCallback(_onFeedCallback);
+      await _player.setup(
+        sampleRate: _sampleRate,
+        feedThresholdFrames: thresholdFrames,
+      );
       _setup = true;
       _lastError = null;
     } catch (e) {
@@ -218,8 +222,10 @@ class AiAudioPlaybackController extends ChangeNotifier {
     }
 
     _activeResponseId = _queue.isNotEmpty ? _queue.last.responseId : null;
+    try {
+      await _player.stop();
+    } catch (_) {}
     _setState(AiPlaybackState.interrupted);
-    // Stop feeding; any already-fed native tail is minimal due to low threshold.
   }
 
   /// Hard reset (e.g. disconnect/end). Drops all buffered audio.
@@ -229,6 +235,9 @@ class AiAudioPlaybackController extends ChangeNotifier {
     _responseDone = false;
     _queue.clear();
     _activeResponseId = null;
+    try {
+      await _player.stop();
+    } catch (_) {}
     _setState(endState);
   }
 
@@ -265,7 +274,7 @@ class AiAudioPlaybackController extends ChangeNotifier {
       // Feed in small chunks to keep latency low and pause responsive.
       final chunk = _queue.removeFirst();
       _activeResponseId ??= chunk.responseId;
-      await FlutterPcmSound.feed(PcmArrayInt16.fromList(chunk.samples));
+      await _player.feed(chunk.samples);
       if (_disposed) return;
       if (_state != AiPlaybackState.playing && _playbackEnabled) {
         _setState(AiPlaybackState.playing);
@@ -335,8 +344,8 @@ class AiAudioPlaybackController extends ChangeNotifier {
     _playbackEnabled = false;
     _queue.clear();
     if (_setup) {
-      FlutterPcmSound.setFeedCallback(null);
-      unawaited(FlutterPcmSound.release());
+      _player.setFeedCallback(null);
+      unawaited(_player.release());
       _setup = false;
     }
     super.dispose();
