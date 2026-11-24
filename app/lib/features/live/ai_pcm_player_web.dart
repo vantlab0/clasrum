@@ -1,12 +1,13 @@
 // ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
+import 'dart:js_util' as js_util;
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 
 class AiPcmPlayer {
-  html.AudioContext? _ctx;
+  dynamic _ctx;
   bool _setup = false;
   int _sampleRate = 24000;
   int _feedThresholdFrames = 2400;
@@ -27,11 +28,13 @@ class AiPcmPlayer {
     }
     _sampleRate = sampleRate;
     _feedThresholdFrames = feedThresholdFrames;
-    _ctx = html.AudioContext({'sampleRate': _sampleRate});
+    final constructor = js_util.getProperty(html.window, 'AudioContext') ??
+        js_util.getProperty(html.window, 'webkitAudioContext');
+    _ctx = js_util.callConstructor(constructor, [js_util.jsify({'sampleRate': _sampleRate})]);
     try {
-      await _ctx!.resume();
+      await js_util.promiseToFuture(js_util.callMethod(_ctx, 'resume', []));
     } catch (_) {}
-    _nextPlayTime = _ctx!.currentTime ?? 0;
+    _nextPlayTime = (_ctx.currentTime as num?)?.toDouble() ?? 0.0;
     _setup = true;
     _startMonitor();
   }
@@ -44,7 +47,7 @@ class AiPcmPlayer {
     final ctx = _ctx;
     if (!_setup || ctx == null || samples.isEmpty) return;
     try {
-      await ctx.resume();
+      await js_util.promiseToFuture(js_util.callMethod(ctx, 'resume', []));
     } catch (_) {}
 
     final floatData = Float32List(samples.length);
@@ -52,23 +55,22 @@ class AiPcmPlayer {
       floatData[i] = samples[i] / 32768.0;
     }
 
-    final buffer = ctx.createBuffer(1, samples.length, _sampleRate);
-    // copyToChannel expects JS typed array; dart:html wraps it.
-    buffer.copyToChannel(floatData, 0);
+    final buffer = js_util.callMethod(ctx, 'createBuffer', [1, samples.length, _sampleRate]);
+    js_util.callMethod(buffer, 'copyToChannel', [floatData, 0]);
 
-    final source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connectNode(ctx.destination!);
+    final source = js_util.callMethod(ctx, 'createBufferSource', []);
+    js_util.setProperty(source, 'buffer', buffer);
+    js_util.callMethod(source, 'connect', [js_util.getProperty(ctx, 'destination')]);
 
-    final now = ctx.currentTime ?? 0;
+    final now = (js_util.getProperty(ctx, 'currentTime') as num?)?.toDouble() ?? 0.0;
     if (_nextPlayTime < now) _nextPlayTime = now;
-    source.start(_nextPlayTime);
+    js_util.callMethod(source, 'start', [_nextPlayTime]);
     _nextPlayTime += samples.length / _sampleRate;
 
     _activeSources.add(source);
-    source.onEnded.listen((_) {
+    js_util.setProperty(source, 'onended', js_util.allowInterop((_) {
       _activeSources.remove(source);
-    });
+    }));
 
     _emitFeedState();
   }
@@ -83,7 +85,7 @@ class AiPcmPlayer {
   void _emitFeedState() {
     final ctx = _ctx;
     if (!_setup || ctx == null) return;
-    final now = ctx.currentTime ?? 0;
+    final now = (js_util.getProperty(ctx, 'currentTime') as num?)?.toDouble() ?? 0.0;
     final remainingSeconds = (_nextPlayTime - now).clamp(0.0, 3600.0);
     final remainingFrames = (remainingSeconds * _sampleRate).round();
     if (remainingFrames <= _feedThresholdFrames) {
@@ -94,13 +96,14 @@ class AiPcmPlayer {
   Future<void> stop() async {
     for (final s in List<dynamic>.from(_activeSources)) {
       try {
-        s.stop();
+        js_util.callMethod(s, 'stop', []);
       } catch (_) {}
     }
     _activeSources.clear();
     final ctx = _ctx;
     if (ctx != null) {
-      _nextPlayTime = ctx.currentTime ?? 0;
+      _nextPlayTime =
+          (js_util.getProperty(ctx, 'currentTime') as num?)?.toDouble() ?? 0.0;
     }
   }
 
@@ -109,7 +112,7 @@ class AiPcmPlayer {
     _monitor = null;
     for (final s in List<dynamic>.from(_activeSources)) {
       try {
-        s.stop();
+        js_util.callMethod(s, 'stop', []);
       } catch (_) {}
     }
     _activeSources.clear();
@@ -118,7 +121,7 @@ class AiPcmPlayer {
     _setup = false;
     if (ctx != null) {
       try {
-        await ctx.close();
+        await js_util.promiseToFuture(js_util.callMethod(ctx, 'close', []));
       } catch (_) {}
     }
   }
