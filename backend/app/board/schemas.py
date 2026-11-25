@@ -830,9 +830,7 @@ class HighlightArgs(StrictModel):
     )
     style: HighlightStyle = Field(default="box")
     color: ColorStr | None = Field(default=None)
-    label: Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)] | None = Field(
-        default=None
-    )
+    label: Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)] | None = Field(default=None)
 
     def build_payload(self) -> dict[str, Any]:
         return _clean(
@@ -843,6 +841,160 @@ class HighlightArgs(StrictModel):
                 "label": self.label,
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# new: direct realtime board writing (Phase 2 / §7 lecturer instructions)
+# ---------------------------------------------------------------------------
+
+class WriteOnBoardArgs(StrictModel):
+    """``board_write_on_board`` -> ``write_text`` / ``write_heading``.
+
+    Small, meaningful teaching content written directly by the realtime lecturer.
+    The ``style`` field maps to the appropriate board event payload.
+    """
+
+    text: ShortText = Field(description="Content to write on the board (1..300 chars).")
+    style: Literal[
+        "h1", "h2", "h3", "h4", "h5", "h6", "body", "small", "equation", "label"
+    ] = Field(description="Text style: heading levels h1..h6, body, small, equation, label.")
+    color: ColorStr | None = Field(default=None, description="Text colour; chalk role or #RRGGBB.")
+    highlight: bool = Field(default=False, description="Whether to highlight the written text.")
+    highlight_color: ColorStr | None = Field(
+        default=None, description="Highlight colour; chalk role or #RRGGBB."
+    )
+    position: Literal["next_line", "left", "center", "right"] = Field(
+        description="Position the new element relative to existing board content."
+    )
+    writing_style: Literal["progressive", "instant"] = Field(
+        description=" progressive = animate as if writing; instant = appear without animation."
+    )
+    related_concept: IdText | None = Field(
+        default=None, description="Optional lesson concept identifier."
+    )
+
+    def build_payload(self) -> dict[str, Any]:
+        # Map the visual style to a board event type and payload.
+        # The payload is always compatible with the ``write_text`` event type,
+        # which the Flutter renderer handles via the ``style`` field (heading,
+        # subheading, body, label, etc.). For ``equation`` style we include the
+        # LaTeX source in ``text`` so it appears as readable text on the board.
+        style = self.style.strip().lower()
+        text = self.text
+
+        if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            # Heading styles map to write_text with style='heading'/'subheading'.
+            # The Flutter renderer uses the ``style`` field to determine size/position.
+            level = min(int(style[1:]), 2)  # h1->1, h2->2, h3..h6->2
+            position_payload = {"x": 0.08, "y": 0.08}  # default top-left
+            if self.position == "center":
+                position_payload = {"x": 0.5, "y": 0.08}
+            elif self.position == "right":
+                position_payload = {"x": 0.92, "y": 0.08}
+            elif self.position == "next_line":
+                position_payload = {"x": 0.08, "y": 0.22}
+
+            payload = {
+                "text": text,
+                "style": "heading" if level == 1 else "subheading",
+                "position": position_payload,
+                "color": self.color or "primary",
+                "highlight": self.highlight,
+                "highlight_color": self.highlight_color,
+                "writing_style": self.writing_style,
+                "related_concept": self.related_concept,
+            }
+        elif style == "equation":
+            # Equation style: include LaTeX in ``text`` so it renders as readable
+            # chalk text on the board. The ``latex`` key is also included for potential
+            # future math rendering. ``write_text`` payload requires a ``text`` field.
+            payload = {
+                "text": text,  # LaTeX expression as plain text for write_text
+                "style": "code",  # code style renders monospace; will contain LaTeX expression
+                "position": {"x": 0.08, "y": 0.08},
+                "color": self.color or "primary",
+                "highlight": self.highlight,
+                "highlight_color": self.highlight_color,
+                "writing_style": self.writing_style,
+                "related_concept": self.related_concept,
+                # Also include ``latex`` key for any downstream consumer that expects it.
+                "latex": text,
+            }
+        elif style == "label":
+            # Label style: short label/text.
+            payload = {
+                "text": text,
+                "style": "label",
+                "position": {"x": 0.08, "y": 0.08},
+                "color": self.color or "primary",
+                "highlight": self.highlight,
+                "highlight_color": self.highlight_color,
+                "writing_style": self.writing_style,
+                "related_concept": self.related_concept,
+            }
+        else:
+            # body, small → write_text
+            payload = {
+                "text": text,
+                "style": style,  # body or small
+                "position": {"x": 0.08, "y": 0.08},
+                "color": self.color or "primary",
+                "highlight": self.highlight,
+                "highlight_color": self.highlight_color,
+                "writing_style": self.writing_style,
+                "related_concept": self.related_concept,
+            }
+
+        return payload
+
+
+# ---------------------------------------------------------------------------
+# new: complex visual generation via Qwen3.7-Flash (Phase 2 / §2B)
+# ---------------------------------------------------------------------------
+
+class CreateBoardVisualArgs(StrictModel):
+    """``create_board_visual`` → delegates to Qwen3.7-Flash board director.
+
+    Generates a structured drawing plan for complex educational visuals:
+    diagrams, illustrations, tables, graphs, flowcharts, etc. The plan is
+    validated, repaired if needed, and persisted as a ``draw_plan`` board event.
+    """
+
+    visual_type: Literal[
+        "diagram",
+        "illustration",
+        "comparison_table",
+        "data_table",
+        "flowchart",
+        "graph",
+        "mathematical_diagram",
+        "physics_diagram",
+        "electrical_circuit",
+        "engineering_illustration",
+        "process_diagram",
+        "structured_explanation",
+    ] = Field(description="Type of complex visual to generate.")
+    instruction: ShortText = Field(description="Instruction describing what the visual should teach.")
+    complexity: Literal["simple", "medium", "detailed"] = Field(
+        description="Complexity level: simple (few elements), medium (moderate detail), detailed (rich diagram)."
+    )
+    context: Any = Field(
+        description="Lesson context passed to the board director (topic, concepts, recent transcript, current board content)."
+    )
+    related_concept: IdText | None = Field(
+        default=None, description="Optional lesson concept identifier to focus the visual."
+    )
+
+    def build_payload(self) -> dict[str, Any]:
+        # Delegate to the board director by returning instructions;
+        # the actual execution happens in the registry _execute_intent path.
+        return {
+            "visual_type": self.visual_type,
+            "instruction": self.instruction,
+            "complexity": self.complexity,
+            "context": self.context,
+            "related_concept": self.related_concept,
+        }
 
 
 class ClearArgs(StrictModel):
@@ -1229,6 +1381,35 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Move an existing element to an absolute normalized position or by a delta.",
         (),
     ),
+    # -----------------------------------------------------------------------
+    # new: direct realtime board writing (Phase 2 / §7.A)
+    # -----------------------------------------------------------------------
+    (
+        "board_write_on_board",
+        "write_text",  # maps to write_text event; heading styles map inside build_payload
+        "new",
+        WriteOnBoardArgs,
+        "Write small, meaningful teaching content directly onto the blackboard. Use for "
+        "headings, subheadings, important words, definitions, labels, equations, and short "
+        "explanations. Prefer this over board_intent for simple text; it avoids Qwen3.7-Flash "
+        "overhead and appears progressively on the board.",
+        (),
+    ),
+    # -----------------------------------------------------------------------
+    # new: complex visual generation using Qwen3.7-Flash (Phase 2 / §2B)
+    # -----------------------------------------------------------------------
+    (
+        "create_board_visual",
+        "draw_plan",  # maps to draw_plan event via the board director
+        "new",
+        CreateBoardVisualArgs,
+        "Generate a complex educational visual diagram using Qwen3.7-Flash. Delegates to "
+        "the board director for structured drawing-plan generation. Use when an explanation "
+        "genuinely benefits from a diagram, illustration, comparison table, graph, or other "
+        "structured visual. Do not call for ordinary headings, labels, short explanations, "
+        "or simple text.",
+        (),
+    ),
 )
 
 _LESSON_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
@@ -1310,7 +1491,7 @@ _INTERNAL_BOARD_SPECS: tuple[ToolSpec, ...] = tuple(
         args_model=args_model,
         description=description,
         allowed_element_types=allowed,
-        exposed_to_realtime=False,
+        exposed_to_realtime=name in {"board_write_on_board", "create_board_visual"},
     )
     for name, event_type, target_mode, args_model, description, allowed in _BOARD_SPECS
 )

@@ -161,21 +161,22 @@ SUPABASE_URL=https://sazpockqjxeuthewdtku.supabase.co
 SUPABASE_JWKS_URL=https://sazpockqjxeuthewdtku.supabase.co/auth/v1/.well-known/jwks.json
 SUPABASE_JWT_AUDIENCE=authenticated
 
-QWEN_API_KEY=sk-ws-H.DIRPHXX.6d6q.MEUCIQCb-XKQ7aL93idHDFZY96NkuciY_tz39Ze4ZdC8Gmes1AIgBwqx-FTHxu7D3R8oLJHzBydhYVVqF3bn7gzr-fuXvaE
+QWEN_API_KEY=
 QWEN_REALTIME_URL=wss://ws-o3v6mh0i8y9tqdfx.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime
-QWEN_MODEL=qwen-omni-turbo-realtime
-QWEN_VOICE=Cherry
+QWEN_MODEL=qwen3.8-omni-flash-realtime
+QWEN_VOICE=Katerina
 QWEN_INPUT_SAMPLE_RATE=16000
 QWEN_OUTPUT_SAMPLE_RATE=24000
 QWEN_TURN_DETECTION=server_vad
-QWEN_FAKE_MODE=true
-# NOTE: the Qwen key above is rejected by DashScope with HTTP 401 (expired or
-# revoked). Until a valid key is supplied, fake mode keeps lessons usable. Replace
-# QWEN_API_KEY and set QWEN_FAKE_MODE=false to enable the live voice tutor.
+QWEN_FAKE_MODE=false
 
-NOTES_MODEL=qwen-plus
+NOTES_MODEL=qwen3.7-flash
 NOTES_BASE_URL=https://ws-o3v6mh0i8y9tqdfx.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
-NOTES_API_KEY=
+NOTES_API_KEY=sk-ws-H.DIYRHHR.61XA.MEUCIQDACyeZhYCl7Wd2X8za6CvKaQX4erEfQHmCEaIyu5dOwQIgfla7_W5DepkPZYUXqfFemSdNFzT8xTqBtbQbjxzrbGo
+BOARD_DIRECTOR_MODEL=qwen3.7-flash
+BOARD_DIRECTOR_BASE_URL=https://ws-o3v6mh0i8y9tqdfx.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+BOARD_DIRECTOR_TIMEOUT_SECONDS=90
+BOARD_DIRECTOR_API_KEY=sk-ws-H.DIYRHHR.61XA.MEUCIQDACyeZhYCl7Wd2X8za6CvKaQX4erEfQHmCEaIyu5dOwQIgfla7_W5DepkPZYUXqfFemSdNFzT8xTqBtbQbjxzrbGo
 
 BOARD_SNAPSHOT_INTERVAL_EVENTS=40
 BOARD_SNAPSHOT_KEEP=5

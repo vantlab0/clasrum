@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 MAX_BOARD_SUMMARY_ELEMENTS = 40
 MAX_TRANSCRIPT_TURNS = 12
 MAX_TRANSCRIPT_CHARS = 3000
-MODEL_TIMEOUT_SECONDS = 25.0
+MODEL_TIMEOUT_SECONDS = 90.0
 #: Validation-failure retries per intent (bounded: never loops on bad output).
 MAX_VALIDATION_RETRIES = 1
 
@@ -78,7 +78,7 @@ _SYSTEM_PROMPT = (
     "structured vector drawing instructions.\n"
     "Output STRICT JSON only (no markdown fences, no commentary) with keys: "
     "protocol, version, title, elements, stages.\n"
-    f"- elements: 1..{MAX_ELEMENTS} objects. Each has: id (short unique slug), "
+    f"- elements: 8..18 objects (keep the plan compact). Each has: id (short unique slug), "
     f"kind ({_KNINDS_LINE}), geometry (object per kind), optional style "
     "{stroke_color, stroke_width (0.2..4), stroke_opacity, fill_color, "
     "fill_opacity, line_cap, line_join, dash[]}, layer (0..5, back to front), "
@@ -91,9 +91,12 @@ _SYSTEM_PROMPT = (
     "control, end}; cubic_bezier {start, c1, c2, end}; path {segments:[{op:move|"
     "line|quad|cubic|arc|close, point/control/c1/c2/center/rx/ry/start_angle/"
     "sweep_angle...}]}; text {text, position:{x,y}, align, font_scale?}.\n"
-    f"- stages: 0..{MAX_STAGES} objects {{stage, description, element_ids, "
+    f"- stages: 3..6 objects {{stage, description, element_ids, "
     "pause_ms}} describing the progressive reveal sequence (outline first, "
     "then internal structures, then details/shading, then labels).\n"
+    "Use ONLY the element kinds listed above. NEVER use kind 'circle'; draw a "
+    "circle as an ellipse with rx == ry. Every style.stroke_width must be a "
+    "number between 0.2 and 4.0; never use 0 or values below 0.2.\n"
     "All coordinates are normalized to the available board region given in the "
     "context (region rect). Use organic paths, quadratic/cubic curves, arcs and "
     "irregular outlines for biological/organic structures; use hatching as "
@@ -373,6 +376,8 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ],
         "response_format": {"type": "json_object"},
+        # Qwen3 flash is much faster in non-thinking mode for structured drawing plans.
+        "enable_thinking": False,
     }
     timeout = min(float(settings.board_director_timeout_seconds), MODEL_TIMEOUT_SECONDS)
     url = settings.board_director_base_url.rstrip("/") + "/chat/completions"
@@ -471,12 +476,293 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     raise IntentHandlingError("Board director failed", code="qwen_unavailable", retryable=True)
 
 
-def validate_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+_COLOR_ROLES = {"primary", "secondary", "blue", "yellow", "red", "green"}
+_COLOR_ALIASES = {
+    "white": "primary",
+    "black": "primary",
+    "grey": "secondary",
+    "gray": "secondary",
+    "orange": "yellow",
+    "purple": "blue",
+    "brown": "red",
+    "pink": "red",
+}
+_CLOSED_KINDS = {"polygon", "rectangle", "ellipse"}
+
+
+def _repair_color(value: Any, default: str = "primary") -> str:
+    if not isinstance(value, str):
+        return default
+    text = value.strip()
+    lowered = text.lower()
+    if lowered in _COLOR_ROLES:
+        return lowered
+    if (
+        len(text) == 7
+        and text.startswith("#")
+        and all(ch in "0123456789abcdefABCDEF" for ch in text[1:])
+    ):
+        return "#" + text[1:].upper()
+    return _COLOR_ALIASES.get(lowered, default)
+
+
+def _clamp(value: Any, low: float, high: float, default: float | None = None) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(high, max(low, number))
+
+
+def _repair_path_segments(raw_segments: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_segments, list):
+        return []
+    repaired: list[dict[str, Any]] = []
+    for raw in raw_segments:
+        if not isinstance(raw, dict):
+            continue
+        seg = dict(raw)
+        op = str(seg.get("op") or "").lower()
+        if op not in {"move", "line", "quad", "cubic", "arc", "close"}:
+            continue
+        if op in {"move", "line"}:
+            if not isinstance(seg.get("point"), dict):
+                continue
+        elif op == "quad":
+            if not isinstance(seg.get("control"), dict) or not isinstance(seg.get("point"), dict):
+                if isinstance(seg.get("point"), dict):
+                    seg["op"] = "line"
+                else:
+                    continue
+        elif op == "cubic":
+            if (
+                not isinstance(seg.get("c1"), dict)
+                or not isinstance(seg.get("c2"), dict)
+                or not isinstance(seg.get("point"), dict)
+            ):
+                if isinstance(seg.get("point"), dict):
+                    seg["op"] = "line"
+                else:
+                    continue
+        elif op == "arc":
+            required = ("center", "rx", "ry", "start_angle", "sweep_angle")
+            if any(seg.get(key) is None for key in required):
+                continue
+        repaired.append(seg)
+    if repaired and str(repaired[0].get("op")) == "close":
+        return []
+    return repaired
+
+
+def _repair_element(raw: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    element = dict(raw)
+    kind = str(element.get("kind") or "").strip().lower()
+    if kind in {"circle", "oval"}:
+        kind = "ellipse"
+    if kind not in {
+        "line", "polyline", "polygon", "rectangle", "ellipse", "arc",
+        "quad_bezier", "cubic_bezier", "path", "text", "arrow",
+    }:
+        # Leave unsupported kinds untouched so strict validation can reject them
+        # and trigger the normal bounded correction retry.
+        return element
+    geometry = element.get("geometry")
+    if not isinstance(geometry, dict):
+        return element
+    geometry = dict(geometry)
+    if kind == "ellipse":
+        radius = geometry.get("radius", geometry.get("r"))
+        if radius is not None:
+            geometry.setdefault("rx", radius)
+            geometry.setdefault("ry", radius)
+        if "center" not in geometry and isinstance(geometry.get("position"), dict):
+            geometry["center"] = geometry["position"]
+    if kind == "path":
+        segments = _repair_path_segments(geometry.get("segments"))
+        if not segments:
+            return None
+        geometry["segments"] = segments
+    if kind == "text":
+        text = geometry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        geometry["text"] = text[:500]
+        if "font_scale" in geometry:
+            font_scale = _clamp(geometry.get("font_scale"), 0.5, 2.5)
+            if font_scale is None:
+                geometry.pop("font_scale", None)
+            else:
+                geometry["font_scale"] = font_scale
+        if "align" in geometry and geometry.get("align") not in {"left", "center", "right"}:
+            geometry.pop("align", None)
+
+    segment_list = geometry.get("segments") if kind == "path" else None
+    closed = (
+        kind in _CLOSED_KINDS
+        or (kind == "polyline" and bool(geometry.get("closed")))
+        or (
+            kind == "path"
+            and isinstance(segment_list, list)
+            and any(str(seg.get("op")) == "close" for seg in segment_list if isinstance(seg, dict))
+        )
+    )
+    style = element.get("style")
+    style = dict(style) if isinstance(style, dict) else {}
+    if "stroke_width" in style:
+        width = _clamp(style.get("stroke_width"), 0.2, 4.0)
+        style["stroke_width"] = width if width is not None else 1.0
+    if "stroke_color" in style:
+        style["stroke_color"] = _repair_color(style.get("stroke_color"))
+    if "fill_color" in style:
+        style["fill_color"] = _repair_color(style.get("fill_color"))
+    for key in ("stroke_opacity", "fill_opacity"):
+        if key in style:
+            opacity = _clamp(style.get(key), 0.0, 1.0)
+            if opacity is None:
+                style.pop(key, None)
+            else:
+                style[key] = opacity
+    if "dash" in style:
+        raw_dash = style.get("dash")
+        if isinstance(raw_dash, list):
+            dash = [
+                value
+                for value in (
+                    _clamp(item, 0.05, 50.0) for item in raw_dash[:16]
+                )
+                if value is not None
+            ]
+            if dash:
+                style["dash"] = dash
+            else:
+                style.pop("dash", None)
+        else:
+            style.pop("dash", None)
+    for key, allowed in (
+        ("line_cap", {"butt", "round", "square"}),
+        ("line_join", {"miter", "round", "bevel"}),
+    ):
+        if key in style and style.get(key) not in allowed:
+            style.pop(key, None)
+    if not closed:
+        style.pop("fill_color", None)
+        style.pop("fill_opacity", None)
+
+    raw_id = str(element.get("id") or f"element_{index + 1}").strip()
+    clean_id = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in raw_id)[:64]
+    if not clean_id or not clean_id[0].isalnum():
+        clean_id = f"element_{index + 1}"
+
+    stage = int(_clamp(element.get("stage"), 1, 12, 1) or 1)
+    layer = int(_clamp(element.get("layer"), 0, 5, 1) or 0)
+    duration = int(_clamp(element.get("duration_ms"), 60, 6000, 500) or 500)
+    delay = int(_clamp(element.get("delay_ms"), 0, 4000, 0) or 0)
+
+    return {
+        "id": clean_id,
+        "kind": kind,
+        "geometry": geometry,
+        "style": style,
+        "layer": layer,
+        "stage": stage,
+        "duration_ms": duration,
+        "delay_ms": delay,
+    }
+
+
+def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Repair common model deviations before strict protocol validation."""
+    source = dict(plan)
+    raw_elements = source.get("elements") if isinstance(source.get("elements"), list) else []
+    elements: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for index, raw in enumerate(raw_elements):
+        element = _repair_element(raw, index)
+        if element is None:
+            continue
+        element_id = element["id"]
+        if element_id in used_ids:
+            suffix = 2
+            while f"{element_id}_{suffix}" in used_ids:
+                suffix += 1
+            element_id = f"{element_id}_{suffix}"[:64]
+            element["id"] = element_id
+        used_ids.add(element_id)
+        elements.append(element)
+
+    if not elements:
+        return source
+
+    raw_stages = source.get("stages") if isinstance(source.get("stages"), list) else []
+    original_stages: dict[int, dict[str, Any]] = {}
+    for raw_stage in raw_stages:
+        if not isinstance(raw_stage, dict):
+            continue
+        stage_num = int(_clamp(raw_stage.get("stage"), 1, 12, 1) or 1)
+        original_stages[stage_num] = raw_stage
+
+    by_stage: dict[int, list[str]] = {}
+    for element in elements:
+        by_stage.setdefault(int(element["stage"]), []).append(str(element["id"]))
+
+    stages: list[dict[str, Any]] = []
+    for stage_num in sorted(by_stage):
+        original = original_stages.get(stage_num, {})
+        description = str(original.get("description") or "")[:240]
+        pause = int(_clamp(original.get("pause_ms"), 0, 3000, 0) or 0)
+        stages.append(
+            {
+                "stage": stage_num,
+                "description": description,
+                "element_ids": by_stage[stage_num],
+                "pause_ms": pause,
+            }
+        )
+
+    title = source.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = "Lesson illustration"
+    repaired: dict[str, Any] = {
+        "protocol": "clasrum.drawing",
+        "version": 1,
+        "title": title[:200],
+        "elements": elements,
+        "stages": stages,
+    }
+
+    focus = source.get("focus")
+    if isinstance(focus, dict):
+        target_ids = focus.get("target_ids")
+        repaired["focus"] = {
+            **focus,
+            "target_ids": [
+                str(target) for target in target_ids if str(target) in used_ids
+            ] if isinstance(target_ids, list) else [],
+        }
+    triggers = source.get("triggers")
+    if isinstance(triggers, list):
+        repaired["triggers"] = [
+            trigger
+            for trigger in triggers
+            if isinstance(trigger, dict) and str(trigger.get("target")) in used_ids
+        ]
+    return repaired
+
+
+def validate_drawing_plan(plan: Mapping[str, Any], *, repair: bool = False) -> dict[str, Any]:
     """Validate + normalize a generative drawing plan (protocol v1).
+
+    Args:
+        plan: the raw plan dict from the model.
+        repair: if True, apply model deviation repairs before strict validation.
 
     Returns the cleaned plan payload ready for the ``draw_plan`` event.
     Raises :class:`IntentHandlingError` with a model-actionable message.
     """
+    if repair:
+        plan = _repair_drawing_plan(plan)
     try:
         parsed = parse_drawing_plan(plan)
     except DrawingPlanError as exc:
@@ -728,7 +1014,7 @@ class BoardIntentHandler:
                 # Transport/model failures are not corrected by re-prompting.
                 return None, exc
             try:
-                validated = validate_drawing_plan(raw_plan)
+                validated = validate_drawing_plan(raw_plan, repair=True)
                 logger.info(
                     "drawing plan validation_result ok=true attempt=%d elements=%s stages=%s",
                     attempt + 1,

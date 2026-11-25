@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     # --- Qwen Realtime ----------------------------------------------------
     qwen_api_key: str = ""
     qwen_realtime_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    qwen_model: str = "qwen-omni-turbo-realtime"
-    qwen_voice: str = "Cherry"
+    qwen_model: str = "qwen3.8-omni-flash-realtime"
+    qwen_voice: str = "Katerina"
     qwen_input_sample_rate: int = 16000
     qwen_output_sample_rate: int = 24000
     qwen_turn_detection: str = "server_vad"
@@ -64,17 +64,17 @@ class Settings(BaseSettings):
     qwen_handshake_timeout_seconds: float = 20.0
 
     # --- Structured notes generation -------------------------------------
-    notes_model: str = "qwen-plus"
+    notes_model: str = "qwen3.7-flash"
     notes_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     notes_api_key: str = ""  # falls back to qwen_api_key
     notes_timeout_seconds: float = 120.0
     notes_max_transcript_chars: int = 60000
 
     # --- Board Director (intent -> structured board plan) ------------------
-    board_director_model: str = "qwen3.8-flash"  # Flash-tier director for drawing plans
+    board_director_model: str = "qwen3.7-flash"  # Flash-tier director for drawing plans
     board_director_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     board_director_api_key: str = ""  # falls back to effective_notes_api_key / qwen_api_key
-    board_director_timeout_seconds: float = 20.0
+    board_director_timeout_seconds: float = 90.0
 
     # --- board / lesson behaviour -----------------------------------------
     board_snapshot_interval_events: int = 40

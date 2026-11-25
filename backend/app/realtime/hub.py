@@ -768,7 +768,7 @@ class LessonRealtimeHub:
                 director_busy = (
                     socket.last_board_director_started_at > 0
                     and socket.last_board_director_finished_at < socket.last_board_director_started_at
-                    and (now_mono - socket.last_board_director_started_at) < 45
+                    and (now_mono - socket.last_board_director_started_at) < 120
                 )
                 can_nudge = (
                     not socket.closed.is_set()
@@ -1081,7 +1081,7 @@ class LessonRealtimeHub:
         finished = socket.last_board_director_finished_at
         if finished >= started:
             return False
-        return (now - started) < 45
+        return (now - started) < 120
 
     def _startup_status_message(self, socket: LessonSocket) -> str:
         if socket.last_board_event_at > 0 or socket.startup_has_board_event:

@@ -273,7 +273,154 @@ class ToolRegistry:
             return await self._execute_board(
                 db, lesson_id, spec, args, source=source, animate=animate
             )
+        # -----------------------------------------------------------------------
+        # new: create_board_visual — intent kind but executed via the board director
+        # -----------------------------------------------------------------------
+        if name == "create_board_visual":
+            return await self._execute_create_board_visual(
+                db, lesson_id, spec, args, source=source, animate=animate
+            )
         return await self._execute_lesson(db, lesson_id, spec, args)
+
+    # -----------------------------------------------------------------------
+    # Internal handler for create_board_visual: delegates to the board director
+    # (Qwen3.7-Flash) and persists the drawing plan as a draw_plan event.
+    # -----------------------------------------------------------------------
+    async def _execute_create_board_visual(
+        self,
+        db: AsyncSession,
+        lesson_id: str,
+        spec: ToolSpec,
+        args: CreateBoardVisualArgs,
+        *,
+        source: str,
+        animate: bool,
+    ) -> dict[str, Any]:
+        from app.board.intent_handler import (
+            BoardIntentHandler,
+            call_board_director,
+            IntentHandlingError,
+        )
+        from app.config import get_settings
+
+        name = spec.name
+        intent = _clean_text(args.instruction, 1000)
+        if not intent:
+            return {"ok": False, "error": "invalid_arguments", "message": "intent is required", "retryable": True}
+        focus = "new_content"
+        region_hint = args.related_concept
+        if region_hint is not None and str(region_hint) not in {"left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"}:
+            region_hint = None
+
+        logger.info(
+            "create_board_visual received lesson=%s visual_type=%s complexity=%s intent=%s",
+            lesson_id,
+            args.visual_type,
+            args.complexity,
+            intent[:120],
+        )
+
+        try:
+            document = await self._board.reconstruct_document(db, lesson_id)
+        except Exception:
+            document = {"elements": [], "last_sequence": 0}
+        board_summary = summarize_board(document)
+        lesson_state = await fetch_lesson_context(db, lesson_id)
+        transcript = await fetch_recent_transcript(db, lesson_id)
+
+        t0 = __import__("time").perf_counter()
+        try:
+            raw_plan = await call_board_director(
+                IntentContext(
+                    board_summary=board_summary,
+                    lesson_state=lesson_state,
+                    transcript=transcript,
+                    intent=intent,
+                    focus=focus,
+                    region_hint=str(region_hint) if region_hint else None,
+                )
+            )
+        except IntentHandlingError as exc:
+            logger.warning("create_board_visual director failed lesson=%s: %s", lesson_id, exc.message)
+            return exc.to_tool_result()
+        duration_ms = (__import__("time").perf_counter() - t0) * 1000
+        logger.info(
+            "create_board_visual director total_ms=%.1f lesson=%s", duration_ms, lesson_id,
+        )
+
+        # Validate + repair the drawing plan.
+        try:
+            validated = validate_drawing_plan(raw_plan, repair=True)
+        except IntentHandlingError as exc:
+            logger.warning(
+                "create_board_visual plan validation failed lesson=%s: %s", lesson_id, exc.message
+            )
+            return exc.to_tool_result()
+
+        # Fit the plan to the full board region.
+        region = get_settings().board_default_region or (0.0, 0.0, 1.0, 1.0)
+        plan_payload = fit_plan_to_region(validated, region)
+
+        payload = {
+            **plan_payload,
+            "context": {
+                "topic": lesson_state.get("topic"),
+                "subject": lesson_state.get("subject"),
+                "current_concept": lesson_state.get("current_concept")
+                or lesson_state.get("current_concept_title"),
+                "region": region_hint or "full",
+                "intent": intent,
+                "visual_type": args.visual_type,
+                "complexity": args.complexity,
+            },
+        }
+
+        record = await self._board.append_event(
+            db,
+            lesson_id,
+            "draw_plan",
+            payload,
+            source=source,
+            animate=animate,
+        )
+
+        id_map = {
+            element["id"]: record.element_id
+            for element in plan_payload.get("elements", [])
+            if isinstance(element, dict) and element.get("id")
+        }
+        # Register transcript triggers and resolve focus via the BoardIntentHandler.
+        handler = BoardIntentHandler(
+            board=self._board,
+            registry=self,
+            trigger_system=self._trigger_system,
+        )
+        registered_triggers = await handler._register_triggers(
+            db, lesson_id, plan_payload, id_map,
+        )
+        focus_out = BoardIntentHandler._resolve_focus(plan_payload, id_map)
+
+        logger.info(
+            "create_board_visual completed lesson=%s elements=%d duration_ms=%d",
+            lesson_id,
+            len(plan_payload.get("elements", [])),
+            plan_total_duration_ms(plan_payload),
+        )
+        return {
+            "ok": True,
+            "intent": intent,
+            "event_id": record.event_id,
+            "sequence": record.sequence,
+            "element_id": record.element_id,
+            "plan": {
+                "title": plan_payload.get("title"),
+                "element_count": len(plan_payload.get("elements", [])),
+                "stage_count": len(plan_payload.get("stages", [])),
+                "duration_ms": plan_total_duration_ms(plan_payload),
+            },
+            "focus": focus_out,
+            "triggers_registered": registered_triggers,
+        }
 
     async def _execute_intent(
         self,
