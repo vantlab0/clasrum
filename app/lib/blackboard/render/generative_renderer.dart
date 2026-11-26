@@ -170,7 +170,7 @@ class GenerativeDrawingRenderer {
     final fill = style?.fillColor;
     if (fill == null) return null;
     final color = ChalkPalette.resolve(fill, fallback: ChalkPalette.primary);
-    final opacity = style?.fillOpacity ?? 0.18;
+    final opacity = (style?.fillOpacity ?? 0.18).clamp(0.0, 0.35);
     return ChalkPalette.withOpacity(color, opacity);
   }
 

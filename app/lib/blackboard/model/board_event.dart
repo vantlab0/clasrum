@@ -122,6 +122,13 @@ class WriteTextPayload extends BoardPayload {
         align = _str(raw['align']),
         fontScale = asDouble(raw['font_scale']),
         maxWidth = asDouble(raw['max_width']),
+        headingLevel = (asDouble(raw['heading_level']) ?? 0).round().clamp(0, 6),
+        highlight = raw['highlight'] == true,
+        highlightColor = _str(raw['highlight_color']),
+        writingStyle = _str(raw['writing_style']),
+        sidePreference = _str(raw['side_preference']),
+        positionHint = _str(raw['position_hint']),
+        latex = _str(raw['latex']),
         _warnings = <String>[
           if (_str(raw['text']) == null) 'write_text.text is required',
         ];
@@ -138,6 +145,13 @@ class WriteTextPayload extends BoardPayload {
   final String? align;
   final double? fontScale;
   final double? maxWidth;
+  final int headingLevel; // 0 = not a heading, 1-6 = H1..H6
+  final bool highlight;
+  final String? highlightColor;
+  final String? writingStyle;
+  final String? sidePreference;
+  final String? positionHint;
+  final String? latex;
 
   final List<String> _warnings;
 
@@ -153,7 +167,7 @@ class WriteHeadingPayload extends BoardPayload {
   WriteHeadingPayload(super.raw)
       : text = _str(raw['text']),
         position = BoardPoint.tryParse(raw['position']),
-        level = (asDouble(raw['level']) ?? 1).round().clamp(1, 2),
+        level = (asDouble(raw['level']) ?? 1).round().clamp(1, 6),
         color = _str(raw['color']),
         underline = raw['underline'] == true,
         _warnings = <String>[

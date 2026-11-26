@@ -56,19 +56,60 @@ class ChalkTextStyleSpec {
 
   static const Map<String, ChalkTextStyleSpec> _specs =
       <String, ChalkTextStyleSpec>{
+    'h1': ChalkTextStyleSpec(
+      name: 'h1',
+      heightFraction: 0.064, // 2.0 * body
+      weight: FontWeight.w700,
+      letterSpacingEm: 0.02,
+    ),
+    'h2': ChalkTextStyleSpec(
+      name: 'h2',
+      heightFraction: 0.053, // 1.65 * body
+      weight: FontWeight.w650,
+      letterSpacingEm: 0.018,
+    ),
+    'h3': ChalkTextStyleSpec(
+      name: 'h3',
+      heightFraction: 0.045, // 1.4 * body
+      weight: FontWeight.w600,
+      letterSpacingEm: 0.015,
+    ),
+    'h4': ChalkTextStyleSpec(
+      name: 'h4',
+      heightFraction: 0.038, // 1.2 * body
+      weight: FontWeight.w550,
+      letterSpacingEm: 0.012,
+    ),
+    'h5': ChalkTextStyleSpec(
+      name: 'h5',
+      heightFraction: 0.034, // 1.05 * body
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.01,
+    ),
+    'h6': ChalkTextStyleSpec(
+      name: 'h6',
+      heightFraction: 0.030, // 0.95 * body
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.008,
+    ),
     'heading': ChalkTextStyleSpec(
       name: 'heading',
-      heightFraction: 0.056,
-      weight: FontWeight.w600,
+      heightFraction: 0.064,
+      weight: FontWeight.w700,
       letterSpacingEm: 0.02,
     ),
     'subheading': ChalkTextStyleSpec(
       name: 'subheading',
-      heightFraction: 0.043,
-      weight: FontWeight.w500,
-      letterSpacingEm: 0.015,
+      heightFraction: 0.053,
+      weight: FontWeight.w650,
+      letterSpacingEm: 0.018,
     ),
     'body': ChalkTextStyleSpec(name: 'body', heightFraction: 0.032),
+    'small': ChalkTextStyleSpec(
+      name: 'small',
+      heightFraction: 0.026,
+      opacity: 0.95,
+    ),
     'definition': ChalkTextStyleSpec(
       name: 'definition',
       heightFraction: 0.032,
@@ -100,6 +141,12 @@ class ChalkTextStyleSpec {
       letterSpacingEm: 0,
       lineHeight: 1.35,
     ),
+    'equation': ChalkTextStyleSpec(
+      name: 'equation',
+      heightFraction: 0.038,
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.005,
+    ),
   };
 
   /// Style spec for a CONTRACTS §3.1 style name (`heading`, `body`, `code`…).
@@ -109,9 +156,18 @@ class ChalkTextStyleSpec {
     bool definitionTerm = false,
   }) {
     if (definitionTerm) return _specs['definitionTerm']!;
-    final normalized = (style ?? 'body').toLowerCase();
+    final normalized = (style ?? 'body').toLowerCase().trim();
+    if (normalized.startsWith('h') && normalized.length == 2) {
+      final n = int.tryParse(normalized.substring(1));
+      if (n != null && n >= 1 && n <= 6) return _specs['h$n']!;
+    }
     if (normalized == 'heading') {
-      return headingLevel <= 1 ? _specs['heading']! : _specs['subheading']!;
+      final level = headingLevel.clamp(1, 6);
+      return _specs['h$level'] ?? _specs['heading']!;
+    }
+    if (normalized == 'subheading') {
+      final level = headingLevel <= 1 ? 2 : headingLevel.clamp(1, 6);
+      return _specs['h$level'] ?? _specs['subheading']!;
     }
     if (normalized == 'numbered') return _specs['numbered']!;
     return _specs[normalized] ?? _specs['body']!;

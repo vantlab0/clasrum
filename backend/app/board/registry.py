@@ -269,15 +269,12 @@ class ToolRegistry:
             )
             return _invalid_arguments(message)
 
-        if spec.kind == "board":
-            return await self._execute_board(
+        if spec.name == "create_board_visual":
+            return await self._execute_create_board_visual(
                 db, lesson_id, spec, args, source=source, animate=animate
             )
-        # -----------------------------------------------------------------------
-        # new: create_board_visual — intent kind but executed via the board director
-        # -----------------------------------------------------------------------
-        if name == "create_board_visual":
-            return await self._execute_create_board_visual(
+        if spec.kind == "board":
+            return await self._execute_board(
                 db, lesson_id, spec, args, source=source, animate=animate
             )
         return await self._execute_lesson(db, lesson_id, spec, args)
@@ -298,13 +295,20 @@ class ToolRegistry:
     ) -> dict[str, Any]:
         from app.board.intent_handler import (
             BoardIntentHandler,
-            call_board_director,
+            IntentContext,
             IntentHandlingError,
+            call_board_director,
+            fetch_lesson_context,
+            fetch_recent_transcript,
+            fit_plan_to_region,
+            plan_total_duration_ms,
+            summarize_board,
+            validate_drawing_plan,
         )
         from app.config import get_settings
 
         name = spec.name
-        intent = _clean_text(args.instruction, 1000)
+        intent = str(getattr(args, "instruction", "") or "").strip()[:1000]
         if not intent:
             return {"ok": False, "error": "invalid_arguments", "message": "intent is required", "retryable": True}
         focus = "new_content"
@@ -357,8 +361,27 @@ class ToolRegistry:
             )
             return exc.to_tool_result()
 
-        # Fit the plan to the full board region.
-        region = get_settings().board_default_region or (0.0, 0.0, 1.0, 1.0)
+        # Fit the plan into an available board region (no full-board overwrite).
+        from app.board.layout import BlackboardLayoutManager
+        from app.board.drawing_protocol import plan_element_bounds
+
+        boxes = plan_element_bounds(validated)
+        if boxes:
+            min_x = min(b[0] for b in boxes)
+            min_y = min(b[1] for b in boxes)
+            max_x = max(b[0] + b[2] for b in boxes)
+            max_y = max(b[1] + b[3] for b in boxes)
+            plan_w = max(0.1, max_x - min_x)
+            plan_h = max(0.1, max_y - min_y)
+        else:
+            plan_w, plan_h = 0.52, 0.36
+
+        manager = BlackboardLayoutManager(document)
+        preferred_region = str(region_hint) if region_hint else None
+        _, region_rect = manager.find_region_for_visual(
+            width=plan_w, height=plan_h, preferred=preferred_region
+        )
+        region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
         plan_payload = fit_plan_to_region(validated, region)
 
         payload = {
@@ -660,6 +683,17 @@ class ToolRegistry:
         assert event_type is not None  # board specs always map to an event type
         payload = args.build_payload()
         element_id = getattr(args, "element_id", None)
+
+        # Direct board writing: deterministic layout, no AI coordinates.
+        if spec.name == "board_write_on_board" or payload.get("position_hint"):
+            try:
+                document = await self._board.reconstruct_document(db, lesson_id)
+            except Exception:
+                document = {"elements": []}
+            from app.board.layout import BlackboardLayoutManager
+
+            manager = BlackboardLayoutManager(document)
+            payload = manager.place_text(payload)
 
         if event_type == EVENT_PLOT_FUNCTION:
             payload = await self._prepare_plot_function(db, lesson_id, args, payload)

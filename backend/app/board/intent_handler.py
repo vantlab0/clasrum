@@ -705,7 +705,9 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
 
     by_stage: dict[int, list[str]] = {}
     for element in elements:
-        by_stage.setdefault(int(element["stage"]), []).append(str(element["id"]))
+        stage_num = int(_clamp(element.get("stage"), 1, 12, 1) or 1)
+        element["stage"] = stage_num
+        by_stage.setdefault(stage_num, []).append(str(element.get("id", "")))
 
     stages: list[dict[str, Any]] = []
     for stage_num in sorted(by_stage):
@@ -932,9 +934,23 @@ class BoardIntentHandler:
             assert model_error is not None
             raise model_error
 
-        region = layout.REGION_RECTS.get(
-            str(region_hint or "full"), layout.REGION_RECTS["full"]
+        # Place the visual in an available region, not over existing content.
+        boxes = plan_element_bounds(plan_payload)
+        if boxes:
+            min_x = min(b[0] for b in boxes)
+            min_y = min(b[1] for b in boxes)
+            max_x = max(b[0] + b[2] for b in boxes)
+            max_y = max(b[1] + b[3] for b in boxes)
+            plan_w = max(0.1, max_x - min_x)
+            plan_h = max(0.1, max_y - min_y)
+        else:
+            plan_w, plan_h = 0.52, 0.36
+        manager = layout.BlackboardLayoutManager(document)
+        preferred_region = str(region_hint) if region_hint else None
+        _, region_rect = manager.find_region_for_visual(
+            width=plan_w, height=plan_h, preferred=preferred_region
         )
+        region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
         plan_payload = fit_plan_to_region(plan_payload, region)
 
         payload = {

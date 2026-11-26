@@ -872,79 +872,56 @@ class WriteOnBoardArgs(StrictModel):
     related_concept: IdText | None = Field(
         default=None, description="Optional lesson concept identifier."
     )
+    side_preference: Literal["auto", "left", "right"] = Field(
+        default="auto",
+        description="Preferred horizontal side for layout when space allows. 'auto' lets the layout manager decide.",
+    )
+
+    def _heading_level(self) -> int:
+        """Return the heading level 1-6 for h1-h6 styles, 0 otherwise."""
+        style = self.style.strip().lower()
+        if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            return max(1, min(6, int(style[1:])))
+        return 0
 
     def build_payload(self) -> dict[str, Any]:
-        # Map the visual style to a board event type and payload.
-        # The payload is always compatible with the ``write_text`` event type,
-        # which the Flutter renderer handles via the ``style`` field (heading,
-        # subheading, body, label, etc.). For ``equation`` style we include the
-        # LaTeX source in ``text`` so it appears as readable text on the board.
+        """Build a write_text-compatible payload with semantic layout hints.
+
+        Physical coordinates are assigned by BlackboardLayoutManager in the
+        registry execution path; this payload carries semantic hints only.
+        """
         style = self.style.strip().lower()
         text = self.text
+        heading_level = self._heading_level()
 
-        if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            # Heading styles map to write_text with style='heading'/'subheading'.
-            # The Flutter renderer uses the ``style`` field to determine size/position.
-            level = min(int(style[1:]), 2)  # h1->1, h2->2, h3..h6->2
-            position_payload = {"x": 0.08, "y": 0.08}  # default top-left
-            if self.position == "center":
-                position_payload = {"x": 0.5, "y": 0.08}
-            elif self.position == "right":
-                position_payload = {"x": 0.92, "y": 0.08}
-            elif self.position == "next_line":
-                position_payload = {"x": 0.08, "y": 0.22}
+        payload: dict[str, Any] = {
+            "text": text,
+            "color": self.color or "primary",
+            "highlight": self.highlight,
+            "highlight_color": self.highlight_color or "yellow",
+            "writing_style": self.writing_style,
+            "related_concept": self.related_concept,
+            # Semantic layout hints consumed by BlackboardLayoutManager.
+            "position_hint": self.position,
+            "side_preference": self.side_preference,
+        }
 
-            payload = {
-                "text": text,
-                "style": "heading" if level == 1 else "subheading",
-                "position": position_payload,
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+        if heading_level > 0:
+            # Preserve the exact level for Flutter typography (H1-H6).
+            payload["style"] = "heading" if heading_level == 1 else "subheading"
+            payload["heading_level"] = heading_level
         elif style == "equation":
-            # Equation style: include LaTeX in ``text`` so it renders as readable
-            # chalk text on the board. The ``latex`` key is also included for potential
-            # future math rendering. ``write_text`` payload requires a ``text`` field.
-            payload = {
-                "text": text,  # LaTeX expression as plain text for write_text
-                "style": "code",  # code style renders monospace; will contain LaTeX expression
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-                # Also include ``latex`` key for any downstream consumer that expects it.
-                "latex": text,
-            }
+            payload["style"] = "equation"
+            payload["latex"] = text
         elif style == "label":
-            # Label style: short label/text.
-            payload = {
-                "text": text,
-                "style": "label",
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+            payload["style"] = "label"
+        elif style == "small":
+            payload["style"] = "small"
         else:
-            # body, small → write_text
-            payload = {
-                "text": text,
-                "style": style,  # body or small
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+            payload["style"] = "body"
 
+        # Provide a conservative default position; layout manager will override.
+        payload.setdefault("position", {"x": 0.08, "y": 0.08})
         return payload
 
 
