@@ -65,7 +65,7 @@ class ChalkTextStyleSpec {
     'h2': ChalkTextStyleSpec(
       name: 'h2',
       heightFraction: 0.053, // 1.65 * body
-      weight: FontWeight.w650,
+      weight: FontWeight.w600,
       letterSpacingEm: 0.018,
     ),
     'h3': ChalkTextStyleSpec(
@@ -77,7 +77,7 @@ class ChalkTextStyleSpec {
     'h4': ChalkTextStyleSpec(
       name: 'h4',
       heightFraction: 0.038, // 1.2 * body
-      weight: FontWeight.w550,
+      weight: FontWeight.w500,
       letterSpacingEm: 0.012,
     ),
     'h5': ChalkTextStyleSpec(
@@ -101,7 +101,7 @@ class ChalkTextStyleSpec {
     'subheading': ChalkTextStyleSpec(
       name: 'subheading',
       heightFraction: 0.053,
-      weight: FontWeight.w650,
+      weight: FontWeight.w600,
       letterSpacingEm: 0.018,
     ),
     'body': ChalkTextStyleSpec(name: 'body', heightFraction: 0.032),
