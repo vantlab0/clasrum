@@ -11,6 +11,7 @@ import pytest
 from app.db.models import Lesson, User
 from app.db.session import session_scope
 from app.realtime.hub import (
+    CLIENT_BOARD_CLEAR,
     CLIENT_BOARD_VIEWPORT_FULL,
     LessonRealtimeHub,
     LessonSocket,
@@ -252,6 +253,54 @@ async def test_visible_board_full_wipes_once_and_nudges_tutor() -> None:
     ]
     assert len(later_clears) == 1
     assert len(qwen.prompt_texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_board_clear_wipes_once_without_nudging_tutor() -> None:
+    lesson_id = await _create_lesson()
+    async with session_scope() as db:
+        lesson = await db.get(Lesson, lesson_id)
+        assert lesson is not None
+        lesson.last_board_sequence = 4
+        await db.commit()
+
+    hub = LessonRealtimeHub()
+    ws = FakeWs()
+    qwen = FakeQwen()
+    socket = LessonSocket(
+        websocket=ws,
+        lesson_id=lesson_id,
+        student_id="student-1",
+        lease_id="lease-1",
+        qwen=qwen,
+    )
+    async with hub._lock:
+        hub._sockets[lesson_id] = socket
+        hub._all.setdefault(lesson_id, set()).add(socket)
+
+    request = json.dumps({"type": CLIENT_BOARD_CLEAR, "sequence": 4})
+    await hub._handle_client_text(socket, lesson_id, request)
+    clears = [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
+    assert len(clears) == 1
+    assert qwen.prompt_texts == []
+
+    # Duplicate and stale requests cannot wipe the freshly recycled board.
+    await hub._handle_client_text(socket, lesson_id, request)
+    await hub._handle_client_text(
+        socket,
+        lesson_id,
+        json.dumps({"type": CLIENT_BOARD_CLEAR, "sequence": 3}),
+    )
+    later_clears = [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
+    assert len(later_clears) == 1
 
 
 @pytest.mark.asyncio

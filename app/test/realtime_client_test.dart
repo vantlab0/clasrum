@@ -70,6 +70,14 @@ void main() {
       expect(noId.containsKey('request_id'), isFalse);
     });
 
+    test('board.clear carries a client sequence for idempotency', () {
+      expect(
+        RealtimeClient.boardClearPayload(sequence: 12),
+        <String, dynamic>{'type': 'board.clear', 'sequence': 12},
+      );
+      expect(RealtimeClient.boardClearPayload(sequence: -1)['sequence'], 0);
+    });
+
     test('viewport_full report is clamped and carries measured rect', () {
       final payload = RealtimeClient.viewportFullPayload(
         sequence: -3,

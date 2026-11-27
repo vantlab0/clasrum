@@ -352,6 +352,7 @@ Client→server:
 | `board.request_snapshot` | `{}` |
 | `board.backfill` | `{after_sequence}` |
 | `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset}` — measured visible board is full; server persists one system-owned clear |
+| `board.clear` | `{sequence}` — explicit student clear; server persists one system-owned clear and broadcasts it through the normal event path |
 | `ping` | `{}` |
 
 Typed questions are **not** part of the realtime contract: Qwen-Omni realtime

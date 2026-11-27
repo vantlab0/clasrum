@@ -470,6 +470,42 @@ void main() {
       expect(zoomed.h, closeTo(normal.h, 0.02));
     });
 
+    testWidgets('narrow board ignores tiny backend wrap widths', (tester) async {
+      final document = BoardDocument.empty(sessionId: 'sess_dup').apply(_event(
+        sequence: 1,
+        id: 'wrapped_text',
+        type: 'write_text',
+        payload: <String, dynamic>{
+          ..._textPayload(
+            'Photosynthesis converts sunlight into chemical energy for the plant',
+            'body',
+          ),
+          'max_width': 0.15,
+        },
+      ));
+      final controller = BlackboardController(
+        animationsEnabled: false,
+        initialDocument: document,
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 390,
+            height: 780,
+            child: BlackboardView(controller: controller),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      final bounds = controller.renderCache.bounds['wrapped_text'];
+      expect(bounds, isNotNull);
+      expect(bounds!.w, greaterThan(0.5));
+      expect(bounds.h, lessThan(0.25));
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('mobile portrait generative diagram labels stay on board',
         (tester) async {
       final controller = BlackboardController(animationsEnabled: false)

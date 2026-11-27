@@ -20,6 +20,7 @@ import 'render/legacy_drawing_renderer.dart';
 import 'runtime/animation_scheduler.dart';
 import 'runtime/blackboard_controller.dart';
 import 'runtime/board_viewport_controller.dart';
+import 'runtime/board_vertical_layout.dart';
 
 /// True when a `draw_diagram` payload uses the legacy step list.
 ///
@@ -30,6 +31,126 @@ bool boardDiagramUsesLegacySteps(Map<String, dynamic> payload) =>
 
 /// Small breathing room around painted chalk text, in logical pixels.
 const double _textPaddingPx = 4.0;
+
+/// On narrow screens never let an explicit (often tiny backend column) wrap
+/// width squeeze prose into a tall stack. The board is reflowed vertically, so
+/// a generous width is safe and keeps every line readable.
+const double _narrowMinWrapFraction = 0.78;
+
+bool _isNarrowBoard(Size size) => BoardVerticalLayout.isNarrow(size);
+
+String? _textForTextElement(BoardElement element) {
+  final payload = element.payload;
+  final text = payload['text'] as String?;
+  if (text != null && text.isNotEmpty) return text;
+  if (payload.containsKey('term') && payload.containsKey('text')) {
+    return '${payload['term']}: ${payload['text']}';
+  }
+  if (payload.containsKey('items')) {
+    final items = payload['items'];
+    if (items is List) return items.join('\n');
+  }
+  return null;
+}
+
+String _styleForType(String type) {
+  switch (type) {
+    case 'write_heading':
+      return 'heading';
+    case 'write_definition':
+      return 'definition';
+    case 'write_bullet_list':
+      return 'bullet';
+    default:
+      return 'body';
+  }
+}
+
+int _headingLevel(BoardElement element) {
+  final raw = element.payload['heading_level'] ??
+      element.payload['level'] ??
+      element.payload['style'];
+  if (raw is String) {
+    final value = raw.toLowerCase();
+    if (value.length == 2 && value[0] == 'h') {
+      return (int.tryParse(value[1]) ?? 1).clamp(1, 6);
+    }
+  }
+  return (asDouble(raw)?.round() ?? 1).clamp(1, 6);
+}
+
+/// Logical-pixel wrap width shared by painting and measurement so the reflow
+/// heights always match the chalk that is actually drawn.
+double _textWrapWidthPx({
+  required BoardTransform transform,
+  required Map<String, dynamic> payload,
+  required double originPx,
+  required bool narrow,
+}) {
+  final maxWidthNorm = (payload['max_width'] as num?)?.toDouble();
+  final scaledWidth = transform.width * transform.viewportScale;
+  var width = maxWidthNorm != null
+      ? maxWidthNorm * scaledWidth - 2 * _textPaddingPx
+      : transform.sx(1.0) - originPx - 2 * _textPaddingPx;
+  if (narrow && width < scaledWidth * _narrowMinWrapFraction) {
+    width = scaledWidth * _narrowMinWrapFraction;
+  }
+  return width.clamp(40.0, scaledWidth);
+}
+
+/// Real measured size for reflow. Text is measured with the same chalk engine
+/// and the same narrow wrap width the painter will use, so stacked blocks get
+/// their true height on the very first frame (no extra paint pass needed).
+BoardRect? _boundsForVerticalReflow({
+  required BoardElement element,
+  required BoardTransform transform,
+  required bool narrow,
+  required ChalkTextEngine textEngine,
+  required BoardBoundsRegistry bounds,
+}) {
+  final cached = bounds[element.elementId];
+  final text = _textForTextElement(element);
+  if (!narrow || text == null || text.isEmpty || element.isLatex) {
+    return cached ?? BoardBoundsEstimator.estimate(element);
+  }
+  final rawStyle = (element.style ??
+          element.payload['style'] ??
+          _styleForType(element.type))
+      .toString()
+      .toLowerCase();
+  final spec = ChalkTextStyleSpec.forName(
+    rawStyle,
+    headingLevel: _headingLevel(element),
+    definitionTerm: element.type == BoardEventType.writeDefinition.wireName,
+  );
+  final fontScale =
+      (element.payload['font_scale'] as num?)?.toDouble() ?? 1.0;
+  final fontSizePx = transform.fontPixels(spec.heightFraction) *
+      fontScale.clamp(0.5, 2.5);
+  final wrapPx = _textWrapWidthPx(
+    transform: transform,
+    payload: element.payload,
+    originPx: transform.sx(BoardVerticalLayout.sideMargin),
+    narrow: true,
+  );
+  final align = element.payload['align']?.toString();
+  final textAlign = align == 'center'
+      ? TextAlign.center
+      : align == 'right'
+          ? TextAlign.right
+          : TextAlign.left;
+  final sizePx = textEngine.measure(
+    text: text,
+    spec: spec,
+    color: ChalkPalette.resolve(element.color),
+    fontSizePx: fontSizePx,
+    maxWidthPx: wrapPx,
+    textAlign: textAlign,
+  );
+  return transform.normalizedRect(
+    Rect.fromLTWH(0, 0, sizePx.width, sizePx.height),
+  );
+}
 
 /// The tutorial board widget (CONTRACTS §10).
 ///
@@ -77,6 +198,18 @@ class BlackboardView extends StatelessWidget {
               );
             }
             final document = controller.document;
+            final narrow = _isNarrowBoard(size);
+            final reflow = BoardVerticalLayout.positions(
+              document: document,
+              narrow: narrow,
+              boundsOf: (element) => _boundsForVerticalReflow(
+                element: element,
+                transform: transform,
+                narrow: narrow,
+                textEngine: controller.renderCache.textEngine,
+                bounds: controller.renderCache.bounds,
+              ),
+            );
 
             return Stack(
               clipBehavior: Clip.hardEdge,
@@ -90,6 +223,8 @@ class BlackboardView extends StatelessWidget {
                     bounds: controller.renderCache.bounds,
                     interactive: interactive,
                     textEngine: controller.renderCache.textEngine,
+                    reflow: reflow,
+                    narrow: narrow,
                   ),
                 ),
                 // LaTeX elements are real flutter_math_fork widgets layered on
@@ -99,6 +234,7 @@ class BlackboardView extends StatelessWidget {
                   child: _LatexOverlay(
                     controller: controller,
                     transform: transform,
+                    reflow: reflow,
                   ),
                 ),
               ],
@@ -137,10 +273,15 @@ class _CombinedListenable extends Listenable {
 /// Parsed syntax trees are cached by source string: animation frames only
 /// rebuild clip rectangles, they do not reparse TeX on every repaint.
 class _LatexOverlay extends StatefulWidget {
-  const _LatexOverlay({required this.controller, required this.transform});
+  const _LatexOverlay({
+    required this.controller,
+    required this.transform,
+    required this.reflow,
+  });
 
   final BlackboardController controller;
   final BoardTransform transform;
+  final Map<String, BoardPoint> reflow;
 
   @override
   State<_LatexOverlay> createState() => _LatexOverlayState();
@@ -171,7 +312,9 @@ class _LatexOverlayState extends State<_LatexOverlay> {
 
     final position = widget.controller.animations.resolvedPosition(
       element.elementId,
-      element.position ?? BoardPoint.zero,
+      widget.reflow[element.elementId] ??
+          element.position ??
+          BoardPoint.zero,
     );
     final estimated = BoardBoundsEstimator.estimate(element);
     final width = element.size?.w ?? estimated?.w ?? 0.34;
@@ -279,6 +422,8 @@ class _BoardPainter extends CustomPainter {
     required this.bounds,
     required this.interactive,
     required this.textEngine,
+    required this.reflow,
+    required this.narrow,
   });
 
   final BoardDocument document;
@@ -287,6 +432,8 @@ class _BoardPainter extends CustomPainter {
   final BoardBoundsRegistry bounds;
   final bool interactive;
   final ChalkTextEngine textEngine;
+  final Map<String, BoardPoint> reflow;
+  final bool narrow;
 
   ChalkTextEngine get _textEngine => textEngine;
 
@@ -321,7 +468,7 @@ class _BoardPainter extends CustomPainter {
       final progress = animations.progress(element.elementId);
       final resolvedPosition = animations.resolvedPosition(
         element.elementId,
-        element.position ?? BoardPoint.zero,
+        reflow[element.elementId] ?? element.position ?? BoardPoint.zero,
       );
       final color = ChalkPalette.resolve(element.color);
 
@@ -435,19 +582,15 @@ class _BoardPainter extends CustomPainter {
 
     final fontScale = (payload['font_scale'] as num?)?.toDouble() ?? 1.0;
     final fontSizePx = transform.fontPixels(styleSpec.heightFraction) * fontScale.clamp(0.5, 2.5);
-    // TextPainter is the source of truth for wrapping. Its max width must use
-    // the same viewport scale as the font size, otherwise zooming changes the
-    // number of lines and can push text into a neighbour.
-    final maxWidthNorm = (payload['max_width'] as num?)?.toDouble();
-    final scaledWidth = transform.width * transform.viewportScale;
-    // sx(1.0) is the pixel coordinate of the board's right edge under the
-    // current viewport, so the fallback width stays in the same pixel space as
-    // the scaled font size.
-    final availableRight = transform.sx(1.0);
-    final maxWidthPx = maxWidthNorm != null
-        ? (maxWidthNorm * scaledWidth - 2 * _textPaddingPx)
-            .clamp(40.0, scaledWidth)
-        : (availableRight - px - 2 * _textPaddingPx).clamp(40.0, scaledWidth);
+    // TextPainter is the source of truth for wrapping. Its max width uses the
+    // viewport scale and, on narrow screens, a generous minimum so prose never
+    // collapses into a tall overlapping stack.
+    final maxWidthPx = _textWrapWidthPx(
+      transform: transform,
+      payload: payload,
+      originPx: px,
+      narrow: narrow,
+    );
 
     final alignStr = (payload['align'] as String?) ?? 'left';
     final textAlign = alignStr == 'center'
@@ -516,46 +659,6 @@ class _BoardPainter extends CustomPainter {
           ? BoardRect.fromPositionSize(position, BoardSize(0.2, 0.05))
           : padded,
     );
-  }
-
-  String? _textForTextElement(BoardElement element) {
-    final payload = element.payload;
-    final text = payload['text'] as String?;
-    if (text != null && text.isNotEmpty) return text;
-    if (payload.containsKey('term') && payload.containsKey('text')) {
-      return '${payload['term']}: ${payload['text']}';
-    }
-    if (payload.containsKey('items')) {
-      final items = payload['items'];
-      if (items is List) return items.join('\n');
-    }
-    return null;
-  }
-
-  String _styleForType(String type) {
-    switch (type) {
-      case 'write_heading':
-        return 'heading';
-      case 'write_definition':
-        return 'definition';
-      case 'write_bullet_list':
-        return 'bullet';
-      default:
-        return 'body';
-    }
-  }
-
-  int _headingLevel(BoardElement element) {
-    final raw = element.payload['heading_level'] ??
-        element.payload['level'] ??
-        element.payload['style'];
-    if (raw is String) {
-      final value = raw.toLowerCase();
-      if (value.length == 2 && value[0] == 'h') {
-        return (int.tryParse(value[1]) ?? 1).clamp(1, 6);
-      }
-    }
-    return (asDouble(raw)?.round() ?? 1).clamp(1, 6);
   }
 
   /// Paints every non-prose label through the same chalk engine as board text.
@@ -1398,5 +1501,15 @@ class _BoardPainter extends CustomPainter {
   bool shouldRepaint(covariant _BoardPainter old) =>
       old.document.lastSequence != document.lastSequence ||
       old.animations.frameEpoch != animations.frameEpoch ||
-      old.transform != transform;
+      old.transform != transform ||
+      old.narrow != narrow ||
+      !_sameReflow(old.reflow, reflow);
+}
+
+bool _sameReflow(Map<String, BoardPoint> a, Map<String, BoardPoint> b) {
+  if (a.length != b.length) return false;
+  for (final entry in a.entries) {
+    if (b[entry.key] != entry.value) return false;
+  }
+  return true;
 }

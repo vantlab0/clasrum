@@ -92,6 +92,7 @@ CLIENT_SESSION_END = "session.end"
 CLIENT_BOARD_REQUEST_SNAPSHOT = "board.request_snapshot"
 CLIENT_BOARD_BACKFILL = "board.backfill"
 CLIENT_BOARD_VIEWPORT_FULL = "board.viewport_full"
+CLIENT_BOARD_CLEAR = "board.clear"
 CLIENT_PING = "ping"
 
 
@@ -209,6 +210,7 @@ class LessonSocket:
     # owns the persisted wipe so snapshots/replay/Qwen context stay in sync.
     last_viewport_report_sequence: int = -1
     last_viewport_cleared_sequence: int = -1
+    last_manual_clear_sequence: int = -1
     viewport_clear_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -529,6 +531,67 @@ class LessonRealtimeHub:
         except Exception:  # pragma: no cover - transport teardown
             logger.debug("mic.lock send failed lesson=%s", socket.lesson_id, exc_info=True)
 
+    async def _persist_system_board_clear(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        sequence: int,
+    ) -> bool:
+        """Persist one system-owned full-board clear and broadcast it.
+
+        The clear is intentionally owned by the server so snapshots, replay and
+        the tutor's context stay in sync. Returns False when the client report
+        is stale or the operation was rejected.
+        """
+        try:
+            async with session_scope() as db:
+                lesson = await db.get(Lesson, lesson_id)
+                current_sequence = int(
+                    getattr(lesson, "last_board_sequence", 0) or 0
+                )
+            if sequence < current_sequence:
+                # The client is looking at an older board; let it catch up.
+                return False
+            from app.board.registry import ToolRegistry
+
+            board = self._board or BoardService()
+            # Make the publisher explicit even when this hub has no shared board
+            # service wired (test harnesses), so the committed clear reaches the
+            # live socket and the client can recycle the same viewport.
+            board.set_publisher(self)
+            registry = ToolRegistry(
+                board=board,
+                trigger_system=self._trigger_system,
+            )
+            registry.set_lesson_publisher(self)
+            async with session_scope() as db:
+                result = await registry.execute_structured(
+                    db,
+                    lesson_id,
+                    "board_clear_region",
+                    {"scope": "all"},
+                    source=BoardEventSource.SYSTEM,
+                )
+        except Exception:  # pragma: no cover - never break the socket
+            logger.exception("board clear failed lesson=%s", lesson_id)
+            await _send_error(socket, "internal_error", "could not clear the board")
+            return False
+        if not result.get("ok"):
+            logger.warning("board clear rejected lesson=%s result=%s", lesson_id, result)
+            return False
+        return True
+
+    async def _nudge_after_clear(self, socket: LessonSocket, message: str) -> None:
+        if (
+            socket.qwen is not None
+            and not socket.waiting_for_student
+            and not socket.lesson_finished
+        ):
+            try:
+                await socket.qwen.prompt_text(message)
+            except Exception:  # pragma: no cover
+                logger.warning("post-clear nudge failed lesson=%s", socket.lesson_id, exc_info=True)
+
     async def _handle_viewport_full(
         self,
         socket: LessonSocket,
@@ -557,41 +620,7 @@ class LessonRealtimeHub:
             if sequence <= socket.last_viewport_report_sequence:
                 return
             socket.last_viewport_report_sequence = sequence
-            try:
-                async with session_scope() as db:
-                    lesson = await db.get(Lesson, lesson_id)
-                    current_sequence = int(
-                        getattr(lesson, "last_board_sequence", 0) or 0
-                    )
-                if sequence < current_sequence:
-                    # The client is looking at an older board; let it catch up.
-                    return
-                from app.board.registry import ToolRegistry
-
-                board = self._board or BoardService()
-                # The committed clear must be broadcast to the live socket even
-                # when this hub has no shared board service wired (tests/tests
-                # harnesses), so make the publisher explicit here.
-                board.set_publisher(self)
-                registry = ToolRegistry(
-                    board=board,
-                    trigger_system=self._trigger_system,
-                )
-                registry.set_lesson_publisher(self)
-                async with session_scope() as db:
-                    result = await registry.execute_structured(
-                        db,
-                        lesson_id,
-                        "board_clear_region",
-                        {"scope": "all"},
-                        source=BoardEventSource.SYSTEM,
-                    )
-            except Exception:  # pragma: no cover - never break the socket
-                logger.exception("viewport board clear failed lesson=%s", lesson_id)
-                await _send_error(socket, "internal_error", "could not recycle the board")
-                return
-            if not result.get("ok"):
-                logger.warning("viewport board clear rejected lesson=%s result=%s", lesson_id, result)
+            if not await self._persist_system_board_clear(socket, lesson_id, sequence):
                 return
             socket.last_viewport_cleared_sequence = sequence
             logger.info(
@@ -600,19 +629,40 @@ class LessonRealtimeHub:
                 sequence,
                 coverage,
             )
-            if (
-                socket.qwen is not None
-                and not socket.waiting_for_student
-                and not socket.lesson_finished
-            ):
-                try:
-                    await socket.qwen.prompt_text(
-                        "System instruction: The student's visible board was full and "
-                        "has been wiped. The board is empty now; continue teaching "
-                        "from the cleared board with one short line per board_write_on_board call."
-                    )
-                except Exception:  # pragma: no cover
-                    logger.warning("post-clear nudge failed lesson=%s", lesson_id, exc_info=True)
+            await self._nudge_after_clear(
+                socket,
+                "System instruction: The student's visible board was full and "
+                "has been wiped. The board is empty now; continue teaching "
+                "from the cleared board with one short line per board_write_on_board call.",
+            )
+
+    async def _handle_board_clear(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Explicit student-initiated clear. Idempotent per board sequence."""
+        try:
+            sequence = int(envelope.get("sequence") or 0)
+        except (TypeError, ValueError):
+            await _send_error(socket, "invalid_arguments", "invalid board.clear request")
+            return
+        if sequence <= 0:
+            await _send_error(socket, "invalid_arguments", "board.clear needs a sequence")
+            return
+        if sequence <= socket.last_manual_clear_sequence:
+            return
+        async with socket.viewport_clear_lock:
+            if sequence <= socket.last_manual_clear_sequence:
+                return
+            if sequence <= socket.last_viewport_cleared_sequence:
+                return
+            socket.last_manual_clear_sequence = sequence
+            if not await self._persist_system_board_clear(socket, lesson_id, sequence):
+                return
+            socket.last_viewport_cleared_sequence = sequence
+            logger.info("student board.clear accepted lesson=%s sequence=%s", lesson_id, sequence)
 
     # -- loops -----------------------------------------------------------
 
@@ -779,6 +829,10 @@ class LessonRealtimeHub:
 
         if msg_type == CLIENT_BOARD_VIEWPORT_FULL:
             await self._handle_viewport_full(socket, lesson_id, envelope)
+            return
+
+        if msg_type == CLIENT_BOARD_CLEAR:
+            await self._handle_board_clear(socket, lesson_id, envelope)
             return
 
         if msg_type == CLIENT_BOARD_BACKFILL:

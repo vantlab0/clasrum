@@ -554,6 +554,17 @@ class _LiveScreenState extends State<LiveScreen>
     _viewportController.setViewport(Offset.zero, 1.0);
   }
 
+  /// Student-initiated clear. The server persists the event and broadcasts it;
+  /// the normal board event path then recycles the visible viewport.
+  Future<void> _onClearBoard() async {
+    if (_connecting || _boardController.document.visibleElements.isEmpty) {
+      return;
+    }
+    await widget.client.requestBoardClear(
+      sequence: _boardController.appliedSequence,
+    );
+  }
+
   void _applyViewportFocus(Map<String, dynamic> payload) {
     final targetIds = <String>[];
     final rawTargetId = payload['target_id'];
@@ -1266,6 +1277,7 @@ class _LiveScreenState extends State<LiveScreen>
                   onMicPressed: _onMicPressed,
                   onMicCancel: _cancelListening,
                   onCameraPressed: _openCamera,
+                  onClearPressed: _onClearBoard,
                   pulse: _pulseController,
                   waveLevels: _waveLevels,
                 ),
@@ -1407,6 +1419,7 @@ class _BottomControls extends StatelessWidget {
     required this.onMicPressed,
     required this.onMicCancel,
     required this.onCameraPressed,
+    required this.onClearPressed,
     required this.pulse,
     required this.waveLevels,
   });
@@ -1419,6 +1432,7 @@ class _BottomControls extends StatelessWidget {
   final VoidCallback onMicPressed;
   final VoidCallback onMicCancel;
   final VoidCallback onCameraPressed;
+  final VoidCallback onClearPressed;
   final Animation<double> pulse;
   final List<double> waveLevels;
 
@@ -1459,6 +1473,18 @@ class _BottomControls extends StatelessWidget {
           borderColor: AppColors.border.withValues(alpha: 0.55),
           child: const PwonyIcon(
             PwonyIconKind.camera,
+            size: 20,
+            color: AppColors.white,
+          ),
+        ),
+        const SizedBox(width: 12),
+        _CircleControl(
+          tooltip: 'Clear board',
+          onPressed: micPhase == _MicPhase.listening ? null : onClearPressed,
+          background: AppColors.surface.withValues(alpha: 0.45),
+          borderColor: AppColors.border.withValues(alpha: 0.55),
+          child: const PwonyIcon(
+            PwonyIconKind.delete,
             size: 20,
             color: AppColors.white,
           ),

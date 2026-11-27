@@ -280,6 +280,21 @@ class RealtimeClient extends ChangeNotifier {
         'offset': {'x': offset.dx, 'y': offset.dy},
       };
 
+  /// Ask the server to persist a full-board clear for the student.
+  ///
+  /// The server broadcasts the resulting `clear` event, which the board applies
+  /// through the normal replay path; no local document mutation here.
+  Future<void> requestBoardClear({required int sequence}) async {
+    await _send(boardClearPayload(sequence: sequence));
+  }
+
+  @visibleForTesting
+  static Map<String, dynamic> boardClearPayload({required int sequence}) =>
+      <String, dynamic>{
+        'type': 'board.clear',
+        'sequence': sequence < 0 ? 0 : sequence,
+      };
+
   /// Request backfill of events after [afterSequence] (used on reconnect/gap).
   Future<void> backfill({required int afterSequence}) async {
     await _send({'type': 'board.backfill', 'after_sequence': afterSequence});

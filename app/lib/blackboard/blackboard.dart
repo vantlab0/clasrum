@@ -18,4 +18,5 @@ export 'render/chalk_text.dart';
 export 'runtime/animation_scheduler.dart';
 export 'runtime/blackboard_controller.dart';
 export 'runtime/board_fullness_detector.dart';
+export 'runtime/board_vertical_layout.dart';
 export 'runtime/event_queue.dart';
