@@ -41,13 +41,13 @@ class BoardTextMetrics {
   /// Line height multiplier used by both the estimate and the TextPainter.
   static const double lineHeight = 1.28;
 
-  /// Height of a heading of `level` (1..6; levels outside that range clamp).
+  /// Height of a heading of `level` (2..6; legacy level 1 renders as H2).
   static double headingFraction(int level) {
-    final safe = level.clamp(1, 6);
-    return heightFraction['h$safe'] ?? heightFraction['heading']!;
+    final safe = level.clamp(2, 6);
+    return heightFraction['h$safe'] ?? heightFraction['subheading']!;
   }
 
-  static double fractionForStyle(String? style, {int headingLevel = 1}) {
+  static double fractionForStyle(String? style, {int headingLevel = 2}) {
     final normalized = (style ?? '').toLowerCase();
     if (normalized == 'heading' || normalized == 'subheading') {
       return headingFraction(headingLevel);
@@ -56,7 +56,7 @@ class BoardTextMetrics {
   }
 
   /// Estimated normalized line height for [style] at 100% font scale.
-  static double lineHeightFraction(String? style, {int headingLevel = 1}) =>
+  static double lineHeightFraction(String? style, {int headingLevel = 2}) =>
       fractionForStyle(style, headingLevel: headingLevel) * lineHeight;
 }
 
@@ -160,12 +160,13 @@ class BoardBoundsEstimator {
   }
 
   /// Reads the semantic heading level emitted by the backend layout engine.
+  /// Legacy H1 events are normalized to H2.
   static int _headingLevel(Map<String, dynamic> data) {
     final raw = data['heading_level'] ?? data['level'] ?? data['style'];
     if (raw is String && raw.length == 2 && raw[0] == 'h') {
-      return (int.tryParse(raw[1]) ?? 1).clamp(1, 6);
+      return (int.tryParse(raw[1]) ?? 2).clamp(2, 6);
     }
-    return (_num(raw) ?? 1).round().clamp(1, 6);
+    return (_num(raw) ?? 2).round().clamp(2, 6);
   }
 
   static BoardRect? _estimateDefinition(

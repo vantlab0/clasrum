@@ -54,10 +54,11 @@ class Settings(BaseSettings):
     qwen_voice: str = "Katerina"
     qwen_input_sample_rate: int = 16000
     qwen_output_sample_rate: int = 24000
-    # semantic_vad_ec understands semantics, so it listens for real user speech
-    # (including barge-in while the tutor talks) while filtering background noise.
-    qwen_turn_detection: str = "semantic_vad_ec"
-    qwen_vad_silence_ms: int = 500
+    # Manual (push-to-talk) turns are the default: the student microphone is
+    # locked unless the tutor calls wait_for_student for a direct answer.
+    # Set a VAD type only when explicitly opting back into server-side VAD.
+    qwen_turn_detection: str = "manual"
+    qwen_vad_silence_ms: int = 500  # only used when a VAD type is configured
     # Backend-side timeout wrapping the full Qwen connect + session readiness.
     qwen_connect_timeout_seconds: float = 25.0
     # Qwen adapter handshake/session.updated readiness timeout.

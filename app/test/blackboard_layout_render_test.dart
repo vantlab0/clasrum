@@ -33,10 +33,10 @@ BoardEvent _writeText({
 }
 
 void main() {
-  group('H1-H6 typography', () {
-    test('all six heading levels have distinct chalk specs', () {
+  group('heading typography', () {
+    test('rendered H2-H6 levels have distinct chalk specs', () {
       final fractions = <double>[];
-      for (var level = 1; level <= 6; level++) {
+      for (var level = 2; level <= 6; level++) {
         final spec = ChalkTextStyleSpec.forName('heading', headingLevel: level);
         expect(spec.name, 'h$level');
         expect(
@@ -49,6 +49,13 @@ void main() {
       for (var i = 1; i < fractions.length; i++) {
         expect(fractions[i], lessThan(fractions[i - 1]));
       }
+    });
+
+    test('legacy H1 events render at the smaller H2 size', () {
+      final spec = ChalkTextStyleSpec.forName('heading', headingLevel: 1);
+      expect(spec.name, 'h2');
+      expect(spec.heightFraction, ChalkTextStyleSpec.forName('h2').heightFraction);
+      expect(BoardTextMetrics.headingFraction(1), BoardTextMetrics.headingFraction(2));
     });
 
     test('h3 write_text keeps its semantic level through parsing', () {
@@ -200,6 +207,26 @@ void main() {
       final collision = BoardCollisionDetector.between(target, annotation);
       expect(collision!.kind, BoardCollisionKind.annotationTarget);
       expect(collision.isIntentional, isTrue);
+    });
+
+    test('unrelated elements need a tiny chalk gap on mobile too', () {
+      const gap = BoardCollisionDetector.minimumGap;
+      final first = element('first', y: 0.1, sequence: 1);
+      final tooClose = element(
+        'too_close',
+        y: 0.2 + gap * 0.4,
+        sequence: 2,
+      );
+      final withGap = element('with_gap', y: 0.2 + gap, sequence: 3);
+
+      final collision = BoardCollisionDetector.between(first, tooClose);
+      expect(collision, isNotNull);
+      expect(collision!.kind, BoardCollisionKind.unrelated);
+      expect(
+        BoardCollisionDetector.between(first, withGap),
+        isNull,
+        reason: 'exactly the required gap must be accepted',
+      );
     });
   });
 

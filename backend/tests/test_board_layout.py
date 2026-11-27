@@ -63,8 +63,10 @@ def test_two_consecutive_h1_keep_full_size_and_vertical_spacing():
     manager = BlackboardLayoutManager({"elements": []})
     first = _write(manager, "h1", "Cell Structure")
     second = _write(manager, "h1", "Energy Flow")
+    first_box, second_box = _box(first), _box(second)
     assert second["position"]["y"] > first["position"]["y"] + manager.config.element_gap
-    assert not _overlaps(_box(first), _box(second))
+    assert second_box["y"] >= first_box["y"] + first_box["h"] + manager.config.element_gap
+    assert not _overlaps(first_box, second_box)
     for item, text in ((first, "Cell Structure"), (second, "Energy Flow")):
         expected = estimate_text_size(text, style="heading", heading_level=1)
         assert item["size"]["w"] == pytest.approx(expected[0])

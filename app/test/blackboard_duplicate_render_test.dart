@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pwony/blackboard/blackboard.dart';
 import 'package:pwony/blackboard/model/board_transform.dart';
+import 'package:pwony/blackboard/runtime/board_viewport_controller.dart';
 
 BoardEvent _event({
   required int sequence,
@@ -236,7 +237,7 @@ void main() {
       addTearDown(engine.dispose);
       final transform = BoardTransform.fromSize(const Size(1000, 800));
       final heights = <double>[];
-      for (var level = 1; level <= 6; level++) {
+      for (var level = 2; level <= 6; level++) {
         final spec = ChalkTextStyleSpec.forName('heading', headingLevel: level);
         heights.add(engine.measure(
           text: 'Photosynthesis',
@@ -425,6 +426,48 @@ void main() {
       expect(second.y, greaterThanOrEqualTo(first.y + first.h));
       expect(body.y, greaterThanOrEqualTo(second.y + second.h));
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('measured text bounds stay normalized when zoomed on mobile',
+        (tester) async {
+      Future<BoardRect> measureAtScale(double scale) async {
+        final document = BoardDocument.empty(sessionId: 'sess_dup').apply(_event(
+          sequence: 1,
+          id: 'zoomed_text',
+          type: 'write_text',
+          payload: _textPayload('Photosynthesis converts sunlight', 'subheading', level: 2),
+        ));
+        final controller = BlackboardController(
+          animationsEnabled: false,
+          initialDocument: document,
+        );
+        addTearDown(controller.dispose);
+        final viewport = BoardViewportController();
+        addTearDown(viewport.dispose);
+        viewport.setViewport(Offset.zero, scale);
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 390,
+              height: 780,
+              child: BlackboardView(
+                controller: controller,
+                viewportController: viewport,
+              ),
+            ),
+          ),
+        ));
+        await tester.pump();
+        final bounds = controller.renderCache.bounds['zoomed_text'];
+        expect(bounds, isNotNull);
+        expect(tester.takeException(), isNull);
+        return bounds!;
+      }
+
+      final normal = await measureAtScale(1.0);
+      final zoomed = await measureAtScale(1.5);
+      expect(zoomed.w, closeTo(normal.w, 0.02));
+      expect(zoomed.h, closeTo(normal.h, 0.02));
     });
 
     testWidgets('mobile portrait generative diagram labels stay on board',

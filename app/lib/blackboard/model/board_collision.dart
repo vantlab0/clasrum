@@ -46,6 +46,10 @@ class BoardCollision {
 class BoardCollisionDetector {
   const BoardCollisionDetector._();
 
+  /// Mirrors the backend `LayoutConfig.element_gap`. Unrelated elements must
+  /// keep at least this much empty chalk between them, including on mobile.
+  static const double minimumGap = 0.014;
+
   /// Best available normalized bounds for [element].
   static BoardRect? boundsOf(BoardElement element) {
     final declared = element.declaredBounds;
@@ -60,13 +64,17 @@ class BoardCollisionDetector {
     BoardElement b, {
     BoardRect? aBounds,
     BoardRect? bBounds,
+    double gap = minimumGap,
   }) {
     if (!a.isVisible || !b.isVisible || a.elementId == b.elementId) return null;
     final first = aBounds ?? boundsOf(a);
     final second = bBounds ?? boundsOf(b);
-    if (first == null || second == null || !first.intersects(second)) {
-      return null;
-    }
+    if (first == null || second == null) return null;
+    // Expand only for the test so a too-small gap is reported as a collision
+    // even when the painted boxes themselves do not intersect.
+    final paddedFirst = _withGap(first, gap);
+    final paddedSecond = _withGap(second, gap);
+    if (!paddedFirst.intersects(paddedSecond)) return null;
     final left = first.x > second.x ? first.x : second.x;
     final top = first.y > second.y ? first.y : second.y;
     final right = first.right < second.right ? first.right : second.right;
@@ -138,6 +146,7 @@ class BoardCollisionDetector {
   static List<BoardCollision> detect(
     Iterable<BoardElement> elements, {
     Iterable<String>? focusIds,
+    double gap = minimumGap,
   }) {
     final list = elements.where((element) => element.isVisible).toList();
     final focus = focusIds?.toSet();
@@ -149,7 +158,7 @@ class BoardCollisionDetector {
             !focus.contains(list[j].elementId)) {
           continue;
         }
-        final collision = between(list[i], list[j]);
+        final collision = between(list[i], list[j], gap: gap);
         if (collision != null) collisions.add(collision);
       }
     }
@@ -160,10 +169,21 @@ class BoardCollisionDetector {
   static List<BoardCollision> unrelated(
     Iterable<BoardElement> elements, {
     Iterable<String>? focusIds,
+    double gap = minimumGap,
   }) =>
-      detect(elements, focusIds: focusIds)
+      detect(elements, focusIds: focusIds, gap: gap)
           .where((collision) => !collision.isIntentional)
           .toList(growable: false);
+
+  static BoardRect _withGap(BoardRect rect, double gap) {
+    final half = gap / 2.0;
+    return BoardRect(
+      rect.x - half,
+      rect.y - half,
+      rect.w + gap,
+      rect.h + gap,
+    );
+  }
 
   static Set<String> _targetsOf(BoardElement element) {
     final result = <String>{};

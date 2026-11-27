@@ -69,6 +69,20 @@ class BlackboardController extends ChangeNotifier {
   /// Current immutable board document.
   BoardDocument get document => _document;
 
+  /// Union of live element bounds, preferring real TextPainter measurements.
+  ///
+  /// Used by focus and viewport clamping so wrapped/mobile text is never
+  /// treated as its older declared (pre-measurement) box.
+  BoardRect? measuredContentBounds() {
+    final aliveIds =
+        document.visibleElements.map((e) => e.elementId).toSet();
+    renderCache.bounds.retainOnly(aliveIds);
+    final measured = Map<String, BoardRect>.fromEntries(
+      renderCache.bounds.entries,
+    );
+    return document.boundsOf(aliveIds, measuredBounds: measured);
+  }
+
   /// Last event sequence reduced into [document].
   int get appliedSequence => _document.lastSequence;
 

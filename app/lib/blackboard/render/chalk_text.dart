@@ -154,14 +154,15 @@ class ChalkTextStyleSpec {
   /// Style spec for a CONTRACTS §3.1 style name (`heading`, `body`, `code`…).
   static ChalkTextStyleSpec forName(
     String? style, {
-    int headingLevel = 1,
+    int headingLevel = 2,
     bool definitionTerm = false,
   }) {
     if (definitionTerm) return _specs['definitionTerm']!;
     final normalized = (style ?? 'body').toLowerCase().trim();
     if (normalized == 'heading' || normalized == 'subheading') {
-      final level = headingLevel.clamp(1, 6);
-      return _specs['h$level'] ?? _specs['heading']!;
+      // H1 was too large; legacy level 1 is rendered at the H2 size.
+      final level = headingLevel.clamp(2, 6);
+      return _specs['h$level'] ?? _specs['subheading']!;
     }
     if (normalized == 'numbered') return _specs['numbered']!;
     return _specs[normalized] ?? _specs['body']!;

@@ -50,6 +50,7 @@ from app.graph import service as graph_service
 from app.lessons import service as lessons_service
 from app.lessons.board_reads import get_board_snapshot, get_transcript_cursor
 from app.lessons.transcripts import append_transcript_entry
+from app.realtime.qwen_adapter import build_turn_detection
 from app.realtime.transcript_triggers import TranscriptTriggerSystem
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,9 @@ MSG_TEACHER_STATE = "teacher.state"
 MSG_TRANSCRIPT_ENTRY = "transcript.entry"
 MSG_LESSON_STATE = "lesson.state"
 MSG_SESSION_INTERRUPTED = "session.interrupted"
-MSG_USER_SPEECH_STARTED = "user.speech_started"  # semantic VAD heard the student
+MSG_USER_SPEECH_STARTED = "user.speech_started"  # legacy VAD notification only
+MSG_MIC_UNLOCK = "mic.unlock"  # tutor asked a direct question needing an answer
+MSG_MIC_LOCK = "mic.lock"  # answer turn finished/cancelled
 MSG_SESSION_ENDED = "session.ended"
 MSG_ERROR = "error"
 MSG_PONG = "pong"
@@ -88,6 +91,7 @@ CLIENT_SESSION_INTERRUPT = "session.interrupt"
 CLIENT_SESSION_END = "session.end"
 CLIENT_BOARD_REQUEST_SNAPSHOT = "board.request_snapshot"
 CLIENT_BOARD_BACKFILL = "board.backfill"
+CLIENT_BOARD_VIEWPORT_FULL = "board.viewport_full"
 CLIENT_PING = "ping"
 
 
@@ -189,6 +193,11 @@ class LessonSocket:
     # Teaching continues automatically after each response unless the tutor
     # explicitly asks for the student's answer via wait_for_student (or finishes).
     waiting_for_student: bool = False
+    # Manual-turn microphone gate. The client microphone stays locked until a
+    # wait_for_student tool call unlocks it for one answer turn.
+    mic_unlocked: bool = False
+    mic_request_id: str | None = None
+    audio_turn_active: bool = False
     lesson_finished: bool = False
     auto_continue_count: int = 0
     last_auto_continue_at: float = 0.0
@@ -196,6 +205,11 @@ class LessonSocket:
     # twice. Cache the first result per (response_id, call_id) and resend it.
     tool_call_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_call_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    # Visible-board recycling: the client reports measured fullness; the server
+    # owns the persisted wipe so snapshots/replay/Qwen context stay in sync.
+    last_viewport_report_sequence: int = -1
+    last_viewport_cleared_sequence: int = -1
+    viewport_clear_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class LessonRealtimeHub:
@@ -438,7 +452,16 @@ class LessonRealtimeHub:
                         "output_sample_rate": settings.qwen_output_sample_rate,
                         "format": "pcm16",
                         "channels": 1,
-                        "turn_detection": settings.qwen_turn_detection,
+                        "turn_detection": (
+                            "manual"
+                            if build_turn_detection(
+                                settings.qwen_turn_detection,
+                                settings.qwen_vad_silence_ms,
+                            )
+                            is None
+                            else settings.qwen_turn_detection
+                        ),
+                        "mic_locked": True,
                     },
                 }
             )
@@ -468,6 +491,7 @@ class LessonRealtimeHub:
             await self.disconnect(socket)
 
     async def disconnect(self, socket: LessonSocket) -> None:
+        await self._lock_answer_mic(socket, reason="disconnected")
         if socket.qwen_task is not None:
             socket.qwen_task.cancel()
         if socket.qwen is not None:
@@ -484,6 +508,111 @@ class LessonRealtimeHub:
             if self._startup_active_lease.get(socket.lesson_id) == socket.lease_id:
                 if socket.lesson_id not in self._startup_completed_lessons and not socket.startup_has_board_event:
                     self._startup_active_lease.pop(socket.lesson_id, None)
+
+    async def _lock_answer_mic(self, socket: LessonSocket, *, reason: str) -> None:
+        """End an answer window and tell the client to close its microphone."""
+        if not socket.mic_unlocked and not socket.audio_turn_active:
+            return
+        request_id = socket.mic_request_id
+        socket.mic_unlocked = False
+        socket.mic_request_id = None
+        socket.audio_turn_active = False
+        try:
+            await socket.websocket.send_json(
+                {
+                    MSG_TYPE: MSG_MIC_LOCK,
+                    "lesson_id": socket.lesson_id,
+                    "request_id": request_id,
+                    "reason": reason,
+                }
+            )
+        except Exception:  # pragma: no cover - transport teardown
+            logger.debug("mic.lock send failed lesson=%s", socket.lesson_id, exc_info=True)
+
+    async def _handle_viewport_full(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        envelope: dict[str, Any],
+    ) -> None:
+        """Recycle the visible board once: validate, then persist a system clear."""
+        try:
+            sequence = int(envelope.get("sequence") or 0)
+            coverage = float(envelope.get("coverage") or 0.0)
+            scale = float(envelope.get("scale") or 1.0)
+        except (TypeError, ValueError):
+            await _send_error(socket, "invalid_arguments", "invalid viewport_full report")
+            return
+        if sequence <= 0 or not 0.0 <= coverage <= 1.0 or not 0.5 <= scale <= 2.0:
+            await _send_error(socket, "invalid_arguments", "viewport_full report out of range")
+            return
+        if sequence <= socket.last_viewport_cleared_sequence:
+            return  # latch already released this exact board state
+        if sequence <= socket.last_viewport_report_sequence:
+            return  # duplicate/older report
+
+        async with socket.viewport_clear_lock:
+            if sequence <= socket.last_viewport_cleared_sequence:
+                return
+            if sequence <= socket.last_viewport_report_sequence:
+                return
+            socket.last_viewport_report_sequence = sequence
+            try:
+                async with session_scope() as db:
+                    lesson = await db.get(Lesson, lesson_id)
+                    current_sequence = int(
+                        getattr(lesson, "last_board_sequence", 0) or 0
+                    )
+                if sequence < current_sequence:
+                    # The client is looking at an older board; let it catch up.
+                    return
+                from app.board.registry import ToolRegistry
+
+                board = self._board or BoardService()
+                # The committed clear must be broadcast to the live socket even
+                # when this hub has no shared board service wired (tests/tests
+                # harnesses), so make the publisher explicit here.
+                board.set_publisher(self)
+                registry = ToolRegistry(
+                    board=board,
+                    trigger_system=self._trigger_system,
+                )
+                registry.set_lesson_publisher(self)
+                async with session_scope() as db:
+                    result = await registry.execute_structured(
+                        db,
+                        lesson_id,
+                        "board_clear_region",
+                        {"scope": "all"},
+                        source=BoardEventSource.SYSTEM,
+                    )
+            except Exception:  # pragma: no cover - never break the socket
+                logger.exception("viewport board clear failed lesson=%s", lesson_id)
+                await _send_error(socket, "internal_error", "could not recycle the board")
+                return
+            if not result.get("ok"):
+                logger.warning("viewport board clear rejected lesson=%s result=%s", lesson_id, result)
+                return
+            socket.last_viewport_cleared_sequence = sequence
+            logger.info(
+                "visible board full -> cleared lesson=%s sequence=%s coverage=%.2f",
+                lesson_id,
+                sequence,
+                coverage,
+            )
+            if (
+                socket.qwen is not None
+                and not socket.waiting_for_student
+                and not socket.lesson_finished
+            ):
+                try:
+                    await socket.qwen.prompt_text(
+                        "System instruction: The student's visible board was full and "
+                        "has been wiped. The board is empty now; continue teaching "
+                        "from the cleared board with one short line per board_write_on_board call."
+                    )
+                except Exception:  # pragma: no cover
+                    logger.warning("post-clear nudge failed lesson=%s", lesson_id, exc_info=True)
 
     # -- loops -----------------------------------------------------------
 
@@ -507,6 +636,10 @@ class LessonRealtimeHub:
                 text = message.get("text")
                 bytes_data = message.get("bytes")
                 if bytes_data is not None:
+                    # Manual turns only: never forward mic audio before the
+                    # tutor has explicitly unlocked it for an answer.
+                    if not socket.mic_unlocked or not socket.audio_turn_active:
+                        continue
                     # Raw PCM16 mono 16 kHz -> Qwen input_audio_buffer.append.
                     import base64
 
@@ -546,14 +679,47 @@ class LessonRealtimeHub:
             return
 
         if msg_type == CLIENT_AUDIO_START:
-            # Student is engaging: resume automatic teaching after their turn.
-            socket.waiting_for_student = False
-            socket.auto_continue_count = 0
-            logger.debug("audio.start lesson=%s", lesson_id)
+            # Only an unlocked answer window may open the audio path. The
+            # waiting_for_student flag stays set until a submitted answer ends
+            # the turn, so an audio.start cannot silently resume teaching.
+            reason = str(envelope.get("reason") or "")
+            request_id = str(envelope.get("request_id") or "")
+            if reason != "answer" or not socket.mic_unlocked:
+                logger.debug("ignored locked audio.start lesson=%s", lesson_id)
+                return
+            if (
+                socket.mic_request_id
+                and request_id
+                and request_id != socket.mic_request_id
+            ):
+                logger.debug("ignored stale audio.start lesson=%s", lesson_id)
+                return
+            socket.audio_turn_active = True
+            logger.debug("answer audio.start lesson=%s request=%s", lesson_id, request_id)
             return
 
         if msg_type == CLIENT_AUDIO_STOP:
-            # Client finished speaking; commit audio buffer and ask Qwen to produce a response.
+            request_id = str(envelope.get("request_id") or "")
+            if (
+                socket.mic_request_id
+                and request_id
+                and request_id != socket.mic_request_id
+            ):
+                return
+            submitted = envelope.get("submitted") is not False
+            if not submitted:
+                # Aborted answer: drop the uncommitted audio but keep the
+                # question and microphone window open so the student can retry.
+                socket.audio_turn_active = False
+                try:
+                    if socket.qwen is not None:
+                        clear_audio = getattr(socket.qwen, "clear_audio", None)
+                        if clear_audio is not None:
+                            await clear_audio()
+                except Exception:  # pragma: no cover - transport best effort
+                    logger.debug("qwen clear_audio failed lesson=%s", lesson_id, exc_info=True)
+                return
+            await self._lock_answer_mic(socket, reason="answer_submitted")
             socket.waiting_for_student = False
             socket.auto_continue_count = 0
             try:
@@ -563,14 +729,17 @@ class LessonRealtimeHub:
                     except Exception:  # pragma: no cover - commit may be unsupported in some modes
                         logger.debug("qwen commit_audio failed lesson=%s", lesson_id, exc_info=True)
                     await socket.qwen.create_response()
-                    logger.info("audio.stop -> qwen response requested lesson=%s", lesson_id)
+                    logger.info("answer audio.stop -> qwen response requested lesson=%s", lesson_id)
             except Exception:  # pragma: no cover
                 logger.warning("qwen create_response failed lesson=%s", lesson_id, exc_info=True)
             return
 
         if msg_type == CLIENT_SESSION_INTERRUPT:
-            # Barge-in: cancel Qwen response, truncate playback, and unblock
-            # prompts that were gated on the cancelled response id.
+            # Barge-in is only accepted from an explicitly unlocked answer turn.
+            was_answer_window = socket.mic_unlocked or socket.audio_turn_active
+            await self._lock_answer_mic(socket, reason="interrupted")
+            if not was_answer_window:
+                return
             socket.active_response_id = None
             socket.waiting_for_student = False
             socket.auto_continue_count = 0
@@ -606,6 +775,10 @@ class LessonRealtimeHub:
             except Exception as exc:  # pragma: no cover
                 logger.exception("snapshot request failed lesson=%s", lesson_id)
                 await _send_error(socket, "internal_error", "could not produce snapshot")
+            return
+
+        if msg_type == CLIENT_BOARD_VIEWPORT_FULL:
+            await self._handle_viewport_full(socket, lesson_id, envelope)
             return
 
         if msg_type == CLIENT_BOARD_BACKFILL:
@@ -657,11 +830,11 @@ class LessonRealtimeHub:
                 continue
 
             if etype == "input_audio_buffer.speech_started":
-                # Semantic VAD heard real user speech (background noise filtered).
-                # Let the client flush tutor playback for clean barge-in.
-                socket.waiting_for_student = False
-                socket.auto_continue_count = 0
-                await socket.websocket.send_json({MSG_TYPE: MSG_USER_SPEECH_STARTED})
+                # Legacy VAD notification only. Manual turns do not use this to
+                # unlock the microphone or end a wait_for_student pause.
+                await socket.websocket.send_json(
+                    {MSG_TYPE: MSG_USER_SPEECH_STARTED, "source": "qwen"}
+                )
                 continue
 
             if etype == "response.created":
@@ -728,6 +901,7 @@ class LessonRealtimeHub:
                 entry = self._transcript_entry_from_qwen(lesson_id, event)
                 if entry is not None:
                     if str(entry.get("speaker")) == "student":
+                        await self._lock_answer_mic(socket, reason="answer_transcribed")
                         socket.waiting_for_student = False
                         socket.auto_continue_count = 0
                     logger.info(
@@ -934,11 +1108,40 @@ class LessonRealtimeHub:
 
         if name == "wait_for_student":
             # Explicit signal: only now does the tutor stop and listen. Rhetorical
-            # questions and routine checks must not pause automatic teaching.
+            # questions and routine checks must not pause automatic teaching or
+            # grant microphone access.
+            try:
+                parsed_args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
+            except (TypeError, ValueError):
+                parsed_args = {}
+            reason = str(parsed_args.get("reason") or "").strip()
+            if not reason:
+                reason = "The tutor asked a question that needs your answer."
             socket.waiting_for_student = True
             socket.auto_continue_count = 0
-            result = {"ok": True, "waiting_for_student": True}
+            socket.mic_unlocked = True
+            socket.mic_request_id = call_id
+            socket.audio_turn_active = False
+            result = {
+                "ok": True,
+                "waiting_for_student": True,
+                "mic_unlocked": True,
+                "request_id": call_id,
+            }
             logger.info("wait_for_student accepted lesson=%s response_id=%s", lesson_id, response_id)
+            try:
+                await socket.websocket.send_json(
+                    {
+                        MSG_TYPE: MSG_MIC_UNLOCK,
+                        "lesson_id": lesson_id,
+                        "request_id": call_id,
+                        "reason": reason,
+                        "requires_answer": True,
+                        "turn_detection": "manual",
+                    }
+                )
+            except Exception:  # pragma: no cover - transport teardown
+                logger.warning("mic.unlock send failed lesson=%s", lesson_id, exc_info=True)
             if socket.qwen is not None:
                 try:
                     await socket.qwen.function_call_output(
@@ -952,6 +1155,7 @@ class LessonRealtimeHub:
 
         if name == "lesson_finish":
             socket.lesson_finished = True
+            await self._lock_answer_mic(socket, reason="lesson_finished")
 
         if name == "board_intent":
             socket.startup_has_board_tool_call = True
@@ -1131,7 +1335,7 @@ class LessonRealtimeHub:
                     f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
                     f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
                     "Begin teaching immediately without waiting for the student to speak first. "
-                    "Your first board call must be board_write_on_board writing ONLY the lesson title as ONE short line (style h1). "
+                    "Your first board call must be board_write_on_board writing ONLY the lesson title as ONE short line (style h2). "
                     "Then give a short spoken introduction. After that, write ONE short line per board_write_on_board call "
                     "(1-8 words, one or two words is fine, no newlines, no paragraphs, no lists), each line matching what you are "
                     "explaining at that moment; make a separate call for every additional line. Never dump a block of text or "
@@ -1140,7 +1344,7 @@ class LessonRealtimeHub:
                     "Use create_board_visual only when the concept genuinely needs a diagram, table or graph, and keep any labels "
                     "to one short line. Keep teaching automatically through the lesson plan after each spoken turn - the backend "
                     "starts your next response for you, so never stop just because you asked a rhetorical question or a quick check. "
-                    "Call wait_for_student ONLY when you need the student's actual answer before you can continue, then listen."
+                    "Call wait_for_student ONLY when you need the student's actual answer before you can continue; that call unlocks their microphone automatically, then listen."
                 )
             else:
                 prompt = (
@@ -1154,7 +1358,7 @@ class LessonRealtimeHub:
                     "(1-8 words, no newlines, no paragraphs, no lists), aligned with what you say aloud; make a separate call per line. "
                     "Use create_board_visual only for new structured visuals with one-line labels; "
                     "leave physical placement to the backend layout manager. Keep teaching automatically after each spoken turn; "
-                    "call wait_for_student only when you truly need the student's answer, otherwise continue explaining."
+                    "call wait_for_student only when you truly need the student's answer, which unlocks their microphone automatically; otherwise continue explaining."
                 )
 
             logger.info(
@@ -1346,7 +1550,7 @@ class LessonRealtimeHub:
                         if not has_response_activity:
                             nudge = (
                                 "System instruction: The classroom is connected. Begin teaching now. "
-                                "Start by calling board_write_on_board to write ONLY the lesson title as one short line (style h1), then explain it aloud. "
+                                "Start by calling board_write_on_board to write ONLY the lesson title as one short line (style h2), then explain it aloud. "
                                 "Write one short line per call (1-8 words, no newlines) as you teach. Keep teaching automatically; "
                                 "only call wait_for_student when you need the student's answer."
                             )
@@ -1354,7 +1558,7 @@ class LessonRealtimeHub:
                         else:
                             nudge = (
                                 "System instruction: Continue teaching, but you must create the first visible board content now. "
-                                "Call board_write_on_board with the lesson title as one short line (style h1), then write one short line "
+                                "Call board_write_on_board with the lesson title as one short line (style h2), then write one short line "
                                 "per call (1-8 words, no newlines) as you teach. Use create_board_visual only if a diagram is genuinely needed. "
                                 "Then continue explaining aloud. Keep teaching after each spoken turn; pause only via wait_for_student."
                             )
@@ -1414,6 +1618,7 @@ class LessonRealtimeHub:
         reason: str,
     ) -> None:
         """End the lesson (graph finalize + board snapshot) and notify client."""
+        await self._lock_answer_mic(socket, reason="lesson_ended")
         try:
             async with session_scope() as fresh_db:
                 lesson = await fresh_db.get(Lesson, lesson_id)
@@ -1566,7 +1771,7 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"at {level} level. You speak out loud while writing on a shared blackboard. "
         f"Concepts to cover: {concept_list}. "
         f"Rules: (1) Write the lesson title FIRST with board_write_on_board using "
-        f"style h1, as ONE short line. (2) Then teach aloud and write on the board "
+        f"style h2, as ONE short line. (2) Then teach aloud and write on the board "
         f"ONE SHORT LINE PER TOOL CALL: each board_write_on_board call must contain "
         f"only one line of 1-8 words (one or two words is fine), with no newlines, no "
         f"paragraphs and no lists. Make a separate call for every new line, and let "
@@ -1579,7 +1784,9 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"rhetorical questions and quick understanding checks are part of your teaching, "
         f"so carry on explaining them yourself. (4) Call wait_for_student ONLY when you "
         f"have asked a direct question and genuinely need the student's answer before "
-        f"you can continue; after that call, stop and listen. (5) Use create_board_visual "
+        f"you can continue. That call unlocks the student's microphone automatically; "
+        f"stop speaking and listen for the answer. Never call it for rhetorical "
+        f"questions. (5) Use create_board_visual "
         f"only when a diagram, table or graph genuinely helps, and keep its text labels "
         f"to single short lines. (6) Never modify database state directly — only through "
         f"the exposed tools. (7) Keep explanations concise. (8) Use lesson_finish when "

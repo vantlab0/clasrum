@@ -28,6 +28,9 @@ import 'runtime/board_viewport_controller.dart';
 bool boardDiagramUsesLegacySteps(Map<String, dynamic> payload) =>
     (payload['steps'] as List?)?.isNotEmpty ?? false;
 
+/// Small breathing room around painted chalk text, in logical pixels.
+const double _textPaddingPx = 4.0;
+
 /// The tutorial board widget (CONTRACTS §10).
 ///
 /// Six layered [CustomPainter]s — background, text, equation, drawing, graph,
@@ -432,10 +435,19 @@ class _BoardPainter extends CustomPainter {
 
     final fontScale = (payload['font_scale'] as num?)?.toDouble() ?? 1.0;
     final fontSizePx = transform.fontPixels(styleSpec.heightFraction) * fontScale.clamp(0.5, 2.5);
+    // TextPainter is the source of truth for wrapping. Its max width must use
+    // the same viewport scale as the font size, otherwise zooming changes the
+    // number of lines and can push text into a neighbour.
     final maxWidthNorm = (payload['max_width'] as num?)?.toDouble();
+    final scaledWidth = transform.width * transform.viewportScale;
+    // sx(1.0) is the pixel coordinate of the board's right edge under the
+    // current viewport, so the fallback width stays in the same pixel space as
+    // the scaled font size.
+    final availableRight = transform.sx(1.0);
     final maxWidthPx = maxWidthNorm != null
-        ? (maxWidthNorm * transform.width).clamp(40.0, transform.width)
-        : (transform.width - (px - transform.contentRect.left) - 8).clamp(40.0, transform.width);
+        ? (maxWidthNorm * scaledWidth - 2 * _textPaddingPx)
+            .clamp(40.0, scaledWidth)
+        : (availableRight - px - 2 * _textPaddingPx).clamp(40.0, scaledWidth);
 
     final alignStr = (payload['align'] as String?) ?? 'left';
     final textAlign = alignStr == 'center'
@@ -486,12 +498,23 @@ class _BoardPainter extends CustomPainter {
       textAlign: textAlign,
     );
 
-    final measured = ChalkGeometry.normalizedBounds(paintedRect, transform.contentRect);
+    // Convert the TextPainter-painted rect through the viewport-aware inverse
+    // so measured bounds stay truthful while zoomed or panned. They are what
+    // collision checks, focus and viewport clamping should consume.
+    final measured = transform.normalizedRect(paintedRect);
+    final padX = _textPaddingPx / (transform.width * transform.viewportScale);
+    final padY = _textPaddingPx / (transform.height * transform.viewportScale);
+    final padded = BoardRect(
+      measured.x - padX,
+      measured.y - padY,
+      measured.w + 2 * padX,
+      measured.h + 2 * padY,
+    ).clamp01();
     bounds.put(
       element.elementId,
-      measured.isEmpty
+      padded.isEmpty
           ? BoardRect.fromPositionSize(position, BoardSize(0.2, 0.05))
-          : measured,
+          : padded,
     );
   }
 

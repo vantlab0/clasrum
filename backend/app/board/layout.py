@@ -301,8 +301,17 @@ class LayoutState:
         self.entries.append(Occupied(rect, element_id, group_id, parent_id, kind))
 
     def collides(self, rect: Rect, *, group_id: str | None = None, parent_id: str | None = None) -> bool:
+        # Keep a tiny chalk gap even for fallback scans: each side contributes
+        # half of element_gap, so any accepted pair is separated by >= element_gap.
+        half_gap = self.config.element_gap / 2.0
+        padded = Rect(
+            rect.x - half_gap,
+            rect.y - half_gap,
+            rect.w + self.config.element_gap,
+            rect.h + self.config.element_gap,
+        )
         return any(
-            rect.intersects(entry.rect)
+            padded.intersects(entry.rect)
             for entry in self.entries
             if not entry.related_to(group_id, parent_id)
         )

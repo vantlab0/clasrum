@@ -1075,7 +1075,8 @@ class BoardEvent {
   String? get style => payloadParsed.style;
   String? get color => payloadParsed.color;
 
-  /// Semantic H1-H6 level carried by direct board writes and headings.
+  /// Semantic heading level carried by direct board writes and headings.
+  /// Legacy level 1 is normalized to H2 because H1 was too large.
   int get headingLevel {
     final data = payloadParsed;
     if (data is WriteTextPayload) return data.headingLevel;
@@ -1207,15 +1208,18 @@ String? _str(Object? value) {
   return value.toString();
 }
 
-/// Reads a semantic heading level (h1..h6 or numeric field), clamped to 1..6.
-int _headingLevelValue(Object? raw, {int fallback = 1}) {
+/// Reads a semantic heading level (h1..h6 or numeric field).
+///
+/// H1 typography was too large: level 1 is accepted for old events but is
+/// always rendered at the H2 size. Levels clamp to 2..6.
+int _headingLevelValue(Object? raw, {int fallback = 2}) {
   if (raw is String) {
     final value = raw.toLowerCase();
     if (value.length == 2 && value[0] == 'h') {
-      return (int.tryParse(value[1]) ?? fallback).clamp(1, 6);
+      return (int.tryParse(value[1]) ?? fallback).clamp(2, 6);
     }
   }
-  return (asDouble(raw)?.round() ?? fallback).clamp(1, 6);
+  return (asDouble(raw)?.round() ?? fallback).clamp(2, 6);
 }
 
 Map<String, dynamic>? _map(Object? value) {

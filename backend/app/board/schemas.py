@@ -325,16 +325,20 @@ class WriteHeadingArgs(StrictModel):
         description="Heading text (<=400 chars)."
     )
     position: Position
-    level: Literal[1, 2] = Field(default=1, description="1 = lesson title, 2 = section.")
+    level: Literal[1, 2] = Field(
+        default=2, description="1 (legacy) and 2 both render as H2; use 2."
+    )
     color: ColorStr | None = Field(default=None)
     underline: bool = Field(default=False)
 
     def build_payload(self) -> dict[str, Any]:
+        # H1 was too large. Level 1 is accepted for old callers but rendered at
+        # the calmer H2 size instead.
         return _clean(
             {
                 "text": self.text,
                 "position": self.position.to_payload(),
-                "level": self.level,
+                "level": 2,
                 "color": self.color or "primary",
                 "underline": self.underline,
             }
@@ -892,7 +896,12 @@ class WriteOnBoardArgs(StrictModel):
     )
     style: Literal[
         "h1", "h2", "h3", "h4", "h5", "h6", "body", "small", "equation", "label"
-    ] = Field(description="Text style: heading levels h1..h6, body, small, equation, label.")
+    ] = Field(
+        description=(
+            "Text style: h1..h6, body, small, equation, label. "
+            "h1 is accepted for compatibility but renders at the H2 size."
+        )
+    )
     color: ColorStr | None = Field(default=None, description="Text colour; chalk role or #RRGGBB.")
     highlight: bool = Field(default=False, description="Whether to highlight the written text.")
     highlight_color: ColorStr | None = Field(
@@ -913,10 +922,10 @@ class WriteOnBoardArgs(StrictModel):
     )
 
     def _heading_level(self) -> int:
-        """Return the heading level 1-6 for h1-h6 styles, 0 otherwise."""
+        """Return the rendered heading level; H1 requests are clamped to H2."""
         style = self.style.strip().lower()
         if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            return max(1, min(6, int(style[1:])))
+            return max(2, min(6, int(style[1:])))
         return 0
 
     def build_payload(self) -> dict[str, Any]:
@@ -942,8 +951,8 @@ class WriteOnBoardArgs(StrictModel):
         }
 
         if heading_level > 0:
-            # Preserve the exact level for Flutter typography (H1-H6).
-            payload["style"] = "heading" if heading_level == 1 else "subheading"
+            # Render at H2 or smaller; H1 typography is intentionally unused.
+            payload["style"] = "subheading"
             payload["heading_level"] = heading_level
         elif style == "equation":
             payload["style"] = "equation"
@@ -1224,8 +1233,8 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "write_heading",
         "new",
         WriteHeadingArgs,
-        "Write a heading. level=1 for the lesson title, level=2 for section headings. "
-        "Keep headings short and place them near the top of the board.",
+        "Write a heading at H2 size. level=1 is accepted for old callers but renders "
+        "as level=2. Keep headings short and place them near the top of the board.",
         (),
     ),
     (
@@ -1413,7 +1422,7 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Write ONE single short line of teaching content onto the blackboard per call "
         "(1-8 words, max 80 chars; one or two words is fine). Never write a paragraph, "
         "several lines, or a list in one call - make separate calls for each line instead. "
-        "Write the lesson title first with style h1, then add one short line at a time as "
+        "Write the lesson title first with style h2, then add one short line at a time as "
         "you teach, each line matching what you are saying aloud. Use for headings, "
         "important words, short definitions, labels, and single-line equations. Prefer "
         "this over board_intent for simple text; it appears progressively on the board.",
@@ -1491,10 +1500,11 @@ _INTENT_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
     (
         "wait_for_student",
         WaitForStudentArgs,
-        "Pause automatic teaching and listen ONLY when you have just asked the "
-        "student a direct question and genuinely need their answer before you can "
-        "continue. Do NOT call this for rhetorical questions, prompts you answer "
-        "yourself, or routine checks - in those cases keep teaching automatically.",
+        "Pause automatic teaching and unlock the student's microphone ONLY when "
+        "you have just asked a direct question and genuinely need their answer "
+        "before you can continue. The microphone stays locked at all other times. "
+        "Do NOT call this for rhetorical questions, prompts you answer yourself, "
+        "or routine checks - in those cases keep teaching automatically.",
     ),
 )
 

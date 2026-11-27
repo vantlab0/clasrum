@@ -10,7 +10,11 @@ import pytest
 
 from app.db.models import Lesson, User
 from app.db.session import session_scope
-from app.realtime.hub import LessonRealtimeHub, LessonSocket
+from app.realtime.hub import (
+    CLIENT_BOARD_VIEWPORT_FULL,
+    LessonRealtimeHub,
+    LessonSocket,
+)
 
 
 class FakeWs:
@@ -191,6 +195,63 @@ async def test_completed_lesson_does_not_auto_start() -> None:
         await hub._maybe_start_initial_teaching(socket, lesson, detail, {"last_sequence": 0}, 0)
 
     assert qwen.prompt_texts == []
+
+
+@pytest.mark.asyncio
+async def test_visible_board_full_wipes_once_and_nudges_tutor() -> None:
+    lesson_id = await _create_lesson()
+    async with session_scope() as db:
+        lesson = await db.get(Lesson, lesson_id)
+        assert lesson is not None
+        lesson.last_board_sequence = 4
+        await db.commit()
+
+    hub = LessonRealtimeHub()
+    ws = FakeWs()
+    qwen = FakeQwen()
+    socket = LessonSocket(
+        websocket=ws,
+        lesson_id=lesson_id,
+        student_id="student-1",
+        lease_id="lease-1",
+        qwen=qwen,
+    )
+    async with hub._lock:
+        hub._sockets[lesson_id] = socket
+        hub._all.setdefault(lesson_id, set()).add(socket)
+    report = json.dumps(
+        {
+            "type": CLIENT_BOARD_VIEWPORT_FULL,
+            "sequence": 4,
+            "coverage": 0.91,
+            "scale": 2.0,
+            "visible_rect": {"x": 0, "y": 0, "w": 1, "h": 1},
+            "offset": {"x": 0, "y": 0},
+        }
+    )
+
+    await hub._handle_client_text(socket, lesson_id, report)
+    clears = [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
+    assert len(clears) == 1
+    assert len(qwen.prompt_texts) == 1
+    assert "visible board was full" in qwen.prompt_texts[0]
+
+    # Duplicate and stale reports must not wipe the freshly recycled board.
+    await hub._handle_client_text(socket, lesson_id, report)
+    stale = json.loads(report)
+    stale.update(sequence=3, coverage=0.95)
+    await hub._handle_client_text(socket, lesson_id, json.dumps(stale))
+    later_clears = [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
+    assert len(later_clears) == 1
+    assert len(qwen.prompt_texts) == 1
 
 
 @pytest.mark.asyncio

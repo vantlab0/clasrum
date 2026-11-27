@@ -25,6 +25,38 @@ VOICE = get_settings().qwen_voice
 INPUT_RATE = get_settings().qwen_input_sample_rate
 OUTPUT_RATE = get_settings().qwen_output_sample_rate
 
+# Qwen calls push-to-talk "manual" mode: turn_detection must be sent as null and
+# the application commits audio + creates the response explicitly. Never leave
+# semantic VAD enabled by accident here; microphone access is gated in the hub.
+MANUAL_TURN_DETECTION_VALUES = frozenset(
+    {"", "off", "none", "null", "disabled", "manual", "push_to_talk", "push-to-talk"}
+)
+VAD_TURN_DETECTION_VALUES = frozenset(
+    {"semantic_vad", "semantic_vad_ec", "smart_turn", "smart_turn_v2"}
+)
+
+
+def build_turn_detection(configured: str, silence_ms: int) -> dict[str, Any] | None:
+    """Translate our turn-detection setting into the Qwen session payload.
+
+    ``None`` is intentional: Qwen interprets a null ``turn_detection`` as
+    manual/push-to-talk mode, where the hub controls every student turn.
+    """
+    value = str(configured or "").strip().lower()
+    if value in MANUAL_TURN_DETECTION_VALUES:
+        return None
+    if value.startswith("server_vad"):
+        return {
+            "type": value,
+            "threshold": 0.5,
+            "silence_duration_ms": int(silence_ms),
+        }
+    if value in VAD_TURN_DETECTION_VALUES:
+        return {"type": value}
+    # Unknown values must fail closed: do not silently enable semantic VAD.
+    return None
+
+
 # ---------------------------------------------------------------------------
 # real DashScope transport
 # ---------------------------------------------------------------------------
@@ -58,14 +90,11 @@ class QwenRealtimeSession:
 
         self._reader_task = asyncio.create_task(self._read_loop())
 
-        # semantic_vad / semantic_vad_ec detect end-of-speech by meaning, so
-        # backchannels and background noise do not trigger a turn, while real
-        # user speech can interrupt the tutor. The acoustic threshold is only
-        # meaningful for server_vad.
-        turn_detection: dict[str, Any] = {"type": settings.qwen_turn_detection}
-        if str(settings.qwen_turn_detection).startswith("server_vad"):
-            turn_detection["threshold"] = 0.5
-        turn_detection["silence_duration_ms"] = int(settings.qwen_vad_silence_ms)
+        # Manual mode is the default. The hub unlocks the microphone only after
+        # an explicit answer-requiring question, then commits the audio itself.
+        turn_detection = build_turn_detection(
+            settings.qwen_turn_detection, settings.qwen_vad_silence_ms
+        )
         try:
             await self._send(
                 {
@@ -117,6 +146,10 @@ class QwenRealtimeSession:
 
     async def commit_audio(self) -> None:
         await self._send({"type": "input_audio_buffer.commit"})
+
+    async def clear_audio(self) -> None:
+        """Discard an aborted answer before the student retries the question."""
+        await self._send({"type": "input_audio_buffer.clear"})
 
     async def create_response(self) -> None:
         await self._send({"type": "response.create"})

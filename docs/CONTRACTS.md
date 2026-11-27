@@ -323,7 +323,7 @@ Server→client (JSON text frames unless noted):
 
 | type | payload |
 |---|---|
-| `session.ready` | `{lesson_id, student_id, lease_id, board: BoardSnapshotEnvelope, transcript_cursor, lesson: LessonDetail, audio: {input_sample_rate:16000, output_sample_rate:24000, format:"pcm16", channels:1}}` |
+| `session.ready` | `{lesson_id, student_id, lease_id, board: BoardSnapshotEnvelope, transcript_cursor, lesson: LessonDetail, audio: {input_sample_rate:16000, output_sample_rate:24000, format:"pcm16", channels:1, turn_detection:"manual", mic_locked:true}}` |
 | `board.event` | `{event: BoardEvent}` |
 | `board.events` | `{events: [BoardEvent], from_sequence, to_sequence}` (replay/backfill) |
 | `board.snapshot` | `{board: BoardSnapshotEnvelope}` (periodic compaction / on request) |
@@ -331,6 +331,8 @@ Server→client (JSON text frames unless noted):
 | `audio.done` | `{response_id}` end of a tutor utterance |
 | `audio.truncated` | `{response_id, played_ms}` echo of interruption truncation |
 | `teacher.state` | `{speaking: bool, listening: bool, thinking: bool}` |
+| `mic.unlock` | `{lesson_id, request_id, reason, requires_answer: true, turn_detection:"manual"}` — only after `wait_for_student` |
+| `mic.lock` | `{lesson_id, request_id, reason}` — answer turn ended or was cancelled |
 | `transcript.entry` | `{entry: TranscriptEntry}` |
 | `lesson.state` | `{lesson: LessonDetail}` |
 | `session.interrupted` | `{reason, at_sequence}` |
@@ -343,12 +345,13 @@ Client→server:
 | type | payload |
 |---|---|
 | binary frame | raw little-endian PCM16 mono 16 kHz microphone audio (preferred) |
-| `audio.start` | `{sample_rate:16000, format:"pcm16"}` |
-| `audio.stop` | `{}` |
+| `audio.start` | `{sample_rate:16000, format:"pcm16", reason:"answer", request_id}` — accepted only while unlocked |
+| `audio.stop` | `{submitted: bool, request_id}` — `true` commits and submits; `false` clears the buffer and keeps the question open for retry |
 | `session.interrupt` | `{}` — barge-in: server cancels Qwen response, truncates playback |
 | `session.end` | `{reason?}` |
 | `board.request_snapshot` | `{}` |
 | `board.backfill` | `{after_sequence}` |
+| `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset}` — measured visible board is full; server persists one system-owned clear |
 | `ping` | `{}` |
 
 Typed questions are **not** part of the realtime contract: Qwen-Omni realtime
@@ -367,7 +370,7 @@ state), and typed input is limited to the topic field on Home.
   {"type":"session.update","session":{
     "instructions":"...", "modalities":["audio","text"], "voice":"Cherry",
     "input_audio_format":"pcm", "output_audio_format":"pcm",
-    "turn_detection":{"type":"semantic_vad_ec","silence_duration_ms":500},
+    "turn_detection":null,
     "input_audio_transcription":{"model":"qwen3-asr-flash-realtime"},
     "tools":[...]}}
   ```
@@ -381,13 +384,14 @@ state), and typed input is limited to the topic field on Home.
   `conversation.item.input_audio_transcription.completed`,
   `response.output_item.added` (function_call name), 
   `response.function_call_arguments.delta/done`, `error`.
-* `semantic_vad_ec` detects end-of-speech by meaning: real user speech (including
-  barge-in while the tutor talks) triggers a turn while backchannels and
-  background noise are filtered. The acoustic `threshold` applies only to
-  `server_vad`.
+* Semantic VAD is disabled. `turn_detection:null` selects manual/push-to-talk:
+  the hub forwards microphone audio only while one answer window is open, then
+  sends `input_audio_buffer.commit` followed by `response.create`.
 * Teaching continues automatically: on a completed, non-tool response the hub
-  sends a bare `response.create`. Only `wait_for_student` pauses the tutor;
-  `user.speech_started` (server→client) tells the UI to flush playback on barge-in.
+  sends a bare `response.create`. Only `wait_for_student` pauses the tutor, and
+  it is the sole trigger for `mic.unlock`. Local silence detection in the client
+  ends the answer window; `user.speech_started` is legacy telemetry and never
+  grants microphone access.
 * **No `conversation.item.truncate` support** on this API. Barge-in is handled
   by `response.cancel` plus a client-side playback flush; `audio.truncated` is a
   backend→client instruction with the client-measured `played_ms`, not a Qwen

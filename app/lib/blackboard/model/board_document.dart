@@ -301,19 +301,36 @@ class BoardDocument {
   /// Uses declared bounds when present, otherwise deterministic estimation
   /// (see [BoardBoundsEstimator]); annotations resolve their targets
   /// recursively. Returns null when no target exists or all targets are erased.
-  BoardRect? boundsOf(Iterable<String> elementIds) {
+  BoardRect? boundsOf(
+    Iterable<String> elementIds, {
+    Map<String, BoardRect>? measuredBounds,
+  }) {
     BoardRect? union;
     for (final id in elementIds) {
-      final bounds = _boundsOfId(id, 0);
+      final bounds = _boundsOfId(id, 0, measuredBounds: measuredBounds);
       if (bounds == null) continue;
       union = union == null ? bounds : union.union(bounds);
     }
     return union?.clamp01();
   }
 
-  BoardRect? _boundsOfId(String id, int depth) {
+  BoardRect? _boundsOfId(
+    String id,
+    int depth, {
+    Map<String, BoardRect>? measuredBounds,
+  }) {
     final element = _elements[id];
     if (element == null || !element.isVisible) return null;
+    // TextPainter measurements from the renderer take precedence for text so
+    // wraps on narrow/mobile viewports cannot be missed by annotations/focus.
+    final measured = measuredBounds?[id];
+    if (measured != null &&
+        !measured.isEmpty &&
+        (element.kind == BoardEventType.writeText ||
+            element.kind == BoardEventType.writeHeading ||
+            element.kind == BoardEventType.updateText)) {
+      return measured.clamp01();
+    }
     final declared = element.declaredBounds;
     if (declared != null && !declared.isEmpty) return declared.clamp01();
     final estimated = BoardBoundsEstimator.estimate(element);
@@ -331,7 +348,7 @@ class BoardDocument {
       final single = element.payload['target_id'];
       if (single != null) targets.add(single.toString());
       if (targets.isNotEmpty) {
-        return boundsOf(targets);
+        return boundsOf(targets, measuredBounds: measuredBounds);
       }
     }
     return null;

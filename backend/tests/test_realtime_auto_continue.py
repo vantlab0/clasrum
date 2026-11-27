@@ -6,7 +6,15 @@ import json
 
 import pytest
 
-from app.realtime.hub import LessonRealtimeHub, LessonSocket, _teacher_instructions
+from app.realtime.hub import (
+    CLIENT_AUDIO_START,
+    CLIENT_AUDIO_STOP,
+    MSG_MIC_LOCK,
+    MSG_MIC_UNLOCK,
+    LessonRealtimeHub,
+    LessonSocket,
+    _teacher_instructions,
+)
 
 
 class FakeWs:
@@ -21,6 +29,7 @@ class FakeQwen:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[dict | None] = asyncio.Queue()
         self.create_response_count = 0
+        self.clear_audio_count = 0
         self.function_outputs: list[tuple[str, str]] = []
         self.instructions = ""
 
@@ -32,6 +41,9 @@ class FakeQwen:
 
     async def commit_audio(self) -> None:
         return None
+
+    async def clear_audio(self) -> None:
+        self.clear_audio_count += 1
 
     async def create_response(self) -> None:
         self.create_response_count += 1
@@ -127,7 +139,10 @@ async def test_student_speech_started_clears_wait_and_notifies_client() -> None:
     qwen.push({"type": "input_audio_buffer.speech_started", "audio_start_ms": 100})
     await qwen.queue.put(None)
     await asyncio.wait_for(task, timeout=2)
-    assert socket.waiting_for_student is False
+    # Semantic VAD is disabled; legacy speech telemetry must not end the pause
+    # or grant microphone access.
+    assert socket.waiting_for_student is True
+    assert socket.mic_unlocked is False
     assert any(m.get("type") == "user.speech_started" for m in socket.websocket.sent)
 
 
@@ -147,11 +162,117 @@ async def test_wait_for_student_tool_call_is_handled_locally() -> None:
         },
     )
     assert socket.waiting_for_student is True
+    assert socket.mic_unlocked is True
+    assert socket.mic_request_id == "call_1"
     assert qwen.function_outputs
     call_id, output, continue_response = qwen.function_outputs[0]
     assert call_id == "call_1"
     assert json.loads(output)["ok"] is True
+    assert json.loads(output)["mic_unlocked"] is True
     assert continue_response is False  # must stop and listen, not continue talking
+    unlocks = [m for m in socket.websocket.sent if m.get("type") == MSG_MIC_UNLOCK]
+    assert len(unlocks) == 1
+    assert unlocks[0]["request_id"] == "call_1"
+    assert unlocks[0]["reason"] == "Need the answer"
+    assert unlocks[0]["requires_answer"] is True
+    assert unlocks[0]["turn_detection"] == "manual"
+
+
+@pytest.mark.asyncio
+async def test_replayed_wait_for_student_does_not_unlock_twice() -> None:
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    event = {
+        "call_id": "call_1",
+        "name": "wait_for_student",
+        "arguments": json.dumps({"reason": "Need the answer"}),
+        "response_id": "r1",
+    }
+    await hub._handle_qwen_tool_call(socket, "lesson-1", event)
+    await hub._handle_qwen_tool_call(socket, "lesson-1", event)
+    unlocks = [m for m in socket.websocket.sent if m.get("type") == MSG_MIC_UNLOCK]
+    assert len(unlocks) == 1
+    assert len(qwen.function_outputs) == 2
+    assert qwen.function_outputs[-1][2] is False
+
+
+@pytest.mark.asyncio
+async def test_audio_start_cannot_clear_wait_and_audio_stop_submits_answer() -> None:
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    await hub._handle_qwen_tool_call(
+        socket,
+        "lesson-1",
+        {
+            "call_id": "call_1",
+            "name": "wait_for_student",
+            "arguments": "{}",
+            "response_id": "r1",
+        },
+    )
+    await hub._handle_client_text(
+        socket,
+        "lesson-1",
+        json.dumps({
+            "type": CLIENT_AUDIO_START,
+            "reason": "answer",
+            "request_id": "call_1",
+        }),
+    )
+    assert socket.audio_turn_active is True
+    assert socket.waiting_for_student is True
+    await hub._handle_client_text(
+        socket,
+        "lesson-1",
+        json.dumps({
+            "type": CLIENT_AUDIO_STOP,
+            "submitted": True,
+            "request_id": "call_1",
+        }),
+    )
+    assert socket.waiting_for_student is False
+    assert socket.mic_unlocked is False
+    assert qwen.create_response_count == 1
+    assert any(m.get("type") == MSG_MIC_LOCK for m in socket.websocket.sent)
+
+
+@pytest.mark.asyncio
+async def test_locked_audio_start_is_ignored_and_cancelled_answer_keeps_wait() -> None:
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    await hub._handle_client_text(
+        socket,
+        "lesson-1",
+        json.dumps({"type": CLIENT_AUDIO_START, "reason": "answer"}),
+    )
+    assert socket.audio_turn_active is False
+    await hub._handle_qwen_tool_call(
+        socket,
+        "lesson-1",
+        {
+            "call_id": "call_2",
+            "name": "wait_for_student",
+            "arguments": "{}",
+            "response_id": "r1",
+        },
+    )
+    await hub._handle_client_text(
+        socket,
+        "lesson-1",
+        json.dumps({
+            "type": CLIENT_AUDIO_STOP,
+            "submitted": False,
+            "request_id": "call_2",
+        }),
+    )
+    assert socket.waiting_for_student is True
+    assert socket.mic_unlocked is True  # retry remains possible
+    assert qwen.clear_audio_count == 1
+    assert qwen.create_response_count == 0
+    assert not any(m.get("type") == MSG_MIC_LOCK for m in socket.websocket.sent)
 
 
 def test_instructions_advertise_continuous_teaching() -> None:
@@ -160,3 +281,5 @@ def test_instructions_advertise_continuous_teaching() -> None:
     )
     assert "KEEP TEACHING AUTOMATICALLY" in instructions
     assert "wait_for_student" in instructions
+    assert "unlocks the student's microphone" in instructions
+    assert "Rhetorical" in instructions or "rhetorical" in instructions

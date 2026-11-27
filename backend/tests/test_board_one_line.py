@@ -3,6 +3,7 @@
 from app.board.schemas import (
     MAX_BOARD_LINE_CHARS,
     MAX_BOARD_LINE_WORDS,
+    WriteHeadingArgs,
     WriteOnBoardArgs,
 )
 
@@ -38,8 +39,18 @@ def test_paragraph_cannot_be_dumped_in_one_call() -> None:
     assert len(text) <= MAX_BOARD_LINE_CHARS
 
 
-def test_title_is_a_single_heading_line() -> None:
+def test_title_is_a_single_h2_heading_line() -> None:
     payload = _write("Introduction to Photosynthesis", "h1")
     assert payload["text"] == "Introduction to Photosynthesis"
-    assert payload["style"] == "heading"
-    assert payload["heading_level"] == 1
+    assert payload["style"] == "subheading"
+    assert payload["heading_level"] == 2
+    assert _write("Introduction to Photosynthesis", "h2") == payload
+
+
+def test_legacy_write_heading_level_one_renders_as_h2() -> None:
+    payload = WriteHeadingArgs(
+        text="Photosynthesis",
+        position={"x": 0.1, "y": 0.1},
+        level=1,
+    ).build_payload()
+    assert payload["level"] == 2

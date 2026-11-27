@@ -22,6 +22,8 @@ enum RealtimeMessageType {
   audioDone,
   audioTruncated,
   userSpeechStarted,
+  micUnlock,
+  micLock,
   teacherState,
   transcriptEntry,
   lessonState,
@@ -67,6 +69,9 @@ class RealtimeMessage {
   bool get teacherSpeaking => payload['speaking'] == true;
   bool get teacherListening => payload['listening'] == true;
   bool get teacherThinking => payload['thinking'] == true;
+  String? get micRequestId => payload['request_id'] as String?;
+  String? get micReason => payload['reason'] as String?;
+  bool get micRequiresAnswer => payload['requires_answer'] != false;
   String? get errorCode => payload['code'] as String?;
   String? get errorMessage => payload['message'] as String?;
   bool get errorRetryable => payload['retryable'] == true;
@@ -238,6 +243,43 @@ class RealtimeClient extends ChangeNotifier {
     await _send({'type': 'board.request_snapshot'});
   }
 
+  /// Report that the measured, visible board screen is full.
+  ///
+  /// The server owns the wipe so snapshots, replay and the tutor's context stay
+  /// authoritative; this is only a measurement report, never a local clear.
+  Future<void> reportViewportFull({
+    required int sequence,
+    required double coverage,
+    required BoardRect visibleRect,
+    required double scale,
+    required Offset offset,
+  }) async {
+    await _send(viewportFullPayload(
+      sequence: sequence,
+      coverage: coverage,
+      visibleRect: visibleRect,
+      scale: scale,
+      offset: offset,
+    ));
+  }
+
+  @visibleForTesting
+  static Map<String, dynamic> viewportFullPayload({
+    required int sequence,
+    required double coverage,
+    required BoardRect visibleRect,
+    required double scale,
+    required Offset offset,
+  }) =>
+      <String, dynamic>{
+        'type': 'board.viewport_full',
+        'sequence': sequence < 0 ? 0 : sequence,
+        'coverage': coverage.clamp(0.0, 1.0),
+        'visible_rect': visibleRect.toJson(),
+        'scale': scale.clamp(0.5, 2.0),
+        'offset': {'x': offset.dx, 'y': offset.dy},
+      };
+
   /// Request backfill of events after [afterSequence] (used on reconnect/gap).
   Future<void> backfill({required int afterSequence}) async {
     await _send({'type': 'board.backfill', 'after_sequence': afterSequence});
@@ -263,19 +305,42 @@ class RealtimeClient extends ChangeNotifier {
     }
   }
 
-  /// Signal that the mic stream is starting.
-  Future<void> audioStart() async {
-    await _send({
-      'type': 'audio.start',
-      'sample_rate': 16000,
-      'format': 'pcm16',
-    });
+  /// Signal that an explicit answer window is starting.
+  ///
+  /// The backend rejects audio before a `mic.unlock` message and keeps the
+  /// wait-for-student pause active until a submitted `audio.stop` arrives.
+  Future<void> audioStart({required String requestId}) async {
+    await _send(audioStartPayload(requestId: requestId));
   }
 
-  /// Signal that the mic stream is stopping (triggers a tutor response).
-  Future<void> audioStop() async {
-    await _send({'type': 'audio.stop'});
+  @visibleForTesting
+  static Map<String, dynamic> audioStartPayload({required String requestId}) =>
+      <String, dynamic>{
+        'type': 'audio.start',
+        'sample_rate': 16000,
+        'format': 'pcm16',
+        'reason': 'answer',
+        'request_id': requestId,
+      };
+
+  /// Finish (or cancel) the explicit answer window.
+  Future<void> audioStop({
+    required bool submitted,
+    String? requestId,
+  }) async {
+    await _send(audioStopPayload(submitted: submitted, requestId: requestId));
   }
+
+  @visibleForTesting
+  static Map<String, dynamic> audioStopPayload({
+    required bool submitted,
+    String? requestId,
+  }) =>
+      <String, dynamic>{
+        'type': 'audio.stop',
+        'submitted': submitted,
+        if (requestId != null) 'request_id': requestId,
+      };
 
   // ------------------------------------------------------------------- send --
 
@@ -477,6 +542,10 @@ class RealtimeClient extends ChangeNotifier {
         return RealtimeMessageType.audioTruncated;
       case 'user.speech_started':
         return RealtimeMessageType.userSpeechStarted;
+      case 'mic.unlock':
+        return RealtimeMessageType.micUnlock;
+      case 'mic.lock':
+        return RealtimeMessageType.micLock;
       case 'teacher.state':
         return RealtimeMessageType.teacherState;
       case 'transcript.entry':

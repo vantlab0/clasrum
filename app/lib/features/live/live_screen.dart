@@ -12,6 +12,7 @@ import '../../blackboard/model/board_document.dart';
 import '../../blackboard/model/board_event.dart';
 import '../../blackboard/model/board_geometry.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
+import '../../blackboard/runtime/board_fullness_detector.dart';
 import '../../blackboard/runtime/board_viewport_controller.dart';
 import '../../core/theme.dart';
 import '../../core/widgets/pwony_icons.dart';
@@ -51,9 +52,11 @@ class _LiveScreenState extends State<LiveScreen>
   StreamSubscription<Uint8List>? _audioStreamSub;
   StreamSubscription<Amplitude>? _amplitudeSub;
   bool _speechDetected = false;
-  // Dynamic mic: stays open after session.ready so semantic VAD can hear the
-  // student at any time, including while the tutor is speaking (barge-in).
+  // Manual-turn mic: locked until the backend sends mic.unlock after an
+  // explicit, answer-requiring teacher question.
   bool _micContinuous = false;
+  bool _micUnlockedForQuestion = false;
+  String? _activeMicRequestId;
   double _noiseFloorDb = -70.0;
   bool _submittingTurn = false;
   DateTime? _speechStartedAt;
@@ -73,6 +76,8 @@ class _LiveScreenState extends State<LiveScreen>
 
   late final BlackboardController _boardController;
   late final BoardViewportController _viewportController;
+  BoardFullnessSnapshot? _lastBoardFullness;
+  int _reportedFullSequence = -1;
   late final AnimationController _pulseController;
   late final AiAudioPlaybackController _audioPlayback;
 
@@ -95,9 +100,13 @@ class _LiveScreenState extends State<LiveScreen>
     // Track board content bounds so the viewport can clamp panning.
     _boardController.addListener(() {
       if (!mounted) return;
-      final bounds = _boardController.document.allVisibleBounds;
+      final bounds = _boardController.measuredContentBounds();
       _viewportController.onContentBoundsChanged(bounds);
+      // Measured bounds are written during paint; check after that frame.
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _recheckBoardFullness());
     });
+    _viewportController.addListener(_recheckBoardFullness);
     _boardController.onBackfillRequested = (afterSequence) {
       unawaited(widget.client.backfill(afterSequence: afterSequence));
     };
@@ -126,7 +135,9 @@ class _LiveScreenState extends State<LiveScreen>
         switch (state) {
           case ConnectionState.connected:
             _error = null;
-            unawaited(_startContinuousMic());
+            // The microphone stays locked until a direct teacher question
+            // arrives as mic.unlock.
+            break;
           case ConnectionState.connecting:
             break;
           case ConnectionState.interrupted:
@@ -169,11 +180,12 @@ class _LiveScreenState extends State<LiveScreen>
     unawaited(_errSub?.cancel());
     unawaited(_msgSub?.cancel());
     _micContinuous = false;
-    unawaited(_stopMic(discard: true, silent: true));
+    unawaited(_stopMic(discard: true, silent: true, notifyServer: false));
     unawaited(_disposeCamera());
     unawaited(_audioPlayback.reset(endState: AiPlaybackState.idle));
     _audioPlayback.dispose();
     _pulseController.dispose();
+    _viewportController.removeListener(_recheckBoardFullness);
     _boardController.dispose();
     _viewportController.dispose();
     super.dispose();
@@ -187,7 +199,7 @@ class _LiveScreenState extends State<LiveScreen>
       // Keep session/board intact; stop mic capture to avoid leaving it active.
       if (_micPhase == _MicPhase.listening) {
         _micContinuous = false;
-        unawaited(_stopMic(discard: true, silent: true));
+        unawaited(_stopMic(discard: true, silent: true, notifyServer: false));
       }
       // Avoid background playback surprises; preserve board/session/realtime state.
       if (_audioPlayback.state == AiPlaybackState.playing ||
@@ -308,6 +320,46 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
+  /// Uses the renderer's measured bounds to decide whether the student's
+  /// visible board screen is full. A report is sent at most once per sequence;
+  /// the server owns the actual wipe.
+  void _recheckBoardFullness() {
+    if (!mounted || _connecting || _boardController.isAnimating ||
+        _viewportController.isManuallyInteracting) {
+      return;
+    }
+    final document = _boardController.document;
+    if (document.visibleElements.isEmpty) {
+      _lastBoardFullness = null;
+      return;
+    }
+    final aliveIds = document.visibleElements.map((e) => e.elementId).toSet();
+    _boardController.renderCache.bounds.retainOnly(aliveIds);
+    final boxes = <BoardRect>[];
+    for (final id in aliveIds) {
+      final measured = _boardController.renderCache.bounds[id] ??
+          document.boundsOf(<String>[id]);
+      if (measured != null && !measured.isEmpty) boxes.add(measured);
+    }
+    if (boxes.isEmpty) return;
+    final snapshot = BoardFullnessDetector.snapshot(
+      visibleRect: _viewportController.visibleRect,
+      elementBounds: boxes,
+      sequence: _boardController.appliedSequence,
+      wasFull: _lastBoardFullness?.isFull ?? false,
+    );
+    _lastBoardFullness = snapshot;
+    if (!snapshot.isFull || snapshot.sequence <= _reportedFullSequence) return;
+    _reportedFullSequence = snapshot.sequence;
+    unawaited(widget.client.reportViewportFull(
+      sequence: snapshot.sequence,
+      coverage: snapshot.coverage,
+      visibleRect: snapshot.visibleRect,
+      scale: _viewportController.scale,
+      offset: _viewportController.offset,
+    ));
+  }
+
   void _handleMessage(RealtimeMessage message) {
     if (!mounted) return;
     setState(() {
@@ -325,7 +377,6 @@ class _LiveScreenState extends State<LiveScreen>
       case RealtimeMessageType.sessionReady:
         _applySessionReady(message.payload);
         _startTutorWaitTimer();
-        unawaited(_startContinuousMic());
         break;
       case RealtimeMessageType.boardSnapshot:
         _applyBoardSnapshot(message.payload);
@@ -364,12 +415,23 @@ class _LiveScreenState extends State<LiveScreen>
         ));
         break;
       case RealtimeMessageType.userSpeechStarted:
-        // Semantic VAD heard real user speech: flush tutor playback so the
-        // student can be heard clearly while the tutor is talking.
+        // Legacy VAD telemetry. It never grants microphone access; local
+        // amplitude detection handles barge-in during answer turns.
         unawaited(_audioPlayback.interrupt(keepNewer: true));
         if (mounted) {
           setState(() => _speechDetected = true);
         }
+        break;
+      case RealtimeMessageType.micUnlock:
+        if (message.micRequiresAnswer) {
+          unawaited(_unlockMicForQuestion(
+            requestId: message.micRequestId ?? '',
+            reason: message.micReason,
+          ));
+        }
+        break;
+      case RealtimeMessageType.micLock:
+        unawaited(_lockMicLocally());
         break;
       case RealtimeMessageType.sessionEnded:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.completed));
@@ -399,7 +461,9 @@ class _LiveScreenState extends State<LiveScreen>
       case RealtimeMessageType.sessionInterrupted:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
         _micContinuous = false;
-        unawaited(_stopMic(discard: true, silent: true));
+        _micUnlockedForQuestion = false;
+        _activeMicRequestId = null;
+        unawaited(_stopMic(discard: true, silent: true, notifyServer: false));
         break;
       default:
         break;
@@ -448,6 +512,7 @@ class _LiveScreenState extends State<LiveScreen>
       debugPrint('[LiveScreen] board event received type=${event.type} seq=${event.sequence} id=${event.eventId}');
       _boardController.enqueue(event);
       debugPrint('[LiveScreen] board event enqueued/applied seq=${event.sequence}');
+      if (_isFullBoardClear(event)) _recycleViewportAfterClear();
     } catch (e, st) {
       debugPrint('[LiveScreen] Failed to apply board event: $e\n$st');
     }
@@ -466,7 +531,27 @@ class _LiveScreenState extends State<LiveScreen>
             '[LiveScreen] Failed to parse board event in batch: $e\n$st');
       }
     }
-    if (events.isNotEmpty) _boardController.enqueueAll(events);
+    if (events.isNotEmpty) {
+      _boardController.enqueueAll(events);
+      if (events.any(_isFullBoardClear)) _recycleViewportAfterClear();
+    }
+  }
+
+  bool _isFullBoardClear(BoardEvent event) {
+    if (event.type == BoardEventType.clear.wireName) return true;
+    if (event.type != BoardEventType.erase.wireName) return false;
+    final raw = event.payload['scope'] ?? event.payloadParsed.raw['scope'];
+    return raw?.toString().toLowerCase() == 'all';
+  }
+
+  /// Reuse the same visible board screen after a persisted wipe: drop stale
+  /// measurements and return from a zoomed/panned window to the full board.
+  void _recycleViewportAfterClear() {
+    _lastBoardFullness = null;
+    _reportedFullSequence = -1;
+    _boardController.renderCache.bounds.clear();
+    _viewportController.onContentBoundsChanged(null);
+    _viewportController.setViewport(Offset.zero, 1.0);
   }
 
   void _applyViewportFocus(Map<String, dynamic> payload) {
@@ -528,10 +613,9 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   void _handleAudioDelta(RealtimeMessage message) {
-    // Ignore new tutor audio during a push-to-talk turn. The always-on mic must
-    // still hear the tutor while it listens for barge-in.
+    // During an answer turn local amplitude detection flushes playback when
+    // the student begins speaking.
     if (_micPhase == _MicPhase.submitting) return;
-    if (_micPhase == _MicPhase.listening && !_micContinuous) return;
     unawaited(_enqueueAudioDelta(message));
   }
 
@@ -615,7 +699,7 @@ class _LiveScreenState extends State<LiveScreen>
     );
     if (shouldLeave == true && mounted) {
       _micContinuous = false;
-      await _stopMic(discard: true, silent: true);
+      await _stopMic(discard: true, silent: true, notifyServer: false);
       await _audioPlayback.reset(endState: AiPlaybackState.completed);
       await widget.client.disconnect();
       if (mounted) Navigator.of(context).maybePop(true);
@@ -623,10 +707,7 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   Future<void> _togglePause() async {
-    // The always-on mic must not disable playback controls.
-    if ((_micPhase == _MicPhase.listening && !_micContinuous) || _submittingTurn) {
-      return;
-    }
+    if (_submittingTurn) return;
     final nextPaused = !_paused;
     setState(() {
       _paused = nextPaused;
@@ -639,36 +720,65 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   Future<void> _onMicPressed() async {
-    if (_connecting || _submittingTurn) return;
-    if (_micContinuous && _micPhase == _MicPhase.listening) {
-      // Dynamic mic is live: tapping mutes it instead of pushing a turn.
-      _micContinuous = false;
-      await _stopMic(discard: true, silent: true);
-      return;
-    }
+    if (_connecting || _submittingTurn || !_micUnlockedForQuestion) return;
     if (_micPhase == _MicPhase.listening) {
+      // Tap ends an answer turn; long-press cancels it and keeps the window open.
       await _finishListening(manualStop: true);
       return;
     }
-    await _startListening(continuous: true);
+    if (_micPhase == _MicPhase.idle) {
+      await _startListening();
+    }
   }
 
   Future<void> _cancelListening() async {
     if (_micPhase != _MicPhase.listening) return;
-    if (_micContinuous) {
-      _micContinuous = false;
-      await _stopMic(discard: true, silent: true);
-      return;
-    }
-    await _stopMic(discard: true, silent: false);
+    // Clear the uncommitted audio, but keep the answer window unlocked so the
+    // student can retry the same teacher question.
+    await _stopMic(discard: true, silent: true);
     if (!mounted) return;
-    setState(() {
-      _micPhase = _MicPhase.idle;
-    });
+    setState(() => _micPhase = _MicPhase.idle);
   }
 
-  Future<void> _startListening({bool continuous = false}) async {
-    if (_lessonId == null || _micPhase != _MicPhase.idle || _submittingTurn) {
+  /// Open the microphone only for the answer window granted by `mic.unlock`.
+  Future<void> _unlockMicForQuestion({
+    required String requestId,
+    String? reason,
+  }) async {
+    if (!mounted || requestId.isEmpty) return;
+    if (_connecting || _submittingTurn || _lessonId == null) return;
+    if (_micPhase == _MicPhase.listening || _micPhase == _MicPhase.submitting) {
+      return;
+    }
+    _micUnlockedForQuestion = true;
+    _activeMicRequestId = requestId;
+    if (mounted) {
+      setState(() {
+        _error = null;
+        _waitingForTutor = false;
+        if (reason != null && reason.isNotEmpty) {
+          _startupStatusMessage = reason;
+        }
+      });
+    }
+    await _startListening();
+  }
+
+  Future<void> _lockMicLocally() async {
+    _micUnlockedForQuestion = false;
+    _activeMicRequestId = null;
+    _micContinuous = false;
+    await _stopMic(discard: true, silent: true, notifyServer: false);
+  }
+
+  Future<void> _startListening() async {
+    final requestId = _activeMicRequestId;
+    if (_lessonId == null ||
+        !_micUnlockedForQuestion ||
+        requestId == null ||
+        requestId.isEmpty ||
+        _micPhase != _MicPhase.idle ||
+        _submittingTurn) {
       return;
     }
     if (_cameraActive || _cameraOpening) return;
@@ -677,20 +787,13 @@ class _LiveScreenState extends State<LiveScreen>
       final hasPermission = await _recorder.hasPermission();
       if (!hasPermission) {
         if (!mounted) return;
-        setState(() => _error = 'Microphone permission is required to speak.');
+        setState(() => _error = 'Microphone permission is required to answer.');
         return;
       }
 
-      // Push-to-talk interrupts the tutor; the always-on mic must not, because
-      // semantic VAD decides barge-in from what the student actually says.
-      if (!continuous) {
-        await widget.client.interrupt();
-        await _audioPlayback.interrupt(keepNewer: true);
-        _paused = false;
-      }
       setState(() {
         _micPhase = _MicPhase.listening;
-        _micContinuous = continuous;
+        _micContinuous = true;
         _noiseFloorDb = -70.0;
         _speechDetected = false;
         _capturedBytes = 0;
@@ -702,7 +805,7 @@ class _LiveScreenState extends State<LiveScreen>
         }
       });
 
-      await widget.client.audioStart();
+      await widget.client.audioStart(requestId: requestId);
       final stream = await _recorder.startStream(
         const RecordConfig(
           encoder: AudioEncoder.pcm16bits,
@@ -722,8 +825,14 @@ class _LiveScreenState extends State<LiveScreen>
         },
         onError: (_) {
           _micContinuous = false;
+          _micUnlockedForQuestion = false;
+          _activeMicRequestId = null;
           if (!mounted) return;
-          unawaited(_stopMic(discard: true, silent: false));
+          unawaited(_stopMic(
+            discard: true,
+            silent: false,
+            notifyServer: false,
+          ));
           setState(() => _error = 'Microphone capture failed.');
         },
         cancelOnError: true,
@@ -734,9 +843,8 @@ class _LiveScreenState extends State<LiveScreen>
           .listen((amp) {
         if (!mounted || _micPhase != _MicPhase.listening) return;
         final now = DateTime.now();
-        // Track the quietest recent level as a noise floor so a noisy room
-        // does not look like speech. The server's semantic VAD makes the
-        // actual turn decision; this only drives local UI / push-to-talk.
+        // Manual mode has no server VAD: local amplitude decides when the
+        // answer ended and flushes tutor playback when the student begins.
         final db = amp.current;
         if (db < _noiseFloorDb) {
           _noiseFloorDb = db;
@@ -745,40 +853,34 @@ class _LiveScreenState extends State<LiveScreen>
               math.min(_noiseFloorDb + 0.12, _speechDbThreshold - 5);
         }
         final speaking = db > math.max(_speechDbThreshold, _noiseFloorDb + 10);
+        final firstSpeech = speaking && !_speechDetected;
         if (speaking) {
           _speechDetected = true;
           _lastVoiceAt = now;
         }
-        if (!continuous) _evaluateVad(now);
+        if (firstSpeech) {
+          unawaited(_audioPlayback.interrupt(keepNewer: true));
+        }
+        _evaluateVad(now);
       });
 
-      // Local silence timer is only needed for push-to-talk turns. Dynamic mode
-      // lets the server's semantic VAD decide when the student finished.
       _vadTimer?.cancel();
-      _vadTimer = null;
-      if (!continuous) {
-        _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-          if (!mounted || _micPhase != _MicPhase.listening) return;
-          _evaluateVad(DateTime.now());
-        });
-      }
+      _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (!mounted || _micPhase != _MicPhase.listening) return;
+        _evaluateVad(DateTime.now());
+      });
     } catch (e, st) {
       debugPrint('[LiveScreen] Microphone start failed: $e\n$st');
       _micContinuous = false;
-      await _stopMic(discard: true, silent: true);
+      _micUnlockedForQuestion = false;
+      _activeMicRequestId = null;
+      await _stopMic(discard: true, silent: true, notifyServer: false);
       if (!mounted) return;
       setState(() {
         _micPhase = _MicPhase.idle;
         _error = 'Microphone access failed: $e';
       });
     }
-  }
-
-  /// Open the always-on mic as soon as the realtime session is ready.
-  Future<void> _startContinuousMic() async {
-    if (_lessonId == null || _connecting || _submittingTurn) return;
-    if (_micPhase != _MicPhase.idle || _micContinuous) return;
-    await _startListening(continuous: true);
   }
 
   void _updateWaveformFromPcm(Uint8List chunk) {
@@ -828,7 +930,10 @@ class _LiveScreenState extends State<LiveScreen>
     final shouldSubmit = hasAudio &&
         (_speechDetected || manualStop || _capturedBytes >= 8000);
     if (!shouldSubmit) {
-      await _stopMic(discard: true, silent: false);
+      // Clear silence/noise from the buffer, but keep the teacher's question
+      // open so the student can still answer.
+      await _stopMic(discard: true, silent: true);
+      if (mounted) setState(() => _micPhase = _MicPhase.idle);
       return;
     }
     _submittingTurn = true;
@@ -837,9 +942,12 @@ class _LiveScreenState extends State<LiveScreen>
     }
     try {
       await _stopMic(discard: false, silent: true);
+      _micUnlockedForQuestion = false;
+      _activeMicRequestId = null;
       if (mounted) {
         setState(() {
           _micPhase = _MicPhase.idle;
+          _micContinuous = false;
         });
       }
     } finally {
@@ -847,7 +955,11 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
-  Future<void> _stopMic({required bool discard, required bool silent}) async {
+  Future<void> _stopMic({
+    required bool discard,
+    required bool silent,
+    bool notifyServer = true,
+  }) async {
     _vadTimer?.cancel();
     _vadTimer = null;
     await _audioStreamSub?.cancel();
@@ -862,10 +974,13 @@ class _LiveScreenState extends State<LiveScreen>
       debugPrint('[LiveScreen] Failed to stop recorder: $e\n$st');
     }
 
-    if (_micPhase == _MicPhase.listening || _micPhase == _MicPhase.submitting) {
-      if (!discard) {
-        await widget.client.audioStop();
-      }
+    if (notifyServer &&
+        (_micPhase == _MicPhase.listening ||
+            _micPhase == _MicPhase.submitting)) {
+      await widget.client.audioStop(
+        submitted: !discard,
+        requestId: _activeMicRequestId,
+      );
     }
 
     if (mounted && !silent) {
@@ -895,7 +1010,7 @@ class _LiveScreenState extends State<LiveScreen>
       if (!_micContinuous) return;
       // Camera capture and the always-on mic must not fight over the device.
       _micContinuous = false;
-      await _stopMic(discard: true, silent: true);
+      await _stopMic(discard: true, silent: true, notifyServer: false);
     }
     setState(() {
       _cameraOpening = true;
@@ -1145,7 +1260,7 @@ class _LiveScreenState extends State<LiveScreen>
                 child: _BottomControls(
                   paused: _paused,
                   micPhase: _micPhase,
-                  micContinuous: _micContinuous,
+                  micUnlocked: _micUnlockedForQuestion,
                   connecting: _connecting,
                   onPauseToggle: _togglePause,
                   onMicPressed: _onMicPressed,
@@ -1286,7 +1401,7 @@ class _BottomControls extends StatelessWidget {
   const _BottomControls({
     required this.paused,
     required this.micPhase,
-    required this.micContinuous,
+    required this.micUnlocked,
     required this.connecting,
     required this.onPauseToggle,
     required this.onMicPressed,
@@ -1298,7 +1413,7 @@ class _BottomControls extends StatelessWidget {
 
   final bool paused;
   final _MicPhase micPhase;
-  final bool micContinuous;
+  final bool micUnlocked;
   final bool connecting;
   final VoidCallback onPauseToggle;
   final VoidCallback onMicPressed;
@@ -1314,9 +1429,7 @@ class _BottomControls extends StatelessWidget {
       children: <Widget>[
         _CircleControl(
           tooltip: paused ? 'Resume' : 'Pause',
-          onPressed: micPhase == _MicPhase.listening && !micContinuous
-              ? null
-              : onPauseToggle,
+          onPressed: micPhase == _MicPhase.listening ? null : onPauseToggle,
           background: paused
               ? AppColors.red.withValues(alpha: 0.92)
               : AppColors.surface.withValues(alpha: 0.45),
@@ -1332,8 +1445,7 @@ class _BottomControls extends StatelessWidget {
         const SizedBox(width: 12),
         _MicControl(
           phase: micPhase,
-          continuous: micContinuous,
-          enabled: !connecting,
+          enabled: !connecting && micUnlocked,
           onPressed: onMicPressed,
           onCancel: onMicCancel,
           pulse: pulse,
@@ -1342,9 +1454,7 @@ class _BottomControls extends StatelessWidget {
         const SizedBox(width: 12),
         _CircleControl(
           tooltip: 'Camera',
-          onPressed: micPhase == _MicPhase.listening && !micContinuous
-              ? null
-              : onCameraPressed,
+          onPressed: micPhase == _MicPhase.listening ? null : onCameraPressed,
           background: AppColors.surface.withValues(alpha: 0.45),
           borderColor: AppColors.border.withValues(alpha: 0.55),
           child: const PwonyIcon(
@@ -1415,7 +1525,6 @@ class _CircleControl extends StatelessWidget {
 class _MicControl extends StatelessWidget {
   const _MicControl({
     required this.phase,
-    required this.continuous,
     required this.enabled,
     required this.onPressed,
     required this.onCancel,
@@ -1424,7 +1533,6 @@ class _MicControl extends StatelessWidget {
   });
 
   final _MicPhase phase;
-  final bool continuous;
   final bool enabled;
   final VoidCallback onPressed;
   final VoidCallback onCancel;
@@ -1444,14 +1552,16 @@ class _MicControl extends StatelessWidget {
     return Semantics(
       button: true,
       label: listening
-          ? (continuous ? 'Microphone live, tap to mute' : 'Listening')
-          : 'Speak',
+          ? 'Answering, tap to send'
+          : enabled
+              ? 'Tap to answer'
+              : 'Waiting for a question',
       child: Tooltip(
         message: listening
-            ? (continuous
-                ? 'Always listening (semantic VAD)… tap to mute'
-                : 'Listening… tap to send, long press to cancel')
-            : 'Tap to speak',
+            ? 'Listening for your answer… tap to send, long press to cancel'
+            : enabled
+                ? 'Your answer is requested — tap to speak'
+                : 'The microphone unlocks only when the tutor asks for an answer',
         child: ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: BackdropFilter(
