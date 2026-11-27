@@ -394,22 +394,70 @@ class _BoardPainter extends CustomPainter {
     Color color,
   ) {
     final payload = element.payload;
+    // Equation-style text is routed by the caller to [_paintEquationElement]
+    // and rendered by [_LatexOverlay], never as prose on this canvas.
+    final rawStyle = (element.style ?? payload['style'] ?? _styleForType(element.type))
+        .toString()
+        .toLowerCase();
+
     final text = _textForTextElement(element);
     if (text == null || text.isEmpty) return;
 
     final px = transform.sx(position.x);
     final py = transform.sy(position.y);
-    final width = transform.width;
 
+    final headingLevel = _headingLevel(element);
     final styleSpec = ChalkTextStyleSpec.forName(
-      element.style ?? _styleForType(element.type),
-      headingLevel: _headingLevel(element),
+      rawStyle,
+      headingLevel: headingLevel,
       definitionTerm: element.type == BoardEventType.writeDefinition.wireName,
     );
-    final fontSizePx = transform.fontPixels(styleSpec.heightFraction);
-    final maxWidthPx = (payload['max_width'] as num?)?.toDouble() ?? width;
 
-    _textEngine.paintText(
+    final fontScale = (payload['font_scale'] as num?)?.toDouble() ?? 1.0;
+    final fontSizePx = transform.fontPixels(styleSpec.heightFraction) * fontScale.clamp(0.5, 2.5);
+    final maxWidthNorm = (payload['max_width'] as num?)?.toDouble();
+    final maxWidthPx = maxWidthNorm != null
+        ? (maxWidthNorm * transform.width).clamp(40.0, transform.width)
+        : (transform.width - (px - transform.contentRect.left) - 8).clamp(40.0, transform.width);
+
+    final alignStr = (payload['align'] as String?) ?? 'left';
+    final textAlign = alignStr == 'center'
+        ? TextAlign.center
+        : alignStr == 'right'
+            ? TextAlign.right
+            : TextAlign.left;
+
+    // Highlight behind text (no opaque white).
+    final highlight = payload['highlight'] == true;
+    if (highlight) {
+      final layout = _textEngine.layout(
+        text: text,
+        spec: styleSpec,
+        color: color,
+        fontSizePx: fontSizePx,
+        maxWidthPx: maxWidthPx,
+        textAlign: textAlign,
+      );
+      final highlightColor = ChalkPalette.resolve(
+        payload['highlight_color'] ?? 'yellow',
+        fallback: ChalkPalette.yellow,
+      );
+      final bgRect = Rect.fromLTWH(
+        px - 4,
+        py - 2,
+        layout.width + 8,
+        layout.height + 4,
+      );
+      final bgPaint = Paint()
+        ..color = ChalkPalette.withOpacity(highlightColor, 0.22)
+        ..style = PaintingStyle.fill;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(bgRect, const Radius.circular(4)),
+        bgPaint,
+      );
+    }
+
+    final paintedRect = _textEngine.paintText(
       canvas,
       text,
       origin: Offset(px, py),
@@ -418,17 +466,22 @@ class _BoardPainter extends CustomPainter {
       fontSizePx: fontSizePx,
       maxWidthPx: maxWidthPx,
       progress: progress,
+      textAlign: textAlign,
     );
 
+    final measured = ChalkGeometry.normalizedBounds(paintedRect, transform.contentRect);
     bounds.put(
       element.elementId,
-      BoardRect.fromPositionSize(position, BoardSize(0.06, 0.06)),
+      measured.isEmpty
+          ? BoardRect.fromPositionSize(position, BoardSize(0.2, 0.05))
+          : measured,
     );
   }
 
   String? _textForTextElement(BoardElement element) {
     final payload = element.payload;
-    if (payload.containsKey('text')) return payload['text'] as String?;
+    final text = payload['text'] as String?;
+    if (text != null && text.isNotEmpty) return text;
     if (payload.containsKey('term') && payload.containsKey('text')) {
       return '${payload['term']}: ${payload['text']}';
     }
@@ -527,8 +580,13 @@ class _BoardPainter extends CustomPainter {
     final rect = transform.rectToPixels(BoardRect.fromPositionSize(pos, size));
     final strokeWidth =
         transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
-    final fill = ChalkPalette.resolve(payload['fill_color'],
-        fallback: color.withValues(alpha: 0.15));
+    final rawFill = payload['fill_color'];
+    final Color? fill = rawFill == null
+        ? null
+        : ChalkPalette.withOpacity(
+            ChalkPalette.resolve(rawFill, fallback: color),
+            0.25,
+          );
 
     final path = Path();
     switch (shape) {
@@ -579,8 +637,9 @@ class _BoardPainter extends CustomPainter {
         break;
     }
 
-    final fillPaint = Paint()..color = fill;
-    canvas.drawPath(path, fillPaint);
+    if (fill != null) {
+      canvas.drawPath(path, Paint()..color = fill);
+    }
     final strokePaint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
@@ -615,9 +674,12 @@ class _BoardPainter extends CustomPainter {
 
     final strokeWidth =
         transform.strokePixels((payload['stroke_width'] as num?)?.toDouble());
-    final fill = ChalkPalette.resolve(payload['fill_color'],
-        fallback: color.withValues(alpha: 0.12));
-    if (payload['closed'] == true) {
+    final rawFill = payload['fill_color'];
+    if (payload['closed'] == true && rawFill != null) {
+      final fill = ChalkPalette.withOpacity(
+        ChalkPalette.resolve(rawFill, fallback: color),
+        0.22,
+      );
       canvas.drawPath(path, Paint()..color = fill);
     }
     final strokePaint = Paint()

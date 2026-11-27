@@ -107,6 +107,17 @@ class ChalkTextStyleSpec {
       letterSpacingEm: 0.02,
     ),
     'body': ChalkTextStyleSpec(name: 'body', heightFraction: 0.032),
+    'small': ChalkTextStyleSpec(
+      name: 'small',
+      heightFraction: 0.026,
+      opacity: 0.95,
+    ),
+    'equation': ChalkTextStyleSpec(
+      name: 'equation',
+      heightFraction: 0.038,
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.005,
+    ),
     'definition': ChalkTextStyleSpec(
       name: 'definition',
       heightFraction: 0.032,
@@ -147,7 +158,7 @@ class ChalkTextStyleSpec {
     bool definitionTerm = false,
   }) {
     if (definitionTerm) return _specs['definitionTerm']!;
-    final normalized = (style ?? 'body').toLowerCase();
+    final normalized = (style ?? 'body').toLowerCase().trim();
     if (normalized == 'heading' || normalized == 'subheading') {
       final level = headingLevel.clamp(1, 6);
       return _specs['h$level'] ?? _specs['heading']!;

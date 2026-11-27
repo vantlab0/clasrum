@@ -125,6 +125,11 @@ class WriteTextPayload extends BoardPayload {
         headingLevel = _headingLevelValue(
           raw['heading_level'] ?? raw['level'] ?? raw['style'],
         ),
+        highlight = raw['highlight'] == true,
+        highlightColor = _str(raw['highlight_color']),
+        writingStyle = _str(raw['writing_style']),
+        sidePreference = _str(raw['side_preference']),
+        positionHint = _str(raw['position_hint']),
         latex = _str(raw['latex']),
         _warnings = <String>[
           if (_str(raw['text']) == null) 'write_text.text is required',
@@ -142,7 +147,13 @@ class WriteTextPayload extends BoardPayload {
   final String? align;
   final double? fontScale;
   final double? maxWidth;
+  /// 1-6 for a heading, 1 by default for plain body text.
   final int headingLevel;
+  final bool highlight;
+  final String? highlightColor;
+  final String? writingStyle;
+  final String? sidePreference;
+  final String? positionHint;
   final String? latex;
 
   final List<String> _warnings;
