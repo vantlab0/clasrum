@@ -208,6 +208,39 @@ async def test_handle_transcript_single_word_match(trigger_system):
 
 
 @pytest.mark.asyncio
+async def test_reveal_trigger_emits_staged_highlight_payload(trigger_system):
+    trigger_system.register_trigger(
+        "lesson_1",
+        "inner membrane",
+        "stage_2",
+        action="reveal",
+        cooldown_ms=0,
+        max_fires=1,
+        payload={
+            "stage": 2,
+            "target_ids": ["el_membrane", "el_label"],
+            "plan_element_id": "el_plan",
+            "duration_ms": 1400,
+        },
+    )
+    results = await trigger_system.handle_transcript(
+        FakeDB(), "lesson_1", "Now the inner membrane appears", is_final=True
+    )
+    assert len(results) == 1
+    assert results[0]["action"] == "reveal"
+    assert results[0]["result"]["ok"] is True
+
+    name, arguments, source = trigger_system._registry.calls[0]
+    assert name == "board_highlight"
+    assert source == "system"
+    assert arguments["style"] == "reveal"
+    assert arguments["target_ids"] == ["el_membrane", "el_label"]
+    assert arguments["stage"] == 2
+    assert arguments["plan_element_id"] == "el_plan"
+    assert arguments["duration_ms"] == 1400
+
+
+@pytest.mark.asyncio
 async def test_handle_transcript_multi_word_match(trigger_system):
     trigger_system.register_trigger("lesson_1", "carbon dioxide", "el_co2", action="highlight")
     results = await trigger_system.handle_transcript(
@@ -415,11 +448,15 @@ async def test_board_intent_registers_triggers(seeded_student, make_lesson):
                 source="qwen_tool",
             )
     assert result["ok"] is True, result
-    assert len(result.get("triggers_registered", [])) == 1
-    assert result["triggers_registered"][0]["phrase"] == "ATP"
-    assert result["triggers_registered"][0]["action"] == "pulse"
-    # The trigger system should have the trigger registered.
-    assert trigger_system.trigger_count(lesson_id) == 1
+    triggers = result.get("triggers_registered", [])
+    assert len(triggers) == 2
+    assert triggers[0]["phrase"] == "ATP"
+    assert triggers[0]["action"] == "pulse"
+    assert triggers[1]["action"] == "reveal"
+    assert triggers[1]["stage"] == 2
+    assert triggers[1]["target_ids"]
+    # The trigger system should have both triggers registered.
+    assert trigger_system.trigger_count(lesson_id) == 2
 
 
 @pytest.mark.asyncio

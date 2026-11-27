@@ -7,7 +7,7 @@ abstract final class AppColors {
   static const Color accent = Color(0xFF000000);
   static const Color blue = accent; // legacy alias; no longer blue/red
 
-  static const Color background = Color(0xFF000000); // pure black
+  static const Color background = Color(0xFF0A0A0A); // off-black app canvas
   static const Color surface = Color(0xFF0B0B0B); // solid black glass base
   static const Color surfaceHigh = Color(0xFF151515); // raised black glass
   static const Color white = Color(0xFFFFFFFF); // primary text/icons

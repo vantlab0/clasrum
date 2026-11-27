@@ -398,11 +398,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildTopicCard(BuildContext context) {
-    return GlassContainer(
-      radius: 22,
+    return Container(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 18),
-      blurSigma: 12,
-      backgroundOpacity: 0.42,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.75),
+            blurRadius: 28,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
@@ -412,11 +420,10 @@ class _HomeScreenState extends State<HomeScreen> {
             maxLines: 5,
             maxLength: 500,
             style: const TextStyle(color: AppColors.white, height: 1.4),
-            decoration: InputDecoration(
+            cursorColor: AppColors.white,
+            decoration: const InputDecoration(
               hintText: 'e.g. Introduction to Differentiation',
-              hintStyle: TextStyle(
-                color: AppColors.muted.withValues(alpha: 0.9),
-              ),
+              hintStyle: TextStyle(color: AppColors.white),
               filled: false,
               border: InputBorder.none,
               enabledBorder: InputBorder.none,
@@ -426,7 +433,7 @@ class _HomeScreenState extends State<HomeScreen> {
               isDense: true,
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: <Widget>[
@@ -475,20 +482,20 @@ class _HomeScreenState extends State<HomeScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: 0.35),
+        color: Colors.black,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border.withValues(alpha: 0.45)),
+        border: Border.all(color: AppColors.border.withValues(alpha: 0.35)),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<T>(
           value: value,
           isDense: true,
-          dropdownColor: AppColors.surface,
+          dropdownColor: Colors.black,
           icon: const PwonyIcon(PwonyIconKind.chevronDown,
-              size: 16, color: AppColors.muted),
+              size: 16, color: AppColors.white),
           style: const TextStyle(
-            color: AppColors.muted,
-            fontSize: 12,
+            color: AppColors.white,
+            fontSize: 13,
             fontWeight: FontWeight.w500,
           ),
           items: items
@@ -606,18 +613,18 @@ class _StartButton extends StatelessWidget {
     return FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: AppColors.accent,
+        backgroundColor: Colors.black,
         foregroundColor: AppColors.white,
         side: BorderSide(color: AppColors.glassTint.withValues(alpha: 0.22)),
-        minimumSize: const Size(0, 40),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        minimumSize: const Size(132, 52),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
       child: loading
           ? const SizedBox(
-              width: 16,
-              height: 16,
+              width: 20,
+              height: 20,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
                 color: AppColors.white,
@@ -628,10 +635,10 @@ class _StartButton extends StatelessWidget {
               children: <Widget>[
                 Text('Start',
                     style:
-                        TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                SizedBox(width: 4),
+                        TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                SizedBox(width: 8),
                 PwonyIcon(PwonyIconKind.startLearning,
-                    size: 16, color: AppColors.white),
+                    size: 19, color: AppColors.white),
               ],
             ),
     );
@@ -691,22 +698,13 @@ class _RecentSessionCard extends StatelessWidget {
                   );
                 },
               ),
-              // From mid-card downwards: transparent to very dark,
-              // making the bottom ~30% noticeably darker.
-              Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    stops: const <double>[0.0, 0.45, 0.7, 1.0],
-                    colors: <Color>[
-                      Colors.transparent,
-                      Colors.black.withValues(alpha: 0.10),
-                      Colors.black.withValues(alpha: 0.55),
-                      Colors.black.withValues(alpha: 0.85),
-                    ],
-                  ),
-                ),
+              // Solid dark band keeps the caption readable without gradients.
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 96,
+                child: ColoredBox(color: Color(0x99000000)),
               ),
               Positioned(
                 top: 6,

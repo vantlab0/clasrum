@@ -40,16 +40,7 @@ class GlassContainer extends StatelessWidget {
     Widget content = Container(
       padding: padding,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[
-            AppColors.glassTint.withValues(alpha: 0.08 + fill * 0.24),
-            base.withValues(alpha: fill),
-            base.withValues(alpha: (fill * 0.72).clamp(0.0, 1.0)),
-          ],
-          stops: const <double>[0, 0.35, 1],
-        ),
+        color: base.withValues(alpha: fill),
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(
           color: border.withValues(alpha: borderOpacity),

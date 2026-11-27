@@ -771,31 +771,47 @@ class BlackboardLayoutManager:
             side = _side_to_region(side_preference)
             anchor = self._element_rect(related_to) or self._element_rect(data.get("related_to"))
 
+            is_text = _is_text_placement(kind, data)
             candidates: list[tuple[str, Rect]] = []
-            # 1. Side-by-side when requested and there is room next to the anchor.
-            if anchor is not None and (prefer_horizontal or side in {"left", "right"}):
-                beside = self._beside_anchor(anchor, size, side)
-                if beside is not None:
-                    candidates.append((self._region_of(beside), beside))
-                # Fallback: directly below the anchor (vertical layout).
-                below = Rect(anchor.x, anchor.y2 + self.config.element_gap, size.w, size.h)
-                candidates.append((self._region_of(below), below.clamp_to_board(self.config)))
-            # 2. Explicit side preference without an anchor.
-            if side and anchor is None:
-                candidates.append((side, region_rect(side, self.config)))
-            # 3. Explicit region hint.
-            if hint:
-                candidates.append((hint, region_rect(hint, self.config)))
+            # Teaching text is a strict down-the-page column. Side hints and
+            # regions are ignored for text so a new line can never appear above
+            # an older one; diagrams and graphs still honour these hints.
+            if not is_text:
+                # 1. Side-by-side when requested and there is room next to the anchor.
+                if anchor is not None and (prefer_horizontal or side in {"left", "right"}):
+                    beside = self._beside_anchor(anchor, size, side)
+                    if beside is not None:
+                        candidates.append((self._region_of(beside), beside))
+                    # Fallback: directly below the anchor (vertical layout).
+                    below = Rect(anchor.x, anchor.y2 + self.config.element_gap, size.w, size.h)
+                    candidates.append((self._region_of(below), below.clamp_to_board(self.config)))
+                # 2. Explicit side preference without an anchor.
+                if side and anchor is None:
+                    candidates.append((side, region_rect(side, self.config)))
+                # 3. Explicit region hint.
+                if hint:
+                    candidates.append((hint, region_rect(hint, self.config)))
             # 4. Natural vertical reading flow (the default for teaching content).
-            candidates.append(self._flow_position(size, section_break=section_break, prefer_left=(side == "left")))
-            # 5. Any remaining region, in priority order.
-            for name in FALLBACK_ORDER:
-                candidates.append((name, region_rect(name, self.config)))
+            candidates.append(
+                self._flow_position(
+                    size,
+                    section_break=section_break,
+                    prefer_left=(side == "left"),
+                    single_column=is_text,
+                )
+            )
+            # 5. Any remaining region, in priority order. Text never uses these:
+            # they start at the top of the board and would put a new line above
+            # an older one. A full text column fails cleanly so the caller can
+            # clear the board before continuing.
+            if not is_text:
+                for name in FALLBACK_ORDER:
+                    candidates.append((name, region_rect(name, self.config)))
 
             # Text reserves must stay font-accurate: shrinking only the box
             # while leaving font_scale/text untouched makes the renderer overflow
             # the reservation.  Text either fits at full size or fails cleanly.
-            scales = (1.0,) if _is_text_placement(kind, data) else (1.0, 0.9, 0.8, 0.7)
+            scales = (1.0,) if is_text else (1.0, 0.9, 0.8, 0.7)
             for scale in scales:
                 target = size.scaled(scale, self.config)
                 if target.w < self.config.min_width - EPS or target.h < self.config.min_height - EPS:
@@ -1006,25 +1022,41 @@ class BlackboardLayoutManager:
             y += self.config.step_y
         return None
 
-    def _flow_position(self, size: Rect, *, section_break: bool, prefer_left: bool) -> tuple[str, Rect]:
-        """Sequential lecture-writing cursor: fill a column, then the next one."""
+    def _flow_position(
+        self,
+        size: Rect,
+        *,
+        section_break: bool,
+        prefer_left: bool,
+        single_column: bool = False,
+    ) -> tuple[str, Rect]:
+        """Sequential lecture-writing cursor.
+
+        Text always uses one downward column so each new line lands below the
+        previous one. Drawings may still use the two-column desktop flow.
+        """
         safe = self.config.safe
         gap = self.config.element_gap
-        # Two-column desktop layout is used only when the element keeps its
-        # full font size inside a half-width column. Wider text flows in one
-        # full-width column instead of being shrunk to fit.
-        two_col_w = max(0.0, min(self.config.column_width, (safe.w - gap) / 2.0))
         single_col_w = min(self.config.max_content_width, safe.w)
-        if two_col_w + EPS < size.w:
-            col_w = single_col_w
+        if single_column:
+            # Text may need the full safe width for a long line or large font;
+            # the max_content_width heuristic is only for two-column diagrams.
+            col_w = min(safe.w, max(single_col_w, size.w))
             left_x = right_x = safe.x
         else:
-            col_w = two_col_w
-            left_x = safe.x
-            right_x = safe.x + col_w + gap
-            if right_x + self.config.min_width > safe.x2:
+            # Two-column desktop layout is used only when the element keeps its
+            # full font size inside a half-width column.
+            two_col_w = max(0.0, min(self.config.column_width, (safe.w - gap) / 2.0))
+            if two_col_w + EPS < size.w:
                 col_w = single_col_w
                 left_x = right_x = safe.x
+            else:
+                col_w = two_col_w
+                left_x = safe.x
+                right_x = safe.x + col_w + gap
+                if right_x + self.config.min_width > safe.x2:
+                    col_w = single_col_w
+                    left_x = right_x = safe.x
 
         def _cursor_y(*keys: str) -> float:
             ys = [
@@ -1034,21 +1066,32 @@ class BlackboardLayoutManager:
             ]
             return max(ys) if ys else float(safe.y)
 
-        def _col(key: str, x: float, keys: tuple[str, ...]) -> tuple[str, Rect, bool]:
-            y = _cursor_y(*keys)
-            wrapped = y + size.h > safe.y2 + EPS
-            if wrapped:
-                y = float(safe.y)
-            if section_break:
-                y += self.config.section_gap
+        def _empty(key: str, x: float) -> tuple[str, Rect, bool]:
             x = max(safe.x, min(x, safe.x2 - max(size.w, self.config.min_width)))
             width = max(0.0, min(col_w, safe.x2 - x))
-            return key, Rect(x, y, width, max(0.0, safe.y2 - y)), wrapped
+            return key, Rect(x, safe.y2, width, 0.0), True
+
+        def _col(key: str, x: float, keys: tuple[str, ...]) -> tuple[str, Rect, bool]:
+            y = _cursor_y(*keys)
+            if y + size.h > safe.y2 + EPS:
+                # Never wrap text back to the top. A zero-height region forces a
+                # clean no_space result; the caller clears the board and retries.
+                return _empty(key, x)
+            if section_break:
+                y += self.config.section_gap
+            if y + size.h > safe.y2 + EPS:
+                return _empty(key, x)
+            x = max(safe.x, min(x, safe.x2 - max(size.w, self.config.min_width)))
+            width = max(0.0, min(col_w, safe.x2 - x))
+            return key, Rect(x, y, width, max(0.0, safe.y2 - y)), False
 
         single = left_x == right_x
         if single:
-            key = "left_column" if prefer_left else "main_column"
-            placed = _col(key, left_x, ("left_column", "main_column"))
+            key = "main_column" if single_column else (
+                "left_column" if prefer_left else "main_column"
+            )
+            keys = ("left_column", "main_column") if single_column else (key,)
+            placed = _col(key, left_x, keys)
             return placed[0], placed[1]
 
         left = _col("left_column", left_x, ("left_column",))

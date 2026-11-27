@@ -38,15 +38,8 @@ class FlashcardProgressIndicator extends StatelessWidget {
                   FractionallySizedBox(
                     alignment: Alignment.centerLeft,
                     widthFactor: value,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: <Color>[
-                            Colors.white.withValues(alpha: 0.32),
-                            Colors.white.withValues(alpha: 0.92),
-                          ],
-                        ),
-                      ),
+                    child: const ColoredBox(
+                      color: Color(0xEBFFFFFF),
                     ),
                   ),
                 ],

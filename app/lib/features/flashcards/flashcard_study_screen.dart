@@ -1,9 +1,8 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 
 import '../../core/config.dart';
 import '../../core/storage.dart';
+import '../../core/theme.dart';
 import 'models/flashcard.dart';
 import 'services/flashcard_service.dart';
 import 'widgets/flashcard_deck.dart';
@@ -47,7 +46,7 @@ class FlashcardStudyScreen extends StatefulWidget {
 
 class _FlashcardStudyScreenState extends State<FlashcardStudyScreen>
     with SingleTickerProviderStateMixin {
-  static const Color _backgroundColor = Color(0xFF09090B);
+  static const Color _backgroundColor = AppColors.background;
 
   late final AnimationController _flipController;
   List<Flashcard> _cards = const <Flashcard>[];
@@ -176,7 +175,6 @@ class _FlashcardStudyScreenState extends State<FlashcardStudyScreen>
       body: Stack(
         fit: StackFit.expand,
         children: <Widget>[
-          const _AmbientGlow(),
           SafeArea(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 260),
@@ -248,41 +246,6 @@ class _FlashcardStudyScreenState extends State<FlashcardStudyScreen>
           ),
         ),
       ],
-    );
-  }
-}
-
-class _AmbientGlow extends StatelessWidget {
-  const _AmbientGlow();
-
-  @override
-  Widget build(BuildContext context) {
-    final Size size = MediaQuery.sizeOf(context);
-    final double glowWidth = size.width < 700 ? size.width * 0.96 : 720;
-    final double glowHeight = size.height < 700 ? size.height * 0.52 : 560;
-
-    return IgnorePointer(
-      child: Align(
-        alignment: const Alignment(0, -0.24),
-        child: ImageFiltered(
-          imageFilter: ImageFilter.blur(sigmaX: 58, sigmaY: 58),
-          child: Container(
-            width: glowWidth,
-            height: glowHeight,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: <Color>[
-                  Colors.white.withValues(alpha: 0.055),
-                  Colors.white.withValues(alpha: 0.018),
-                  Colors.white.withValues(alpha: 0.0),
-                ],
-                stops: const <double>[0.0, 0.5, 1.0],
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

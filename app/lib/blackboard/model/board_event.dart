@@ -888,6 +888,7 @@ class HighlightPayload extends BoardPayload {
     'box',
     'strike',
     'arrow',
+    'reveal',
   };
 
   final List<String> targetIds;

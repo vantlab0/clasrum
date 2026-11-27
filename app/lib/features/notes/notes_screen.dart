@@ -888,20 +888,12 @@ class _ImageCard extends StatelessWidget {
                   );
                 },
               ),
-              Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    stops: const <double>[0.0, 0.45, 0.7, 1.0],
-                    colors: <Color>[
-                      Colors.transparent,
-                      Colors.black.withValues(alpha: 0.10),
-                      Colors.black.withValues(alpha: 0.55),
-                      Colors.black.withValues(alpha: 0.85),
-                    ],
-                  ),
-                ),
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 96,
+                child: ColoredBox(color: Color(0x99000000)),
               ),
               Positioned(
                 top: 6,

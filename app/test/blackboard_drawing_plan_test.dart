@@ -78,6 +78,28 @@ Map<String, dynamic> _drawPlanEvent({required String eventId, required int seque
   };
 }
 
+Map<String, dynamic> _revealEvent({required String eventId, required int sequence}) {
+  return {
+    'event_id': eventId,
+    'session_id': 'sess_1',
+    'sequence': sequence,
+    'type': 'highlight',
+    'element_id': 'rv_$sequence',
+    'payload': {
+      'target_ids': <String>['tail'],
+      'style': 'reveal',
+      'stage': 2,
+      'plan_element_id': 'dp_1',
+      'duration_ms': 1400,
+    },
+    'created_at': '2026-11-22T00:00:01.000Z',
+    'board_revision': sequence,
+    'depends_on': <String>[],
+    'animate': true,
+    'source': 'system',
+  };
+}
+
 void main() {
   group('DrawingPlan parsing', () {
     test('parses valid plan and round trips', () {
@@ -249,6 +271,39 @@ void main() {
   });
 
   group('Renderer', () {
+    test('cue-gated stages stay hidden until their keyword fires', () {
+      final plan = DrawingPlan.parse(_basePlan());
+      final transform = BoardTransform.fromSize(const ui.Size(800, 600));
+
+      ui.PictureRecorder recorder;
+      ui.Canvas canvas;
+      GenerativeRenderResult result;
+
+      recorder = ui.PictureRecorder();
+      canvas = ui.Canvas(recorder);
+      result = GenerativeDrawingRenderer.render(
+        canvas,
+        plan,
+        transform,
+        progress: 1.0,
+        stageProgress: const <int, double>{1: 1.0, 2: 0.0, 3: 0.0},
+      );
+      recorder.endRecording();
+      expect(result.elementBounds.keys, <String>{'body'});
+
+      recorder = ui.PictureRecorder();
+      canvas = ui.Canvas(recorder);
+      result = GenerativeDrawingRenderer.render(
+        canvas,
+        plan,
+        transform,
+        progress: 1.0,
+        stageProgress: const <int, double>{1: 1.0, 2: 0.5, 3: 0.0},
+      );
+      recorder.endRecording();
+      expect(result.elementBounds.keys, <String>{'body', 'tail'});
+    });
+
     test('progressive reveal renders partial then full', () {
       final plan = DrawingPlan.parse(_basePlan());
       final transform = BoardTransform.fromSize(const ui.Size(800, 600));
@@ -282,6 +337,16 @@ void main() {
       final payload = event.payloadParsed as DrawPlanPayload;
       expect(payload.plan, isNotNull);
       expect(payload.plan!.elements.length, 3);
+    });
+
+    test('reveal highlight is kept as a cue without visible annotation bounds', () {
+      final event = BoardEvent.fromJson(_revealEvent(eventId: 'e2', sequence: 2));
+      expect(event.payloadParsed.isValid, isTrue);
+      final applied = BoardDocument.empty(sessionId: 'sess_1').apply(event);
+      final reveal = applied.elements['rv_2'];
+      expect(reveal, isNotNull);
+      expect(reveal!.style, 'reveal');
+      expect(reveal.animation['duration_ms'], 1400);
     });
 
     test('board document applies draw_plan and replay preserves it', () {

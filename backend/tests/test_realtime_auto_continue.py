@@ -101,6 +101,22 @@ async def test_completed_teaching_response_auto_continues() -> None:
 
 
 @pytest.mark.asyncio
+async def test_incomplete_teaching_response_also_auto_continues() -> None:
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push({"type": "response.created", "response": {"id": "r1", "status": "in_progress"}})
+    qwen.push({"type": "response.audio.delta", "response_id": "r1", "delta": "AAAA"})
+    qwen.push({"type": "response.audio_transcript.done", "response_id": "r1", "speaker": "tutor", "transcript": "Keep going."})
+    qwen.push({"type": "response.done", "response": {"id": "r1", "status": "incomplete"}})
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+    assert qwen.create_response_count == 1
+    assert socket.auto_continue_count == 1
+
+
+@pytest.mark.asyncio
 async def test_wait_for_student_pauses_auto_continuation() -> None:
     hub = LessonRealtimeHub()
     qwen = FakeQwen()

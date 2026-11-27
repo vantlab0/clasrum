@@ -141,7 +141,7 @@ ShapeKind = Literal[
 DiagramKind = Literal[
     "flowchart", "circuit", "force", "biology", "concept_map", "geometry", "generic"
 ]
-HighlightStyle = Literal["underline", "circle", "box", "strike", "arrow"]
+HighlightStyle = Literal["underline", "circle", "box", "strike", "arrow", "reveal"]
 EquationHighlightStyle = Literal["box", "underline"]
 LineStyle = Literal["solid", "dashed"]
 
@@ -863,14 +863,22 @@ class HighlightArgs(StrictModel):
     style: HighlightStyle = Field(default="box")
     color: ColorStr | None = Field(default=None)
     label: Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)] | None = Field(default=None)
+    # ``reveal`` annotations are cue-gated diagram stages: they carry no visual
+    # annotation, they tell the client which staged part of a draw_plan to show.
+    stage: Annotated[int, Field(ge=1, le=12)] | None = Field(default=None)
+    plan_element_id: IdText | None = Field(default=None)
+    duration_ms: Annotated[int, Field(ge=200, le=6000)] | None = Field(default=None)
 
     def build_payload(self) -> dict[str, Any]:
         return _clean(
             {
                 "target_ids": list(self.target_ids),
                 "style": self.style,
-                "color": self.color or "yellow",
+                "color": self.color if self.style == "reveal" else (self.color or "yellow"),
                 "label": self.label,
+                "stage": self.stage,
+                "plan_element_id": self.plan_element_id,
+                "duration_ms": self.duration_ms,
             }
         )
 
@@ -910,7 +918,10 @@ class WriteOnBoardArgs(StrictModel):
         default=None, description="Highlight colour; chalk role or #RRGGBB."
     )
     position: Literal["next_line", "left", "center", "right"] = Field(
-        description="Position the new element relative to existing board content."
+        description=(
+            "Semantic hint only; the server always appends the new line below the "
+            "previous one in a single down-the-page column."
+        )
     )
     writing_style: Literal["progressive", "instant"] = Field(
         description=" progressive = animate as if writing; instant = appear without animation."
@@ -1428,7 +1439,8 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "you teach, each line matching what you are saying aloud. Write the real content, "
         "not meta labels or narration like 'Definition', 'Intuition', 'Example', or "
         "'Let's start'. Use for headings, key points, short definitions, and single-line "
-        "equations. Prefer this over board_intent for simple text; it appears progressively on the board.",
+        "equations. Prefer this over board_intent for simple text; it appears progressively on the board. "
+        "The server places every new line below the previous one and clears the board automatically when full.",
         (),
     ),
     # -----------------------------------------------------------------------
@@ -1442,8 +1454,9 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Generate a complex educational visual diagram using Qwen3.7-Flash. Delegates to "
         "the board director for structured drawing-plan generation. Use when an explanation "
         "genuinely benefits from a diagram, illustration, comparison table, graph, or other "
-        "structured visual. Do not call for ordinary headings, labels, short explanations, "
-        "or simple text.",
+        "structured visual. Its parts are revealed one stage at a time: the tool result "
+        "lists 'cue_phrases', and you must say each exact phrase while explaining its part. "
+        "Do not call for ordinary headings, labels, short explanations, or simple text.",
         (),
     ),
 )

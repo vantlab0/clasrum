@@ -140,6 +140,26 @@ def test_multiple_body_texts_never_overlap():
             assert not _overlaps(box, _box(previous))
 
 
+def test_text_flow_never_rewinds_when_the_column_is_full():
+    manager = BlackboardLayoutManager({"elements": []})
+    placed: list[dict] = []
+    for index in range(40):
+        try:
+            placed.append(_write(manager, "small", f"Teaching line {index}"))
+        except LayoutNoSpaceError:
+            break
+    else:
+        pytest.fail("text column should eventually fill up")
+
+    assert len(placed) >= 5
+    assert [item["position"]["y"] for item in placed] == sorted(
+        item["position"]["y"] for item in placed
+    )
+    assert len({round(item["position"]["x"], 6) for item in placed}) == 1
+    with pytest.raises(LayoutNoSpaceError):
+        _write(manager, "small", "One more teaching line")
+
+
 def test_multiple_equations_with_latex_are_placed_and_sized():
     manager = BlackboardLayoutManager({"elements": []})
     equations = ["E = mc^2", "\\frac{a}{b} + \\sqrt{x}", "\\sum_{i=1}^{n} i^2"]

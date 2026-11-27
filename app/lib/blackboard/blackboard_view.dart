@@ -1287,6 +1287,8 @@ class _BoardPainter extends CustomPainter {
   ) {
     final payload = element.payload;
     final style = payload['style'] as String? ?? 'box';
+    // A reveal cue drives a draw_plan stage; it is not a visible annotation.
+    if (style == 'reveal') return;
     final targetIds =
         (payload['target_ids'] as List?)?.whereType<String>().toList() ??
             <String>[];
@@ -1455,11 +1457,36 @@ class _BoardPainter extends CustomPainter {
         '[BlackboardView] renderer received valid drawing plan element=${element.elementId} elements=${plan.elements.length} stages=${plan.stages.length}',
       );
     }
+    final rawTriggers = element.payload['triggers'];
+    final cueGated = rawTriggers is List &&
+        rawTriggers.any(
+          (trigger) =>
+              trigger is Map &&
+              (trigger['action'] ?? '').toString() == 'reveal',
+        );
+    Map<int, double>? stageProgress;
+    if (cueGated) {
+      stageProgress = <int, double>{1: progress.clamp(0.0, 1.0)};
+      for (final annotation in document.elementsForLayer(6)) {
+        final payload = annotation.payload;
+        if ((payload['style'] ?? annotation.style) != 'reveal') continue;
+        final planId = payload['plan_element_id'];
+        if (planId != null && planId.toString() != element.elementId) continue;
+        final rawStage = payload['stage'];
+        final stage = rawStage is num
+            ? rawStage.round()
+            : int.tryParse(rawStage?.toString() ?? '');
+        if (stage == null || stage <= 1) continue;
+        stageProgress[stage] =
+            animations.progress(annotation.elementId).clamp(0.0, 1.0);
+      }
+    }
     final result = GenerativeDrawingRenderer.render(
       canvas,
       plan,
       transform,
       progress: progress,
+      stageProgress: stageProgress,
     );
     for (final entry in result.elementBounds.entries) {
       bounds.put(entry.key, entry.value);

@@ -386,9 +386,16 @@ async def test_board_intent_registers_triggers_and_focus(lesson_id, monkeypatch)
         )
     assert result["ok"] is True
     assert result["focus"]["target_ids"] == [result["element_id"]]
-    assert len(result["triggers_registered"]) == 1
-    assert result["triggers_registered"][0]["phrase"] == "refraction"
-    assert result["triggers_registered"][0]["target_id"] == result["element_id"]
+    triggers = result["triggers_registered"]
+    assert len(triggers) == 3
+    assert triggers[0]["phrase"] == "refraction"
+    assert triggers[0]["target_id"] == result["element_id"]
+    reveals = [trigger for trigger in triggers if trigger["action"] == "reveal"]
+    assert [trigger["stage"] for trigger in reveals] == [2, 3]
+    assert all(trigger["plan_element_id"] == result["element_id"] for trigger in reveals)
+    assert all(trigger["target_ids"] for trigger in reveals)
+    assert [trigger["phrase"] for trigger in reveals] == ["incident ray", "labels"]
+    assert result["cue_phrases"] == ["incident ray", "labels"]
 
 
 @pytest.mark.asyncio

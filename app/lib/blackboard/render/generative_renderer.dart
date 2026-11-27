@@ -17,6 +17,13 @@ class GenerativeRenderResult {
   final Map<String, BoardRect> elementBounds;
 }
 
+class _StageWindow {
+  const _StageWindow(this.startMs, this.endMs);
+
+  final int startMs;
+  final int endMs;
+}
+
 /// Renders a [DrawingPlan] progressively onto a [ui.Canvas].
 ///
 /// Coordinates in the plan are normalized board coordinates (0..1). The
@@ -33,6 +40,9 @@ class GenerativeDrawingRenderer {
     DrawingPlan plan,
     BoardTransform transform, {
     required double progress,
+    /// Per-stage reveal progress for cue-gated plans. When supplied, a stage
+    /// stays hidden until the matching transcript keyword fires.
+    Map<int, double>? stageProgress,
   }) {
     final clampedProgress = progress.clamp(0.0, 1.0);
     final totalMs = plan.totalDurationMs;
@@ -41,6 +51,29 @@ class GenerativeDrawingRenderer {
     final timelineById = <String, DrawingElementTimeline>{
       for (final t in timelines) t.elementId: t,
     };
+
+    final cueGated = stageProgress != null && stageProgress.isNotEmpty;
+    final stageWindows = <int, _StageWindow>{};
+    if (cueGated) {
+      final stageNumbers = <int>{
+        for (final element in plan.elements) element.stage,
+      };
+      for (final stageNumber in stageNumbers) {
+        final stageTimelines = plan.elements
+            .where((element) => element.stage == stageNumber)
+            .map((element) => timelineById[element.id])
+            .whereType<DrawingElementTimeline>()
+            .toList(growable: false);
+        if (stageTimelines.isEmpty) continue;
+        var start = stageTimelines.first.startMs;
+        var end = stageTimelines.first.endMs;
+        for (final timeline in stageTimelines.skip(1)) {
+          if (timeline.startMs < start) start = timeline.startMs;
+          if (timeline.endMs > end) end = timeline.endMs;
+        }
+        stageWindows[stageNumber] = _StageWindow(start, end);
+      }
+    }
 
     // Build clip paths for closed elements.
     final clipPaths = <String, ui.Path>{};
@@ -70,7 +103,25 @@ class GenerativeDrawingRenderer {
 
     for (final element in order) {
       final timeline = timelineById[element.id];
-      final elementProgress = _elementProgress(timeline, elapsedMs);
+      double elementProgress;
+      if (cueGated) {
+        final stage = element.stage;
+        final revealed = (stageProgress![stage] ?? (stage <= 1 ? 1.0 : 0.0))
+            .clamp(0.0, 1.0);
+        if (revealed <= 0.0) continue;
+        final window = stageWindows[stage];
+        if (timeline == null || window == null || window.endMs <= window.startMs) {
+          elementProgress = revealed;
+        } else {
+          final localStart = timeline.startMs - window.startMs;
+          final localEnd = timeline.endMs - window.startMs;
+          final localElapsed =
+              (revealed * (window.endMs - window.startMs)).round();
+          elementProgress = _progressBetween(localElapsed, localStart, localEnd);
+        }
+      } else {
+        elementProgress = _elementProgress(timeline, elapsedMs);
+      }
       if (elementProgress <= 0.0) continue;
 
       final clipId = element.clipId;
@@ -97,11 +148,15 @@ class GenerativeDrawingRenderer {
 
   static double _elementProgress(DrawingElementTimeline? timeline, int elapsedMs) {
     if (timeline == null) return 1.0;
-    if (elapsedMs <= timeline.startMs) return 0.0;
-    if (elapsedMs >= timeline.endMs) return 1.0;
-    final span = timeline.endMs - timeline.startMs;
+    return _progressBetween(elapsedMs, timeline.startMs, timeline.endMs);
+  }
+
+  static double _progressBetween(int elapsedMs, int startMs, int endMs) {
+    if (elapsedMs <= startMs) return 0.0;
+    if (elapsedMs >= endMs) return 1.0;
+    final span = endMs - startMs;
     if (span <= 0) return 1.0;
-    return ((elapsedMs - timeline.startMs) / span).clamp(0.0, 1.0);
+    return ((elapsedMs - startMs) / span).clamp(0.0, 1.0);
   }
 
   // ---------------------------------------------------------------------------

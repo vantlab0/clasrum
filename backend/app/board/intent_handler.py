@@ -126,7 +126,18 @@ _SYSTEM_PROMPT = (
     "sweep_angle...}]}; text {text, position:{x,y}, align, font_scale?}.\n"
     f"- stages: 3..6 objects {{stage, description, element_ids, "
     "pause_ms}} describing the progressive reveal sequence (outline first, "
-    "then internal structures, then details/shading, then labels).\n"
+    "then internal structures, then details/shading, then labels). "
+    "Write each description as 'Cue: <2-6 words the tutor will say> — "
+    "<what this stage reveals>'. Stage 1 has no cue; later stages do.\n"
+    "- triggers: one object per stage after stage 1: {phrase, target: "
+    "'stage_<n>', action: 'reveal', cooldown_ms: 60000, max_fires: 1}. "
+    "The phrase must be exactly the stage's cue words. This makes each part "
+    "appear when the tutor says its cue, not all at once.\n"
+    "- Timing: each stroke takes 900..2600ms; stage pauses are 900..2200ms. "
+    "Never use tiny durations. Draw accurately: real proportions, labels of "
+    "1-4 words placed next to the feature they name, and leader lines when a "
+    "label would overlap the drawing. Anatomy must match the named structure; "
+    "no decorative or invented parts.\n"
     "Use ONLY the element kinds listed above. NEVER use kind 'circle'; draw a "
     "circle as an ellipse with rx == ry. Every style.stroke_width must be a "
     "number between 0.2 and 4.0; never use 0 or values below 0.2.\n"
@@ -164,16 +175,25 @@ _PLAN_SCHEMA_HINT = {
             },
             "layer": 0,
             "stage": 1,
-            "duration_ms": 700,
+            "duration_ms": 1400,
             "delay_ms": 0,
         }
     ],
     "stages": [
         {
             "stage": 1,
-            "description": "what this stage draws",
+            "description": "Cue: <spoken words> — what this stage draws",
             "element_ids": ["unique_element_id"],
-            "pause_ms": 150,
+            "pause_ms": 1400,
+        }
+    ],
+    "triggers": [
+        {
+            "phrase": "<exact cue words from the next stage>",
+            "target": "stage_2",
+            "action": "reveal",
+            "cooldown_ms": 60000,
+            "max_fires": 1,
         }
     ],
 }
@@ -664,8 +684,10 @@ def _repair_element(raw: Any, index: int) -> dict[str, Any] | None:
 
     stage = int(_clamp(element.get("stage"), 1, 12, 1) or 1)
     layer = int(_clamp(element.get("layer"), 0, 5, 1) or 0)
-    duration = int(_clamp(element.get("duration_ms"), 60, 6000, 500) or 500)
-    delay = int(_clamp(element.get("delay_ms"), 0, 4000, 0) or 0)
+    # Deliberately slower than a chalk scribble: the drawing must stay in step
+    # with spoken explanation instead of completing before the tutor mentions it.
+    duration = int(_clamp(element.get("duration_ms"), 600, 6000, 1400) or 1400)
+    delay = int(_clamp(element.get("delay_ms"), 0, 3000, 0) or 0)
 
     return {
         "id": clean_id,
@@ -734,7 +756,7 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     for stage_num in sorted(by_stage):
         original = original_stages.get(stage_num, {})
         description = str(original.get("description") or "")[:240]
-        pause = int(_clamp(original.get("pause_ms"), 0, 3000, 0) or 0)
+        pause = int(_clamp(original.get("pause_ms"), 900, 3000, 1400) or 1400)
         stages.append(
             {
                 "stage": stage_num,
@@ -767,13 +789,52 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         else:
             clean_targets = []
         repaired["focus"] = {**focus, "target_ids": clean_targets}
-    triggers = source.get("triggers")
-    if isinstance(triggers, list):
-        repaired["triggers"] = [
-            trigger
-            for trigger in triggers
-            if isinstance(trigger, dict) and str(trigger.get("target")) in used_ids
-        ]
+    # Every stage after the outline gets a keyword cue. The tutor says the cue
+    # while explaining that part, and the client reveals only that stage.
+    def _cue_from_description(description: str, stage_num: int) -> str:
+        match = re.search(r"Cue:\s*(.+?)(?:\s+[—-]\s+|$)", description, flags=re.I)
+        cue = match.group(1) if match else description
+        words = re.findall(r"[\w'-]+", cue)[:6]
+        return " ".join(words) or f"stage {stage_num}"
+
+    raw_triggers = source.get("triggers")
+    triggers: list[dict[str, Any]] = []
+    if isinstance(raw_triggers, list):
+        for trigger in raw_triggers:
+            if not isinstance(trigger, dict):
+                continue
+            target = str(trigger.get("target") or "")
+            if target in used_ids or re.fullmatch(r"stage_\d+", target):
+                triggers.append(dict(trigger))
+
+    existing_reveal_stages = {
+        int(str(trigger.get("stage")))
+        for trigger in triggers
+        if str(trigger.get("action") or "").lower() == "reveal"
+        and str(trigger.get("stage") or "").isdigit()
+    }
+    for stage in stages:
+        stage_num = int(stage["stage"])
+        if stage_num <= 1:
+            continue
+        target = f"stage_{stage_num}"
+        if stage_num in existing_reveal_stages or any(
+            str(trigger.get("target")) == target for trigger in triggers
+        ):
+            continue
+        triggers.append(
+            {
+                "phrase": _cue_from_description(
+                    str(stage.get("description") or ""), stage_num
+                ),
+                "target": target,
+                "action": "reveal",
+                "cooldown_ms": 60000,
+                "max_fires": 1,
+            }
+        )
+    if triggers:
+        repaired["triggers"] = triggers
     return repaired
 
 
@@ -1023,7 +1084,9 @@ class BoardIntentHandler:
 
         id_map = {element["id"]: record.element_id for element in plan_payload.get("elements", [])
                   if isinstance(element, dict) and element.get("id")}
-        registered_triggers = await self._register_triggers(db, lesson_id, plan_payload, id_map)
+        registered_triggers = await self._register_triggers(
+            db, lesson_id, plan_payload, id_map, record.element_id,
+        )
         focus_out = self._resolve_focus(plan_payload, id_map)
 
         logger.info(
@@ -1046,6 +1109,11 @@ class BoardIntentHandler:
             },
             "focus": focus_out,
             "triggers_registered": registered_triggers,
+            "cue_phrases": [
+                trigger["phrase"]
+                for trigger in registered_triggers
+                if trigger["action"] == "reveal"
+            ],
         }
 
     async def _generate_plan(
@@ -1103,6 +1171,7 @@ class BoardIntentHandler:
         lesson_id: str,
         plan_payload: dict[str, Any],
         id_map: dict[str, str],
+        plan_element_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Register transcript triggers declared by the plan (best-effort)."""
         trigger_system = self._trigger_system
@@ -1112,6 +1181,25 @@ class BoardIntentHandler:
         raw_triggers = plan_payload.get("triggers")
         if not isinstance(raw_triggers, list):
             return []
+        duration_by_id = {
+            str(element.get("id")): element.get("duration_ms")
+            for element in (plan_payload.get("elements") or [])
+            if isinstance(element, dict) and element.get("id")
+        }
+        raw_stage_members: dict[int, list[str]] = {}
+        stage_targets: dict[int, list[str]] = {}
+        for raw_stage in plan_payload.get("stages", []) or []:
+            if not isinstance(raw_stage, dict):
+                continue
+            try:
+                stage_num = int(raw_stage.get("stage"))
+            except (TypeError, ValueError):
+                continue
+            raw_ids = [str(item) for item in (raw_stage.get("element_ids") or [])]
+            raw_stage_members[stage_num] = raw_ids
+            stage_targets[stage_num] = [
+                id_map.get(item, item) for item in raw_ids
+            ]
         seen: set[tuple[str, str]] = set()
         for raw in raw_triggers:
             if not isinstance(raw, dict):
@@ -1125,7 +1213,38 @@ class BoardIntentHandler:
             if key in seen:
                 continue
             seen.add(key)
+
+            payload: dict[str, Any] = {}
             real_target = id_map.get(target, target)
+            if action == "reveal":
+                stage_match = re.search(r"\d+", target)
+                try:
+                    stage_num = int(raw.get("stage") or (stage_match.group(0) if stage_match else 0))
+                except (TypeError, ValueError):
+                    continue
+                if stage_num <= 0:
+                    continue
+                target_ids = stage_targets.get(stage_num) or (
+                    [real_target] if real_target else []
+                )
+                if not target_ids:
+                    continue
+                real_target = f"stage_{stage_num}"
+                payload = {
+                    "stage": stage_num,
+                    "target_ids": target_ids[:20],
+                    "plan_element_id": plan_element_id,
+                }
+                raw_duration = raw.get("duration_ms")
+                stage_durations = [
+                    int(duration_by_id[item])
+                    for item in raw_stage_members.get(stage_num, [])
+                    if duration_by_id.get(item) is not None
+                ]
+                if raw_duration is not None:
+                    payload["duration_ms"] = raw_duration
+                elif stage_durations:
+                    payload["duration_ms"] = min(6000, max(600, max(stage_durations)))
             try:
                 cooldown_ms = int(raw.get("cooldown_ms"))  # type: ignore[arg-type]
             except (TypeError, ValueError):
@@ -1139,6 +1258,7 @@ class BoardIntentHandler:
                     action,
                     cooldown_ms=cooldown_ms,
                     max_fires=max_fires,
+                    payload=payload,
                 )
                 registered.append(
                     {
@@ -1147,6 +1267,7 @@ class BoardIntentHandler:
                         "target_id": real_target,
                         "action": action,
                         "cooldown_ms": cooldown_ms,
+                        **payload,
                     }
                 )
             except ValueError as exc:

@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 #: Actions that can be represented using existing board events (board_highlight).
 SUPPORTED_TRIGGER_ACTIONS: frozenset[str] = frozenset(
-    {"highlight", "pulse", "underline", "circle", "annotation"}
+    {"highlight", "pulse", "underline", "circle", "annotation", "reveal"}
 )
 
 #: Map trigger action -> board_highlight style (existing board event).
@@ -50,6 +50,8 @@ _ACTION_TO_STYLE: dict[str, str] = {
     "underline": "underline",
     "circle": "circle",
     "annotation": "box",
+    # A reveal is a cue-gated draw_plan stage, not a visible annotation.
+    "reveal": "reveal",
 }
 
 MAX_TRIGGERS_PER_LESSON = 50
@@ -119,6 +121,8 @@ class TranscriptTrigger:
     max_fires: int | None = None
     fired_count: int = 0
     last_fired_at: str | None = None
+    # Extra fields for cue-gated stage reveals (stage, target_ids, plan_element_id).
+    payload: dict[str, Any] = field(default_factory=dict)
     # Normalized phrase words, computed once at construction for fast matching.
     _phrase_words: list[str] = field(init=False, repr=False, compare=False)
 
@@ -158,6 +162,7 @@ class TranscriptTrigger:
             "max_fires": self.max_fires,
             "fired_count": self.fired_count,
             "last_fired_at": self.last_fired_at,
+            "payload": dict(self.payload),
         }
 
 
@@ -204,6 +209,7 @@ class TranscriptTriggerSystem:
         cooldown_ms: int | None = None,
         max_fires: int | None = None,
         trigger_id: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> str:
         """Register a transcript trigger.
 
@@ -244,6 +250,7 @@ class TranscriptTriggerSystem:
             enabled=True,
             created_at=now,
             max_fires=max_fires,
+            payload=dict(payload or {}),
         )
         logger.info(
             "trigger registered lesson=%s trigger=%s phrase=%r target=%s action=%s",
@@ -422,18 +429,22 @@ class TranscriptTriggerSystem:
         label: str | None = None
         if trigger.action == "annotation":
             label = f"[{trigger.phrase}]"
+        args: dict[str, Any] = {
+            "target_ids": trigger.payload.get("target_ids") or [trigger.target_id],
+            "style": style,
+            "color": "yellow" if trigger.action != "reveal" else None,
+            "label": label,
+        }
+        for key in ("stage", "plan_element_id", "duration_ms"):
+            if trigger.payload.get(key) is not None:
+                args[key] = trigger.payload[key]
 
         try:
             result = await self._registry.execute_structured(
                 db,
                 lesson_id,
                 "board_highlight",
-                {
-                    "target_ids": [trigger.target_id],
-                    "style": style,
-                    "color": "yellow",
-                    "label": label,
-                },
+                args,
                 source="system",
                 animate=True,
             )

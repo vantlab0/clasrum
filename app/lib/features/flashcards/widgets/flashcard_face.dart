@@ -54,19 +54,9 @@ class FlashcardFace extends StatelessWidget {
           filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
           child: Container(
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: isAnswer
-                    ? const <Color>[
-                        Color(0xE61A1A1D),
-                        Color(0xE6121214),
-                      ]
-                    : const <Color>[
-                        Color(0xCC161619),
-                        Color(0xD10D0D10),
-                      ],
-              ),
+              color: isAnswer
+                  ? const Color(0xE61A1A1D)
+                  : const Color(0xD9161619),
               borderRadius: BorderRadius.circular(radius),
               border: Border.all(
                 color: Colors.white.withValues(

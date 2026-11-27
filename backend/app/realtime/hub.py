@@ -63,7 +63,7 @@ CLOSE_QWEN_UNAVAILABLE = 4010
 
 # Guard rails for automatic teaching continuation. Student speech resets the
 # counter; a silent/empty model turn cannot spin forever.
-MAX_AUTO_CONTINUES_PER_TURN = 60
+MAX_AUTO_CONTINUES_PER_TURN = 120
 AUTO_CONTINUE_COOLDOWN_SECONDS = 1.0
 
 # WS message types (docs/CONTRACTS.md §6).
@@ -1600,7 +1600,7 @@ class LessonRealtimeHub:
         """
         if socket.closed.is_set() or socket.qwen is None:
             return
-        if status in {"failed", "cancelled", "incomplete"}:
+        if status in {"failed", "cancelled"}:
             return
         if socket.waiting_for_student or socket.lesson_finished:
             return
@@ -1934,7 +1934,11 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"intuition, example, or step content itself. Do not write what you are about "
         f"to do; write the content. (4) KEEP TEACHING AUTOMATICALLY. The backend starts "
         f"your next response as soon as yours ends, so continue with the next small "
-        f"teaching step instead of stopping or staying silent. Do not wait for the "
+        f"teaching step instead of stopping or staying silent. Each new board line is "
+        f"placed below the previous one; when the board fills it is cleared automatically "
+        f"and you should simply keep teaching. For diagrams, the board tool result lists "
+        f"'cue_phrases'; say each exact phrase aloud while explaining that part so the matching "
+        f"stage is revealed. Do not wait for the "
         f"student after every question: rhetorical questions and quick understanding "
         f"checks are part of your teaching, so carry on explaining them yourself. "
         f"(5) Call wait_for_student ONLY when you have asked a direct question and "

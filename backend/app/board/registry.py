@@ -47,6 +47,7 @@ from app.board.service import (
     BoardError,
     BoardService,
     BoardValidationError,
+    EVENT_CLEAR,
     EVENT_CREATE_COORDINATE_SYSTEM,
     EVENT_PLOT_FUNCTION,
 )
@@ -522,7 +523,7 @@ class ToolRegistry:
             trigger_system=self._trigger_system,
         )
         registered_triggers = await handler._register_triggers(
-            db, lesson_id, plan_payload, id_map,
+            db, lesson_id, plan_payload, id_map, record.element_id,
         )
         focus_out = BoardIntentHandler._resolve_focus(plan_payload, id_map)
 
@@ -546,6 +547,11 @@ class ToolRegistry:
             },
             "focus": focus_out,
             "triggers_registered": registered_triggers,
+            "cue_phrases": [
+                trigger["phrase"]
+                for trigger in registered_triggers
+                if trigger["action"] == "reveal"
+            ],
         }
 
     async def _execute_intent(
@@ -814,7 +820,32 @@ class ToolRegistry:
                 try:
                     payload = manager.place_text(payload)
                 except LayoutNoSpaceError as exc:
-                    raise BoardValidationError(exc.code, str(exc), retryable=True) from None
+                    if spec.name != "board_write_on_board":
+                        raise BoardValidationError(exc.code, str(exc), retryable=True) from None
+                    # The text column is full: clean the board once, then place
+                    # the new line at the top of the cleared column. The clear is
+                    # a server-owned event so replay, snapshots and the live
+                    # client all agree on the reset.
+                    await self._board.append_event(
+                        db,
+                        lesson_id,
+                        EVENT_CLEAR,
+                        {},
+                        source=BoardEventSource.SYSTEM,
+                        animate=False,
+                    )
+                    logger.info("auto-cleared full board lesson=%s", lesson_id)
+                    try:
+                        document = await self._board.reconstruct_document(db, lesson_id)
+                    except Exception:
+                        document = {"elements": []}
+                    manager = BlackboardLayoutManager(document)
+                    try:
+                        payload = manager.place_text(payload)
+                    except LayoutNoSpaceError as retry_exc:
+                        raise BoardValidationError(
+                            retry_exc.code, str(retry_exc), retryable=True
+                        ) from None
 
             if event_type == EVENT_PLOT_FUNCTION:
                 payload = await self._prepare_plot_function(db, lesson_id, args, payload)

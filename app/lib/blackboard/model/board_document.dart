@@ -717,6 +717,30 @@ class BoardDocument {
       builder.warn('highlight: target_ids is empty');
       return;
     }
+    final annotationPayload = Map<String, dynamic>.of(event.payload);
+    annotationPayload['target_ids'] = targets;
+    final style = (annotationPayload['style'] ?? event.style ?? 'box').toString();
+    if (style == 'reveal') {
+      // A cue-gated draw_plan stage is not an annotation: its targets are plan
+      // element ids and may not have been painted yet. Keep the event so the
+      // renderer can start that stage's timed reveal.
+      final revealId = event.elementId ??
+          _stableAnnotationId('rv', targets, 'reveal', event.color);
+      final rawDuration = asDouble(annotationPayload['duration_ms']);
+      builder.elements[revealId] = BoardElement(
+        elementId: revealId,
+        type: event.type,
+        level: 6,
+        payload: Map<String, dynamic>.unmodifiable(annotationPayload),
+        style: 'reveal',
+        color: event.color,
+        createdSequence: event.sequence,
+        animation: rawDuration == null
+            ? const <String, dynamic>{}
+            : <String, dynamic>{'duration_ms': rawDuration.round()},
+      );
+      return;
+    }
     final bounds = builder.document.boundsOf(targets);
     final id = event.elementId ??
         _stableAnnotationId(
@@ -725,8 +749,6 @@ class BoardDocument {
           event.style ?? 'box',
           event.color,
         );
-    final annotationPayload = Map<String, dynamic>.of(event.payload);
-    annotationPayload['target_ids'] = targets;
     if (bounds == null) {
       builder.warn('highlight: no live targets among ${targets.join(',')}');
       return;
