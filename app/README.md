@@ -1,6 +1,6 @@
-# pwony
+# míngbai
 
-A new Flutter project.
+A private AI classroom with a live tutor on a chalk blackboard.
 
 ## Getting Started
 

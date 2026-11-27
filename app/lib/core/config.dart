@@ -1,6 +1,6 @@
 import 'dart:core';
 
-/// Runtime configuration for the AI Personal Classroom app.
+/// Runtime configuration for the míngbai app.
 ///
 /// The API origin and Supabase credentials are injected at build time:
 ///

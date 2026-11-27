@@ -1,15 +1,21 @@
 import 'package:flutter/material.dart';
 
-/// Pwony premium UI palette — strict design system.
+/// míngbai premium UI palette — strict monochrome design system.
 /// Blackboard/chalk rendering uses its own palette in `blackboard/model`.
 abstract final class AppColors {
-  // Required system colors
-  static const Color blue = Color(0xFFE53935); // primary actions / selected
-  static const Color background = Color(0xFF080A0E); // main background
-  static const Color surface = Color(0xFF12161D); // solid dark surface
+  // Pure-black rebrand: primary actions and selection are true black.
+  static const Color accent = Color(0xFF000000);
+  static const Color blue = accent; // legacy alias; no longer blue/red
+
+  static const Color background = Color(0xFF000000); // pure black
+  static const Color surface = Color(0xFF0B0B0B); // solid black glass base
+  static const Color surfaceHigh = Color(0xFF151515); // raised black glass
   static const Color white = Color(0xFFFFFFFF); // primary text/icons
-  static const Color muted = Color(0xFFA1AAB8); // secondary text
-  static const Color border = Color(0xFF303743); // subtle borders
+  static const Color muted = Color(0xFFB8B8B8); // neutral secondary text
+  static const Color border = Color(0xFF333333); // subtle glass edge
+
+  /// Neutral frost tint layered over black for the heavy glass surfaces.
+  static const Color glassTint = Color(0xFFFFFFFF);
 
   // Compatibility aliases used across the app
   static const Color chalk = white;
@@ -17,11 +23,10 @@ abstract final class AppColors {
   static const Color outline = border;
   static const Color outlineSoft = border;
   static const Color surfaceRaised = surface;
-  static const Color surfaceHigh = Color(0xFF171C24);
   static const Color board = Color(0xFF000000);
 
-  // Kept for existing status/error usages (use sparingly)
-  static const Color red = Color(0xFFE05555);
+  /// Legacy error alias. Errors are now neutral white on black, never red.
+  static const Color red = white;
 }
 
 abstract final class AppSpacing {
@@ -44,17 +49,17 @@ abstract final class AppTheme {
   static ThemeData dark() {
     final base = ThemeData(brightness: Brightness.dark, useMaterial3: true);
     const scheme = ColorScheme.dark(
-      primary: AppColors.blue,
+      primary: AppColors.accent,
       onPrimary: AppColors.white,
-      secondary: AppColors.blue,
+      secondary: AppColors.accent,
       onSecondary: AppColors.white,
       surface: AppColors.background,
       onSurface: AppColors.white,
       onSurfaceVariant: AppColors.muted,
       outline: AppColors.border,
       outlineVariant: AppColors.border,
-      error: AppColors.red,
-      onError: AppColors.white,
+      error: AppColors.white,
+      onError: AppColors.accent,
     );
 
     final textTheme = base.textTheme
@@ -126,20 +131,31 @@ abstract final class AppTheme {
         border: inputBorder,
         enabledBorder: inputBorder,
         focusedBorder: inputBorder.copyWith(
-          borderSide: const BorderSide(color: AppColors.blue, width: 1.4),
+          borderSide: BorderSide(
+            color: AppColors.glassTint.withValues(alpha: 0.85),
+            width: 1.4,
+          ),
         ),
         errorBorder: inputBorder.copyWith(
-          borderSide: const BorderSide(color: AppColors.red),
+          borderSide: BorderSide(
+            color: AppColors.glassTint.withValues(alpha: 0.55),
+          ),
         ),
         focusedErrorBorder: inputBorder.copyWith(
-          borderSide: const BorderSide(color: AppColors.red, width: 1.4),
+          borderSide: BorderSide(
+            color: AppColors.glassTint.withValues(alpha: 0.9),
+            width: 1.4,
+          ),
         ),
-        errorStyle: const TextStyle(fontSize: 12, color: AppColors.red),
+        errorStyle: const TextStyle(fontSize: 12, color: AppColors.white),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          backgroundColor: AppColors.blue,
+          backgroundColor: AppColors.accent,
           foregroundColor: AppColors.white,
+          side: BorderSide(
+            color: AppColors.glassTint.withValues(alpha: 0.22),
+          ),
           minimumSize: const Size(64, 48),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
           textStyle: const TextStyle(
@@ -184,7 +200,7 @@ abstract final class AppTheme {
           borderRadius: BorderRadius.circular(AppRadius.md),
           side: BorderSide(color: AppColors.border.withValues(alpha: 0.6)),
         ),
-        actionTextColor: AppColors.blue,
+        actionTextColor: AppColors.white,
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: AppColors.surface,
@@ -208,8 +224,8 @@ abstract final class AppTheme {
               BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
         ),
       ),
-      progressIndicatorTheme: const ProgressIndicatorThemeData(
-        color: AppColors.blue,
+      progressIndicatorTheme: ProgressIndicatorThemeData(
+        color: AppColors.white,
         linearTrackColor: AppColors.surfaceHigh,
         circularTrackColor: AppColors.surfaceHigh,
       ),
@@ -219,15 +235,16 @@ abstract final class AppTheme {
           return AppColors.muted;
         }),
         trackColor: WidgetStateProperty.resolveWith<Color?>((states) {
-          if (states.contains(WidgetState.selected)) return AppColors.blue;
+          if (states.contains(WidgetState.selected)) return AppColors.accent;
           return AppColors.surfaceHigh;
         }),
-        trackOutlineColor:
-            const WidgetStatePropertyAll<Color>(Colors.transparent),
+        trackOutlineColor: WidgetStateProperty.all<Color>(
+          AppColors.glassTint.withValues(alpha: 0.28),
+        ),
       ),
       chipTheme: ChipThemeData(
         backgroundColor: AppColors.surface.withValues(alpha: 0.7),
-        selectedColor: AppColors.blue.withValues(alpha: 0.18),
+        selectedColor: AppColors.glassTint.withValues(alpha: 0.14),
         side: BorderSide(color: AppColors.border.withValues(alpha: 0.7)),
         labelStyle: textTheme.bodySmall?.copyWith(color: AppColors.white),
         secondaryLabelStyle:

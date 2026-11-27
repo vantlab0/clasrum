@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'pwony_icons.dart';
 
-/// Translucent glass surface with controlled blur and subtle border.
+/// Heavy frosted-glass surface: strong blur, layered frost and a hairline edge.
 class GlassContainer extends StatelessWidget {
   const GlassContainer({
     super.key,
@@ -13,9 +13,9 @@ class GlassContainer extends StatelessWidget {
     this.padding,
     this.margin,
     this.radius = AppRadius.lg,
-    this.borderOpacity = 0.5,
-    this.blurSigma = 10,
-    this.backgroundOpacity = 0.45,
+    this.borderOpacity = 0.65,
+    this.blurSigma = 22,
+    this.backgroundOpacity = 0.38,
     this.borderColor,
     this.color,
   });
@@ -34,20 +34,45 @@ class GlassContainer extends StatelessWidget {
   Widget build(BuildContext context) {
     final base = color ?? AppColors.surface;
     final border = borderColor ?? AppColors.border;
+    // Keep every surface genuinely frosted even when a call site asks lighter.
+    final fill = backgroundOpacity.clamp(0.18, 0.62);
+    final effectiveBlur = blurSigma > 0 && blurSigma < 18 ? 18.0 : blurSigma;
     Widget content = Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: base.withValues(alpha: backgroundOpacity),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: <Color>[
+            AppColors.glassTint.withValues(alpha: 0.08 + fill * 0.24),
+            base.withValues(alpha: fill),
+            base.withValues(alpha: (fill * 0.72).clamp(0.0, 1.0)),
+          ],
+          stops: const <double>[0, 0.35, 1],
+        ),
         borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: border.withValues(alpha: borderOpacity)),
+        border: Border.all(
+          color: border.withValues(alpha: borderOpacity),
+          width: 1.2,
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: AppColors.accent.withValues(alpha: 0.55),
+            blurRadius: 28,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
       child: child,
     );
-    if (blurSigma > 0) {
+    if (effectiveBlur > 0) {
       content = ClipRRect(
         borderRadius: BorderRadius.circular(radius),
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
+          filter: ImageFilter.blur(
+            sigmaX: effectiveBlur,
+            sigmaY: effectiveBlur,
+          ),
           child: content,
         ),
       );
@@ -73,9 +98,9 @@ class GlassIconButton extends StatelessWidget {
     this.size = 44,
     this.iconSize = 20,
     this.tooltip,
-    this.backgroundOpacity = 0.45,
-    this.borderOpacity = 0.5,
-    this.blurSigma = 8,
+    this.backgroundOpacity = 0.42,
+    this.borderOpacity = 0.6,
+    this.blurSigma = 20,
     this.iconColor = AppColors.white,
   });
 
@@ -139,9 +164,9 @@ class GlassModal extends StatelessWidget {
       child: GlassContainer(
         radius: radius,
         padding: padding,
-        blurSigma: 14,
-        backgroundOpacity: 0.72,
-        borderOpacity: 0.55,
+        blurSigma: 28,
+        backgroundOpacity: 0.62,
+        borderOpacity: 0.7,
         child: child,
       ),
     );
@@ -156,7 +181,7 @@ class GlassModal extends StatelessWidget {
   }
 }
 
-/// Primary action button — use selectively (blue).
+/// Primary action button — pure black glass with a hairline frost edge.
 class PrimaryActionButton extends StatelessWidget {
   const PrimaryActionButton({
     super.key,
@@ -174,8 +199,9 @@ class PrimaryActionButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = FilledButton.styleFrom(
-      backgroundColor: AppColors.blue,
+      backgroundColor: AppColors.accent,
       foregroundColor: AppColors.white,
+      side: BorderSide(color: AppColors.glassTint.withValues(alpha: 0.22)),
       minimumSize: Size(compact ? 0 : 64, compact ? 40 : 48),
       padding: EdgeInsets.symmetric(
         horizontal: compact ? 14 : 20,

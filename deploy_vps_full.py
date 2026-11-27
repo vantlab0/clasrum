@@ -125,7 +125,7 @@ BOARD_SNAPSHOT_KEEP=5
         # Step 6: Create systemd service
         print("\n=== Step 6: Create systemd service ===")
         service_content = f"""[Unit]
-Description=AI Personal Classroom Backend
+Description=míngbai Backend
 After=network.target
 
 [Service]

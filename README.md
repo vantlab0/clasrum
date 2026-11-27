@@ -1,4 +1,4 @@
-# AI Personal Classroom
+# míngbai
 
 An AI-powered private classroom: the student speaks with a tutor that **teaches
 out loud while writing, drawing and solving on a native Flutter blackboard**.

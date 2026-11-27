@@ -294,8 +294,8 @@ class _FlashcardsScreenState extends State<FlashcardsScreen> {
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(AppRadius.lg),
-                          borderSide: const BorderSide(
-                            color: AppColors.blue,
+                          borderSide: BorderSide(
+                            color: AppColors.glassTint.withValues(alpha: 0.85),
                             width: 1.4,
                           ),
                         ),
@@ -306,7 +306,7 @@ class _FlashcardsScreenState extends State<FlashcardsScreen> {
                         isDense: true,
                       ),
                       maxLines: 1,
-                      cursorColor: AppColors.blue,
+                      cursorColor: AppColors.white,
                     ),
                     if (_topic.isNotEmpty) ...<Widget>[
                       const SizedBox(height: AppSpacing.sm),
@@ -338,8 +338,11 @@ class _FlashcardsScreenState extends State<FlashcardsScreen> {
                     onPressed:
                         _isGenerating || isEmpty ? null : _generateFlashcards,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.blue,
+                      backgroundColor: AppColors.accent,
                       foregroundColor: AppColors.white,
+                      side: BorderSide(
+                        color: AppColors.glassTint.withValues(alpha: 0.22),
+                      ),
                       minimumSize: const Size(0, 44),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 20,

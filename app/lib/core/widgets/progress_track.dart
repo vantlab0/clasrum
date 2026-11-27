@@ -28,7 +28,8 @@ class ProgressTrack extends StatelessWidget {
         value: normalized,
         minHeight: height,
         backgroundColor: AppColors.surfaceHigh,
-        valueColor: AlwaysStoppedAnimation<Color>(color ?? AppColors.blue),
+        valueColor:
+            AlwaysStoppedAnimation<Color>(color ?? AppColors.glassTint),
       ),
     );
     if (!showLabel) return track;

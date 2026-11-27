@@ -346,8 +346,8 @@ class _TestYourselfScreenState extends State<TestYourselfScreen> {
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(AppRadius.lg),
-                      borderSide: const BorderSide(
-                        color: AppColors.blue,
+                      borderSide: BorderSide(
+                        color: AppColors.glassTint.withValues(alpha: 0.85),
                         width: 1.4,
                       ),
                     ),
@@ -414,14 +414,14 @@ class _TestYourselfScreenState extends State<TestYourselfScreen> {
             Text(
               _error!,
               textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.red, fontSize: 13),
+              style: const TextStyle(color: AppColors.white, fontSize: 13),
             ),
           ],
           const SizedBox(height: 16),
           ElevatedButton(
             onPressed: _isGenerating ? null : _generateQuiz,
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.blue,
+              backgroundColor: AppColors.accent,
               foregroundColor: AppColors.white,
               minimumSize: const Size(0, 48),
               shape: RoundedRectangleBorder(
@@ -525,7 +525,7 @@ class _TestYourselfScreenState extends State<TestYourselfScreen> {
                           ? _submitQuiz
                           : () => setState(() => _currentIndex += 1),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.blue,
+                        backgroundColor: AppColors.accent,
                         foregroundColor: AppColors.white,
                       ),
                       child: Text(
@@ -587,7 +587,7 @@ class _TestYourselfScreenState extends State<TestYourselfScreen> {
                 _remainingSeconds = _durationMinutes * 60;
               }),
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.blue,
+                backgroundColor: AppColors.accent,
                 foregroundColor: AppColors.white,
                 minimumSize: const Size(0, 46),
               ),
@@ -622,12 +622,12 @@ class _Chip extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
             color: selected
-                ? AppColors.blue.withValues(alpha: 0.22)
+                ? AppColors.glassTint.withValues(alpha: 0.14)
                 : AppColors.surface.withValues(alpha: 0.7),
             borderRadius: BorderRadius.circular(999),
             border: Border.all(
               color: selected
-                  ? AppColors.blue.withValues(alpha: 0.9)
+                  ? AppColors.glassTint.withValues(alpha: 0.8)
                   : AppColors.border.withValues(alpha: 0.7),
             ),
           ),
@@ -668,12 +668,12 @@ class _AnswerOption extends StatelessWidget {
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: selected
-                ? AppColors.blue.withValues(alpha: 0.22)
+                ? AppColors.glassTint.withValues(alpha: 0.14)
                 : AppColors.surface.withValues(alpha: 0.7),
             borderRadius: BorderRadius.circular(AppRadius.md),
             border: Border.all(
               color: selected
-                  ? AppColors.blue.withValues(alpha: 0.9)
+                  ? AppColors.glassTint.withValues(alpha: 0.8)
                   : AppColors.border.withValues(alpha: 0.7),
             ),
           ),

@@ -337,7 +337,7 @@ class _HomeScreenState extends State<HomeScreen> {
       body: SafeArea(
         bottom: false,
         child: RefreshIndicator(
-          color: AppColors.blue,
+          color: AppColors.white,
           onRefresh: _loadLessons,
           child: ListView(
             padding: EdgeInsets.fromLTRB(20, 16, 20, bottomPad),
@@ -357,7 +357,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 12),
                 Text(
                   _error!,
-                  style: const TextStyle(color: AppColors.red, fontSize: 13),
+                  style: const TextStyle(color: AppColors.white, fontSize: 13),
                 ),
               ],
               const SizedBox(height: 32),
@@ -606,8 +606,9 @@ class _StartButton extends StatelessWidget {
     return FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: AppColors.blue,
+        backgroundColor: AppColors.accent,
         foregroundColor: AppColors.white,
+        side: BorderSide(color: AppColors.glassTint.withValues(alpha: 0.22)),
         minimumSize: const Size(0, 40),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

@@ -662,7 +662,7 @@ class _NotesScreenState extends State<NotesScreen> {
         child: _loading
             ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
             : RefreshIndicator(
-                color: AppColors.blue,
+                color: AppColors.white,
                 onRefresh: _load,
                 child: ListView(
                   padding: EdgeInsets.fromLTRB(20, 16, 20, bottomPad),

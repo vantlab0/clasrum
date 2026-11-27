@@ -21,7 +21,7 @@ void showAppSnackBar(
                   ? Icons.error_outline_rounded
                   : Icons.check_circle_outline_rounded,
               size: 18,
-              color: isError ? AppColors.red : AppColors.blue,
+              color: AppColors.white,
             ),
             const SizedBox(width: AppSpacing.md),
             Expanded(child: Text(message)),

@@ -182,8 +182,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
               FilledButton(
                 onPressed: () => Navigator.pop(context, true),
                 style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.red,
+                  backgroundColor: AppColors.accent,
                   foregroundColor: AppColors.white,
+                  side: BorderSide(
+                    color: AppColors.glassTint.withValues(alpha: 0.22),
+                  ),
                 ),
                 child: const Text('Delete'),
               ),
@@ -335,7 +338,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     const SizedBox(height: 12),
                     Text(_error!,
                         style: const TextStyle(
-                            color: AppColors.red, fontSize: 13)),
+                            color: AppColors.white, fontSize: 13)),
                   ],
                 ],
               ),

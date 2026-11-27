@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme.dart';
+import '../../core/widgets/glass_widgets.dart';
 import '../../core/widgets/pwony_icons.dart';
 
 /// Smooth, premium route transition for auth flow (slowed for visibility).
@@ -123,15 +124,22 @@ class _AuthBrandMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      children: [
-        Container(
-          constraints: const BoxConstraints(maxWidth: 220, maxHeight: 96),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: Image.asset(
-            'assets/brand/pwony_full_logo.png',
-            fit: BoxFit.contain,
-            filterQuality: FilterQuality.high,
-            semanticLabel: 'Pwony',
+      children: <Widget>[
+        GlassContainer(
+          radius: 22,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          blurSigma: 28,
+          backgroundOpacity: 0.32,
+          borderOpacity: 0.7,
+          child: const Text(
+            'míngbai',
+            semanticsLabel: 'míngbai',
+            style: TextStyle(
+              color: AppColors.white,
+              fontSize: 30,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.5,
+            ),
           ),
         ),
       ],
@@ -339,10 +347,11 @@ class AuthPrimaryButton extends StatelessWidget {
     return FilledButton(
       onPressed: loading ? null : onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: AppColors.blue,
+        backgroundColor: AppColors.accent,
         foregroundColor: Colors.white,
-        disabledBackgroundColor: AppColors.blue.withValues(alpha: 0.75),
+        disabledBackgroundColor: AppColors.accent.withValues(alpha: 0.75),
         disabledForegroundColor: Colors.white,
+        side: BorderSide(color: AppColors.glassTint.withValues(alpha: 0.22)),
         minimumSize: const Size.fromHeight(48),
         elevation: 0,
         shadowColor: Colors.transparent,

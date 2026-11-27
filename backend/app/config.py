@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # --- core -------------------------------------------------------------
-    app_name: str = "AI Personal Classroom"
+    app_name: str = "míngbai"
     version: str = "0.1.0"
     environment: str = "development"  # development | test | production
     debug: bool = True

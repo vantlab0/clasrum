@@ -171,7 +171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: <Widget>[
                           const PwonyIcon(PwonyIconKind.info,
-                              size: 16, color: AppColors.blue),
+                              size: 16, color: AppColors.white),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
@@ -188,7 +188,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   if (_error != null) ...[
                     Text(_error!,
                         style: const TextStyle(
-                            color: AppColors.red, fontSize: 13)),
+                            color: AppColors.white, fontSize: 13)),
                     const SizedBox(height: 12),
                   ],
                   _section(

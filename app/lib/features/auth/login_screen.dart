@@ -205,7 +205,7 @@ class _LoginScreenState extends State<LoginScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 const Text(
-                  'New to Pwony? ',
+                  'New to míngbai? ',
                   style: TextStyle(color: Colors.white70, fontSize: 13),
                 ),
                 AuthTextLink(

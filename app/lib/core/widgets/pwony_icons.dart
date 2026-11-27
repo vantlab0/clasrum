@@ -2,7 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
-/// Pwony custom icon set — consistent geometric, rounded-stroke glyphs.
+/// míngbai custom icon set — consistent geometric, rounded-stroke glyphs.
 /// Do not use Material Icons or emoji as substitutes for product UI icons.
 enum PwonyIconKind {
   home,

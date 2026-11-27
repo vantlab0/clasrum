@@ -115,7 +115,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
             const PwonyIcon(
               PwonyIconKind.delete,
               size: 40,
-              color: AppColors.red,
+              color: AppColors.white,
             ),
             const SizedBox(height: 16),
             const Text(

@@ -1,4 +1,4 @@
-# AI Personal Classroom — Implementation Contracts (v1, authoritative)
+# míngbai — Implementation Contracts (v1, authoritative)
 
 This document is the single source of truth for every boundary between the three
 implementations: **Python backend**, **Qwen Realtime**, and the **Flutter app**.

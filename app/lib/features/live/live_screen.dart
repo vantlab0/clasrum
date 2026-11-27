@@ -1222,9 +1222,9 @@ class _LiveScreenState extends State<LiveScreen>
                           value: _connectionProgress,
                           minHeight: 2,
                           backgroundColor:
-                              AppColors.red.withValues(alpha: 0.18),
+                              AppColors.glassTint.withValues(alpha: 0.12),
                           valueColor: const AlwaysStoppedAnimation<Color>(
-                              AppColors.red),
+                              AppColors.white),
                         ),
                       ),
                     ),
@@ -1338,7 +1338,7 @@ class _InlineErrorStatus extends StatelessWidget {
                 TextButton(
                   onPressed: onRetry,
                   style: TextButton.styleFrom(
-                    foregroundColor: AppColors.red,
+                    foregroundColor: AppColors.white,
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
@@ -1384,7 +1384,7 @@ class _FloatingCircleButton extends StatelessWidget {
       message: tooltip,
       child: ClipOval(
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
           child: Material(
             color: Colors.transparent,
             child: InkWell(
@@ -1445,11 +1445,11 @@ class _BottomControls extends StatelessWidget {
           tooltip: paused ? 'Resume' : 'Pause',
           onPressed: micPhase == _MicPhase.listening ? null : onPauseToggle,
           background: paused
-              ? AppColors.red.withValues(alpha: 0.92)
-              : AppColors.surface.withValues(alpha: 0.45),
+              ? AppColors.accent
+              : AppColors.surface.withValues(alpha: 0.42),
           borderColor: paused
-              ? AppColors.red.withValues(alpha: 0.7)
-              : AppColors.border.withValues(alpha: 0.55),
+              ? AppColors.glassTint.withValues(alpha: 0.5)
+              : AppColors.glassTint.withValues(alpha: 0.35),
           child: PwonyIcon(
             paused ? PwonyIconKind.play : PwonyIconKind.pause,
             size: 20,
@@ -1519,7 +1519,7 @@ class _CircleControl extends StatelessWidget {
         message: tooltip,
         child: ClipOval(
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
@@ -1570,10 +1570,10 @@ class _MicControl extends StatelessWidget {
     final listening = phase == _MicPhase.listening;
     final submitting = phase == _MicPhase.submitting;
     final bg = listening
-        ? AppColors.red.withValues(alpha: 0.95)
+        ? AppColors.accent
         : submitting
-            ? AppColors.red.withValues(alpha: 0.75)
-            : AppColors.red.withValues(alpha: 0.92);
+            ? AppColors.accent.withValues(alpha: 0.72)
+            : AppColors.accent.withValues(alpha: 0.9);
 
     return Semantics(
       button: true,
@@ -1591,7 +1591,7 @@ class _MicControl extends StatelessWidget {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
@@ -1602,7 +1602,7 @@ class _MicControl extends StatelessWidget {
                 borderRadius: BorderRadius.circular(999),
                 border: Border.all(
                   color: AppColors.white
-                      .withValues(alpha: listening ? 0.12 : 0.08),
+                      .withValues(alpha: listening ? 0.3 : 0.18),
                 ),
               ),
               child: Material(
@@ -1736,14 +1736,14 @@ class _CameraOverlay extends StatelessWidget {
           child: ClipRRect(
             borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
             child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+              filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
               child: Container(
                 decoration: BoxDecoration(
-                  color: AppColors.surface.withValues(alpha: 0.72),
+                  color: AppColors.surface.withValues(alpha: 0.58),
                   borderRadius:
                       const BorderRadius.vertical(top: Radius.circular(28)),
                   border: Border.all(
-                    color: AppColors.border.withValues(alpha: 0.55),
+                    color: AppColors.glassTint.withValues(alpha: 0.4),
                   ),
                 ),
                 child: SafeArea(

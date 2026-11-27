@@ -1,4 +1,4 @@
-"""Baseline schema for the AI Personal Classroom backend.
+"""Baseline schema for the míngbai backend.
 
 Hand-written equivalent of ``alembic revision --autogenerate`` against
 ``app.db.models`` (docs/CONTRACTS.md §8). Portable across SQLite and

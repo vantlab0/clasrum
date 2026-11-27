@@ -40,10 +40,10 @@ class UpgradeScreen extends StatelessWidget {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: AppColors.blue.withValues(alpha: 0.14),
+                      color: AppColors.glassTint.withValues(alpha: 0.10),
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                        color: AppColors.blue.withValues(alpha: 0.35),
+                        color: AppColors.glassTint.withValues(alpha: 0.3),
                       ),
                     ),
                     child: const Center(
@@ -56,7 +56,7 @@ class UpgradeScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   const Text(
-                    'Pwony Pro',
+                    'míngbai Pro',
                     style: TextStyle(
                       color: AppColors.white,
                       fontSize: 22,
@@ -87,7 +87,7 @@ class UpgradeScreen extends StatelessWidget {
                   Row(
                     children: <Widget>[
                       PwonyIcon(PwonyIconKind.info,
-                          size: 18, color: AppColors.blue),
+                          size: 18, color: AppColors.white),
                       SizedBox(width: 8),
                       Expanded(
                         child: Text(

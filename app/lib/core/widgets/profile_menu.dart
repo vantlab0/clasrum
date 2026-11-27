@@ -205,14 +205,14 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20),
               child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
                 child: Container(
                   padding: const EdgeInsets.all(18),
                   decoration: BoxDecoration(
-                    color: AppColors.surface.withValues(alpha: 0.78),
+                    color: AppColors.surface.withValues(alpha: 0.6),
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
-                      color: AppColors.border.withValues(alpha: 0.55),
+                      color: AppColors.glassTint.withValues(alpha: 0.45),
                     ),
                   ),
                   child: Column(
@@ -262,8 +262,12 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
                               onPressed: () =>
                                   Navigator.of(dialogContext).pop(true),
                               style: FilledButton.styleFrom(
-                                backgroundColor: AppColors.blue,
+                                backgroundColor: AppColors.accent,
                                 foregroundColor: AppColors.white,
+                                side: BorderSide(
+                                  color: AppColors.glassTint
+                                      .withValues(alpha: 0.22),
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
@@ -314,7 +318,7 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
           height: widget.size,
           child: ClipOval(
             child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+              filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
               child: Material(
                 type: MaterialType.transparency,
                 child: InkWell(
@@ -323,9 +327,9 @@ class _ProfileMenuButtonState extends State<ProfileMenuButton>
                   child: Ink(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: AppColors.surface.withValues(alpha: 0.55),
+                      color: AppColors.surface.withValues(alpha: 0.42),
                       border: Border.all(
-                        color: AppColors.border.withValues(alpha: 0.55),
+                        color: AppColors.glassTint.withValues(alpha: 0.4),
                       ),
                     ),
                     child: Center(
@@ -377,15 +381,17 @@ class _AccountDropdownMenu extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(18),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
         child: Container(
           decoration: BoxDecoration(
-            color: AppColors.surface.withValues(alpha: 0.72),
+            color: AppColors.surface.withValues(alpha: 0.58),
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AppColors.border.withValues(alpha: 0.55)),
+            border: Border.all(
+              color: AppColors.glassTint.withValues(alpha: 0.45),
+            ),
             boxShadow: <BoxShadow>[
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.35),
+                color: AppColors.accent.withValues(alpha: 0.5),
                 blurRadius: 24,
                 offset: const Offset(0, 10),
               ),

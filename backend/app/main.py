@@ -158,7 +158,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version=settings.version,
-        description="AI Personal Classroom backend — REST + realtime tutor.",
+        description="míngbai backend — REST + realtime tutor.",
         lifespan=lifespan,
         debug=settings.debug,
     )

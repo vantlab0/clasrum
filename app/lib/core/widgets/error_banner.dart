@@ -25,9 +25,11 @@ class InlineError extends StatelessWidget {
       width: double.infinity,
       padding: EdgeInsets.all(compact ? AppSpacing.md : AppSpacing.lg),
       decoration: BoxDecoration(
-        color: AppColors.red.withValues(alpha: 0.08),
+        color: AppColors.glassTint.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border.all(color: AppColors.red.withValues(alpha: 0.35)),
+        border: Border.all(
+          color: AppColors.glassTint.withValues(alpha: 0.35),
+        ),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -35,7 +37,7 @@ class InlineError extends StatelessWidget {
           const Icon(
             Icons.wifi_off_rounded,
             size: 18,
-            color: AppColors.red,
+            color: AppColors.white,
           ),
           const SizedBox(width: AppSpacing.md),
           Expanded(
@@ -53,7 +55,7 @@ class InlineError extends StatelessWidget {
                   TextButton(
                     onPressed: onRetry,
                     style: TextButton.styleFrom(
-                      foregroundColor: AppColors.red,
+                      foregroundColor: AppColors.white,
                       padding: EdgeInsets.zero,
                       minimumSize: const Size(48, 32),
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,

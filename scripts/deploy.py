@@ -145,7 +145,7 @@ def main() -> int:
                     jwt_secret = line.split("=", 1)[1].strip()
         jwt_secret = jwt_secret or secrets.token_hex(32)
         env_content = f"""# Managed by scripts/deploy.py — production settings
-APP_NAME=AI Personal Classroom
+APP_NAME=míngbai
 ENVIRONMENT=production
 DEBUG=false
 API_PREFIX=/api/v1
@@ -226,7 +226,7 @@ BOARD_SNAPSHOT_KEEP=5
 
         print("==> Installing systemd service")
         unit = """[Unit]
-Description=AI Personal Classroom backend (FastAPI)
+Description=míngbai backend (FastAPI)
 After=network-online.target
 Wants=network-online.target
 

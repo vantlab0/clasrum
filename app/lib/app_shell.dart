@@ -231,15 +231,22 @@ class _FloatingNavBar extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(height / 2),
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
           child: Container(
             padding: const EdgeInsets.all(pad),
             decoration: BoxDecoration(
-              color: AppColors.surface.withValues(alpha: 0.55),
+              color: AppColors.surface.withValues(alpha: 0.42),
               borderRadius: BorderRadius.circular(height / 2),
               border: Border.all(
-                color: AppColors.border.withValues(alpha: 0.55),
+                color: AppColors.glassTint.withValues(alpha: 0.45),
               ),
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: AppColors.accent.withValues(alpha: 0.5),
+                  blurRadius: 24,
+                  offset: const Offset(0, 8),
+                ),
+              ],
             ),
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -264,8 +271,11 @@ class _FloatingNavBar extends StatelessWidget {
                       width: 1.5 * unit,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: AppColors.blue,
+                          color: AppColors.accent,
                           borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: AppColors.glassTint.withValues(alpha: 0.24),
+                          ),
                         ),
                       ),
                     ),
@@ -466,12 +476,14 @@ class _CircularHamburgerButtonState extends State<_CircularHamburgerButton>
                     ),
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: AppColors.blue.withValues(alpha: 0.35 + 0.45 * t),
+                      color: AppColors.glassTint
+                          .withValues(alpha: 0.35 + 0.45 * t),
                       width: 1.5 + 1.0 * t,
                     ),
                     boxShadow: <BoxShadow>[
                       BoxShadow(
-                        color: AppColors.blue.withValues(alpha: 0.15 + 0.35 * t),
+                        color: AppColors.glassTint
+                            .withValues(alpha: 0.12 + 0.28 * t),
                         blurRadius: 12 + 18 * t,
                         offset: const Offset(0, 4),
                       ),
@@ -574,21 +586,21 @@ class _FeatureMenu extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
         child: Container(
           width: menuWidth,
           constraints: BoxConstraints(maxHeight: maxHeight),
           decoration: BoxDecoration(
-            color: AppColors.surface.withValues(alpha: 0.92),
+            color: AppColors.surface.withValues(alpha: 0.68),
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
-              color: AppColors.border.withValues(alpha: 0.55),
+              color: AppColors.glassTint.withValues(alpha: 0.45),
             ),
             boxShadow: <BoxShadow>[
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.42),
-                blurRadius: 20,
-                offset: const Offset(0, 10),
+                color: AppColors.accent.withValues(alpha: 0.6),
+                blurRadius: 28,
+                offset: const Offset(0, 12),
               ),
             ],
           ),

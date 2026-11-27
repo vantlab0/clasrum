@@ -53,7 +53,7 @@ class PwonyApp extends StatelessWidget {
       authService: authService,
       profileService: profileService,
       child: MaterialApp(
-        title: 'AI Personal Classroom',
+        title: 'míngbai',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.dark(),
         home: initError != null

@@ -1,6 +1,6 @@
 # Supabase Authentication Foundation (Phase 7)
 
-This document describes the Supabase auth/profile foundation added to Pwony (Flutter + existing FastAPI/Qwen backend). **Authentication screens are not implemented in this phase.**
+This document describes the Supabase auth/profile foundation added to míngbai (Flutter + existing FastAPI/Qwen backend). **Authentication screens are not implemented in this phase.**
 
 ## 1. Flutter configuration (build-time, no secrets committed)
 
