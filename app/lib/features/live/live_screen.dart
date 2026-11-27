@@ -14,6 +14,7 @@ import '../../blackboard/model/board_geometry.dart';
 import '../../blackboard/runtime/blackboard_controller.dart';
 import '../../blackboard/runtime/board_fullness_detector.dart';
 import '../../blackboard/runtime/board_viewport_controller.dart';
+import '../../blackboard/runtime/board_vertical_layout.dart';
 import '../../core/theme.dart';
 import '../../core/widgets/pwony_icons.dart';
 import '../../core/widgets/glass_widgets.dart';
@@ -351,12 +352,16 @@ class _LiveScreenState extends State<LiveScreen>
     _lastBoardFullness = snapshot;
     if (!snapshot.isFull || snapshot.sequence <= _reportedFullSequence) return;
     _reportedFullSequence = snapshot.sequence;
+    final narrow = BoardVerticalLayout.isNarrow(
+      MediaQuery.sizeOf(context),
+    );
     unawaited(widget.client.reportViewportFull(
       sequence: snapshot.sequence,
       coverage: snapshot.coverage,
       visibleRect: snapshot.visibleRect,
       scale: _viewportController.scale,
       offset: _viewportController.offset,
+      narrow: narrow,
     ));
   }
 
@@ -415,10 +420,16 @@ class _LiveScreenState extends State<LiveScreen>
         ));
         break;
       case RealtimeMessageType.userSpeechStarted:
-        // Legacy VAD telemetry. It never grants microphone access; local
-        // amplitude detection handles barge-in during answer turns.
+        // Legacy VAD telemetry. Manual-turn sessions should not rely on server
+        // VAD; ignore it while the tutor is still playing to avoid echo/self-
+        // interruption. During an unlocked answer window, let local capture/VAD
+        // decide when the student has spoken.
+        if (_isAiPlaybackActive &&
+            !(_micUnlockedForQuestion && _micPhase == _MicPhase.listening)) {
+          break;
+        }
         unawaited(_audioPlayback.interrupt(keepNewer: true));
-        if (mounted) {
+        if (mounted && _micPhase == _MicPhase.listening) {
           setState(() => _speechDetected = true);
         }
         break;
@@ -623,6 +634,22 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
+  bool get _isAiPlaybackActive =>
+      _audioPlayback.state == AiPlaybackState.playing ||
+      _audioPlayback.state == AiPlaybackState.buffering;
+
+  Future<void> _waitForAiPlaybackIdle({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (mounted &&
+        _micUnlockedForQuestion &&
+        _isAiPlaybackActive &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+    }
+  }
+
   void _handleAudioDelta(RealtimeMessage message) {
     // During an answer turn local amplitude detection flushes playback when
     // the student begins speaking.
@@ -802,6 +829,20 @@ class _LiveScreenState extends State<LiveScreen>
         return;
       }
 
+      // Avoid capturing the tail of AI playback over speakers. The mic is
+      // unlocked, but we only start streaming once the tutor audio is idle.
+      await _waitForAiPlaybackIdle();
+      // Small grace period for speaker echo to decay after playback ends.
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (!mounted ||
+          !_micUnlockedForQuestion ||
+          _activeMicRequestId != requestId ||
+          _micPhase != _MicPhase.idle ||
+          _submittingTurn ||
+          _isAiPlaybackActive) {
+        return;
+      }
+
       setState(() {
         _micPhase = _MicPhase.listening;
         _micContinuous = true;
@@ -870,7 +911,13 @@ class _LiveScreenState extends State<LiveScreen>
           _lastVoiceAt = now;
         }
         if (firstSpeech) {
-          unawaited(_audioPlayback.interrupt(keepNewer: true));
+          // Only interrupt playback for speech after the answer window is
+          // genuinely active; ignore early frames that can be residual echo.
+          final started = _speechStartedAt;
+          if (started != null &&
+              now.difference(started) >= const Duration(milliseconds: 250)) {
+            unawaited(_audioPlayback.interrupt(keepNewer: true));
+          }
         }
         _evaluateVad(now);
       });

@@ -888,10 +888,12 @@ class WriteOnBoardArgs(StrictModel):
 
     text: BoardLineText = Field(
         description=(
-            "ONE single short line to write on the board (1-8 words, max 80 chars). "
-            "No newlines, no paragraphs, no lists. Write one line per call and "
-            "make a separate call for each additional line. Even one or two "
-            "words is fine; keep it natural and aligned with what you are saying."
+            "ONE single short line of actual teaching content to write on the board "
+            "(1-8 words, max 80 chars). No newlines, no paragraphs, no lists. Write "
+            "one line per call and make a separate call for each additional line. "
+            "Even one or two words is fine. Write the real content itself, never a "
+            "meta label or narration such as 'Definition', 'Intuition', 'Example', "
+            "'Step 1', or 'Let us discuss'."
         )
     )
     style: Literal[
@@ -1419,13 +1421,14 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "write_text",  # maps to write_text event; heading styles map inside build_payload
         "new",
         WriteOnBoardArgs,
-        "Write ONE single short line of teaching content onto the blackboard per call "
+        "Write ONE single short line of actual teaching content onto the blackboard per call "
         "(1-8 words, max 80 chars; one or two words is fine). Never write a paragraph, "
         "several lines, or a list in one call - make separate calls for each line instead. "
         "Write the lesson title first with style h2, then add one short line at a time as "
-        "you teach, each line matching what you are saying aloud. Use for headings, "
-        "important words, short definitions, labels, and single-line equations. Prefer "
-        "this over board_intent for simple text; it appears progressively on the board.",
+        "you teach, each line matching what you are saying aloud. Write the real content, "
+        "not meta labels or narration like 'Definition', 'Intuition', 'Example', or "
+        "'Let's start'. Use for headings, key points, short definitions, and single-line "
+        "equations. Prefer this over board_intent for simple text; it appears progressively on the board.",
         (),
     ),
     # -----------------------------------------------------------------------

@@ -23,7 +23,7 @@ class BoardVerticalLayout {
   /// Portrait-ish viewports get vertical reading mode.
   static const double aspectRatioThreshold = 0.8;
 
-  static const double sideMargin = 0.06;
+  static const double sideMargin = 0.05; // ~90% content width on mobile
   static const double topMargin = 0.05;
   static const double blockGap = 0.018;
 

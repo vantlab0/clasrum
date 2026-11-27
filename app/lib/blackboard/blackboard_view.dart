@@ -35,7 +35,7 @@ const double _textPaddingPx = 4.0;
 /// On narrow screens never let an explicit (often tiny backend column) wrap
 /// width squeeze prose into a tall stack. The board is reflowed vertically, so
 /// a generous width is safe and keeps every line readable.
-const double _narrowMinWrapFraction = 0.78;
+const double _narrowMinWrapFraction = 0.90;
 
 bool _isNarrowBoard(Size size) => BoardVerticalLayout.isNarrow(size);
 

@@ -190,7 +190,10 @@ def build_teacher_system_prompt(
         "concept; wait for their answer before advancing.\n"
         "5. Adapt: if the student is confused or says they do not understand, re-teach with a "
         "different example and simpler words, then re-check. Use lesson_revisit_concept when "
-        "you have to go back more than one concept."
+        "you have to go back more than one concept.\n"
+        "6. Board content must be the actual content, never a meta label. Do not write "
+        "standalone words like 'Definition', 'Intuition', 'Example', or 'Step 1'; write the "
+        "real definition, intuition, example, or step."
     )
 
     sections.append(

@@ -426,12 +426,22 @@ def _derived_flow_cursors(
         rect = rect_from_element(element, config)
         if rect is None:
             continue
-        key = "left_column" if rect.cx < 0.5 else "main_column"
+        col_w = max(0.0, min(config.column_width, (config.safe.w - config.element_gap) / 2.0))
+        left_x = config.safe.x
+        right_x = config.safe.x + col_w + config.element_gap
+        key = "main_column" if rect.cx >= (left_x + col_w / 2.0 + config.element_gap / 2.0) else "left_column"
+        if abs(rect.x - right_x) <= 0.08:
+            key = "main_column"
+        elif abs(rect.x - left_x) <= 0.08:
+            key = "left_column"
         sequence = int(element.get("created_sequence") or element.get("updated_sequence") or 0)
         y = min(config.safe.y2, rect.y2 + config.element_gap)
+        if y + config.min_height > config.safe.y2:
+            y = config.safe.y2
         previous = cursors.get(key)
         if previous is None or sequence >= previous[0]:
-            cursors[key] = (sequence, rect.x, y)
+            anchor_x = right_x if key == "main_column" else left_x
+            cursors[key] = (sequence, anchor_x, y)
     return {
         key: (x, y)
         for key, (_sequence, x, y) in cursors.items()
@@ -997,30 +1007,78 @@ class BlackboardLayoutManager:
         return None
 
     def _flow_position(self, size: Rect, *, section_break: bool, prefer_left: bool) -> tuple[str, Rect]:
-        """Sequential lecture-writing cursor: top-to-bottom, then next column."""
-        key = "left_column" if prefer_left else "main_column"
-        cursor = self.state.region_cursors.get(key)
+        """Sequential lecture-writing cursor: fill a column, then the next one."""
         safe = self.config.safe
-        if cursor is None:
-            x, y = safe.x, safe.y
+        gap = self.config.element_gap
+        # Two-column desktop layout is used only when the element keeps its
+        # full font size inside a half-width column. Wider text flows in one
+        # full-width column instead of being shrunk to fit.
+        two_col_w = max(0.0, min(self.config.column_width, (safe.w - gap) / 2.0))
+        single_col_w = min(self.config.max_content_width, safe.w)
+        if two_col_w + EPS < size.w:
+            col_w = single_col_w
+            left_x = right_x = safe.x
         else:
-            x, y = cursor
+            col_w = two_col_w
+            left_x = safe.x
+            right_x = safe.x + col_w + gap
+            if right_x + self.config.min_width > safe.x2:
+                col_w = single_col_w
+                left_x = right_x = safe.x
+
+        def _cursor_y(*keys: str) -> float:
+            ys = [
+                float(self.state.region_cursors[key][1])
+                for key in keys
+                if key in self.state.region_cursors
+            ]
+            return max(ys) if ys else float(safe.y)
+
+        def _col(key: str, x: float, keys: tuple[str, ...]) -> tuple[str, Rect, bool]:
+            y = _cursor_y(*keys)
+            wrapped = y + size.h > safe.y2 + EPS
+            if wrapped:
+                y = float(safe.y)
             if section_break:
                 y += self.config.section_gap
-        if y + size.h > safe.y2:
-            # Start a fresh column/band; _scan_area still rejects collisions.
-            y = safe.y
-            x = safe.x if x <= safe.x + EPS else safe.x + self.config.column_width + self.config.element_gap
-        x = max(safe.x, min(x, safe.x2 - max(size.w, self.config.min_width)))
-        width = max(0.0, min(self.config.column_width, safe.x2 - x))
-        return key, Rect(x, y, width, max(0.0, safe.y2 - y))
+            x = max(safe.x, min(x, safe.x2 - max(size.w, self.config.min_width)))
+            width = max(0.0, min(col_w, safe.x2 - x))
+            return key, Rect(x, y, width, max(0.0, safe.y2 - y)), wrapped
+
+        single = left_x == right_x
+        if single:
+            key = "left_column" if prefer_left else "main_column"
+            placed = _col(key, left_x, ("left_column", "main_column"))
+            return placed[0], placed[1]
+
+        left = _col("left_column", left_x, ("left_column",))
+        right = _col("main_column", right_x, ("main_column",))
+        candidates = (left, right)
+        # Continue the most-filled column that still has room. This keeps the
+        # flow stable when the layout state is rebuilt from saved elements.
+        continuing = [
+            item for item in candidates
+            if not item[2]
+            and item[1].w + EPS >= size.w
+            and item[0] in self.state.region_cursors
+        ]
+        if continuing:
+            best = max(continuing, key=lambda item: self.state.region_cursors[item[0]][1])
+            return best[0], best[1]
+        # Fresh flow starts in the left column; move right only when the left
+        # column is exhausted or cannot hold the element at full font size.
+        for item in candidates:
+            if not item[2] and item[1].w + EPS >= size.w:
+                return item[0], item[1]
+        return candidates[0][0], candidates[0][1]
 
     def _advance_flow(self, region: str, rect: Rect, *, section_break: bool) -> None:
         if region not in {"main_column", "left_column"}:
             return
-        y = rect.y2 + self.config.element_gap
+        gap = self.config.section_gap if section_break else self.config.element_gap
+        y = rect.y2 + gap
         if y + self.config.min_height > self.config.safe.y2:
-            y = self.config.safe.y
+            y = self.config.safe.y2
         self.state.region_cursors[region] = (rect.x, y)
 
     def _group_bounds(self, items: list[dict[str, Any]]) -> Rect:

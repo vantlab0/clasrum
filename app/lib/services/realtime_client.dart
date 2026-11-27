@@ -253,6 +253,7 @@ class RealtimeClient extends ChangeNotifier {
     required BoardRect visibleRect,
     required double scale,
     required Offset offset,
+    bool narrow = false,
   }) async {
     await _send(viewportFullPayload(
       sequence: sequence,
@@ -260,6 +261,7 @@ class RealtimeClient extends ChangeNotifier {
       visibleRect: visibleRect,
       scale: scale,
       offset: offset,
+      narrow: narrow,
     ));
   }
 
@@ -270,6 +272,7 @@ class RealtimeClient extends ChangeNotifier {
     required BoardRect visibleRect,
     required double scale,
     required Offset offset,
+    bool narrow = false,
   }) =>
       <String, dynamic>{
         'type': 'board.viewport_full',
@@ -278,6 +281,7 @@ class RealtimeClient extends ChangeNotifier {
         'visible_rect': visibleRect.toJson(),
         'scale': scale.clamp(0.5, 2.0),
         'offset': {'x': offset.dx, 'y': offset.dy},
+        'layout_mode': narrow ? 'mobile' : 'desktop',
       };
 
   /// Ask the server to persist a full-board clear for the student.

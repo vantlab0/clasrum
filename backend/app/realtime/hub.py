@@ -536,8 +536,11 @@ class LessonRealtimeHub:
         socket: LessonSocket,
         lesson_id: str,
         sequence: int,
+        *,
+        scope: str = "all",
+        region: str | None = None,
     ) -> bool:
-        """Persist one system-owned full-board clear and broadcast it.
+        """Persist one system-owned board clear and broadcast it.
 
         The clear is intentionally owned by the server so snapshots, replay and
         the tutor's context stay in sync. Returns False when the client report
@@ -564,22 +567,79 @@ class LessonRealtimeHub:
                 trigger_system=self._trigger_system,
             )
             registry.set_lesson_publisher(self)
+            args: dict[str, Any] = {"scope": scope}
+            if scope == "region":
+                args["region"] = region
             async with session_scope() as db:
                 result = await registry.execute_structured(
                     db,
                     lesson_id,
                     "board_clear_region",
-                    {"scope": "all"},
+                    args,
                     source=BoardEventSource.SYSTEM,
                 )
         except Exception:  # pragma: no cover - never break the socket
-            logger.exception("board clear failed lesson=%s", lesson_id)
+            logger.exception("board clear failed lesson=%s scope=%s region=%s", lesson_id, scope, region)
             await _send_error(socket, "internal_error", "could not clear the board")
             return False
         if not result.get("ok"):
             logger.warning("board clear rejected lesson=%s result=%s", lesson_id, result)
             return False
         return True
+
+    async def _recycle_desktop_board(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        sequence: int,
+    ) -> tuple[bool, str]:
+        """Desktop fullness policy: fill left then right; when right is full clear left first."""
+        try:
+            async with session_scope() as db:
+                lesson = await db.get(Lesson, lesson_id)
+                if lesson is None:
+                    return False, "none"
+                board = self._board or BoardService()
+                document = await board.reconstruct_document(db, lesson_id)
+                elements = [
+                    el
+                    for el in (document.get("elements") or [])
+                    if isinstance(el, dict) and el.get("removed_at_sequence") is None
+                ]
+        except Exception:  # pragma: no cover
+            logger.exception("desktop recycle inspection failed lesson=%s", lesson_id)
+            return False, "none"
+
+        left = 0
+        right = 0
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            payload = element.get("payload") if isinstance(element.get("payload"), dict) else {}
+            pos = element.get("position") or payload.get("position") or {}
+            x = pos.get("x")
+            try:
+                x_val = float(x)
+            except Exception:
+                continue
+            if x_val < 0.5:
+                left += 1
+            else:
+                right += 1
+
+        # Requested behavior: after right side is full, clean left first and write there.
+        if right > 0 and left > 0:
+            ok = await self._persist_system_board_clear(
+                socket, lesson_id, sequence, scope="region", region="left"
+            )
+            return ok, "left"
+        if left > 0 and right == 0:
+            ok = await self._persist_system_board_clear(
+                socket, lesson_id, sequence, scope="region", region="right"
+            )
+            return ok, "right"
+        ok = await self._persist_system_board_clear(socket, lesson_id, sequence, scope="all")
+        return ok, "all"
 
     async def _nudge_after_clear(self, socket: LessonSocket, message: str) -> None:
         if (
@@ -614,27 +674,59 @@ class LessonRealtimeHub:
         if sequence <= socket.last_viewport_report_sequence:
             return  # duplicate/older report
 
+        layout_mode = str(envelope.get("layout_mode") or "").strip().lower()
+        narrow = layout_mode == "mobile"
+
         async with socket.viewport_clear_lock:
             if sequence <= socket.last_viewport_cleared_sequence:
                 return
             if sequence <= socket.last_viewport_report_sequence:
                 return
             socket.last_viewport_report_sequence = sequence
-            if not await self._persist_system_board_clear(socket, lesson_id, sequence):
+            if narrow:
+                ok = await self._persist_system_board_clear(socket, lesson_id, sequence)
+                clear_kind = "all"
+            else:
+                ok, clear_kind = await self._recycle_desktop_board(socket, lesson_id, sequence)
+            if not ok:
                 return
             socket.last_viewport_cleared_sequence = sequence
             logger.info(
-                "visible board full -> cleared lesson=%s sequence=%s coverage=%.2f",
+                "visible board full -> recycled lesson=%s sequence=%s coverage=%.2f mode=%s kind=%s",
                 lesson_id,
                 sequence,
                 coverage,
+                layout_mode or "unknown",
+                clear_kind,
             )
-            await self._nudge_after_clear(
-                socket,
-                "System instruction: The student's visible board was full and "
-                "has been wiped. The board is empty now; continue teaching "
-                "from the cleared board with one short line per board_write_on_board call.",
-            )
+            if narrow:
+                message = (
+                    "System instruction: The student's visible board was full and "
+                    "has been wiped. The board is empty now; continue teaching "
+                    "from the cleared board with one short line per board_write_on_board call. "
+                    "On mobile, keep writing on the same board; it will be cleared again when full. "
+                    "Write actual teaching content, not meta labels like 'Definition' or 'Intuition'."
+                )
+            elif clear_kind == "left":
+                message = (
+                    "System instruction: The right side of the board is full. The left side was cleared; "
+                    "continue teaching on the left side. Write one short line per board_write_on_board call "
+                    "with actual teaching content, not meta labels like 'Definition' or 'Intuition'."
+                )
+            elif clear_kind == "right":
+                message = (
+                    "System instruction: The left side of the board is full. The right side was cleared; "
+                    "continue teaching on the right side. Write one short line per board_write_on_board call "
+                    "with actual teaching content, not meta labels like 'Definition' or 'Intuition'."
+                )
+            else:
+                message = (
+                    "System instruction: The student's visible board was full and "
+                    "has been wiped. The board is empty now; continue teaching "
+                    "from the cleared board with one short line per board_write_on_board call. "
+                    "Write actual teaching content, not meta labels like 'Definition' or 'Intuition'."
+                )
+            await self._nudge_after_clear(socket, message)
 
     async def _handle_board_clear(
         self,
@@ -1394,9 +1486,11 @@ class LessonRealtimeHub:
                     "(1-8 words, one or two words is fine, no newlines, no paragraphs, no lists), each line matching what you are "
                     "explaining at that moment; make a separate call for every additional line. Never dump a block of text or "
                     "several lines in a single call, and never repeat a line already on the board. "
+                    "Write actual teaching content, not meta labels or narration: never write standalone labels like "
+                    "'Definition', 'Intuition', 'Example', or 'Step 1'; write the real definition/intuition/example content. "
                     "never supply x/y coordinates - describe the semantic position and the backend layout manager places it. "
                     "Use create_board_visual only when the concept genuinely needs a diagram, table or graph, and keep any labels "
-                    "to one short line. Keep teaching automatically through the lesson plan after each spoken turn - the backend "
+                    "to one short line of actual content. Keep teaching automatically through the lesson plan after each spoken turn - the backend "
                     "starts your next response for you, so never stop just because you asked a rhetorical question or a quick check. "
                     "Call wait_for_student ONLY when you need the student's actual answer before you can continue; that call unlocks their microphone automatically, then listen."
                 )
@@ -1410,7 +1504,9 @@ class LessonRealtimeHub:
                     "Do not repeat already completed content or any line already on the board; use board_intent only for new or resumed visuals. "
                     "Write each new heading, definition or equation with board_write_on_board as ONE short line per call "
                     "(1-8 words, no newlines, no paragraphs, no lists), aligned with what you say aloud; make a separate call per line. "
-                    "Use create_board_visual only for new structured visuals with one-line labels; "
+                    "Write actual teaching content, not meta labels or narration: never write standalone labels like "
+                    "'Definition', 'Intuition', 'Example', or 'Step 1'; write the real content. "
+                    "Use create_board_visual only for new structured visuals with one-line labels of actual content; "
                     "leave physical placement to the backend layout manager. Keep teaching automatically after each spoken turn; "
                     "call wait_for_student only when you truly need the student's answer, which unlocks their microphone automatically; otherwise continue explaining."
                 )
@@ -1832,19 +1928,23 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"each line say only what you are explaining at that moment so the board "
         f"grows naturally with your speech. NEVER dump a long text or several lines "
         f"in a single call, and never repeat a line already on the board. "
-        f"(3) KEEP TEACHING AUTOMATICALLY. The backend starts your next response as "
-        f"soon as yours ends, so continue with the next small teaching step instead of "
-        f"stopping or staying silent. Do not wait for the student after every question: "
-        f"rhetorical questions and quick understanding checks are part of your teaching, "
-        f"so carry on explaining them yourself. (4) Call wait_for_student ONLY when you "
-        f"have asked a direct question and genuinely need the student's answer before "
-        f"you can continue. That call unlocks the student's microphone automatically; "
-        f"stop speaking and listen for the answer. Never call it for rhetorical "
-        f"questions. (5) Use create_board_visual "
+        f"(3) Write actual teaching content, not meta labels or narration. NEVER write "
+        f"standalone labels/placeholders like 'Definition', 'Intuition', 'Example', "
+        f"'Step 1', 'Explanation', or 'Let's start'; instead write the real definition, "
+        f"intuition, example, or step content itself. Do not write what you are about "
+        f"to do; write the content. (4) KEEP TEACHING AUTOMATICALLY. The backend starts "
+        f"your next response as soon as yours ends, so continue with the next small "
+        f"teaching step instead of stopping or staying silent. Do not wait for the "
+        f"student after every question: rhetorical questions and quick understanding "
+        f"checks are part of your teaching, so carry on explaining them yourself. "
+        f"(5) Call wait_for_student ONLY when you have asked a direct question and "
+        f"genuinely need the student's answer before you can continue. That call "
+        f"unlocks the student's microphone automatically; stop speaking and listen for "
+        f"the answer. Never call it for rhetorical questions. (6) Use create_board_visual "
         f"only when a diagram, table or graph genuinely helps, and keep its text labels "
-        f"to single short lines. (6) Never modify database state directly — only through "
-        f"the exposed tools. (7) Keep explanations concise. (8) Use lesson_finish when "
-        f"the student is done or time is up."
+        f"to single short lines of actual content. (7) Never modify database state "
+        f"directly — only through the exposed tools. (8) Keep explanations concise. "
+        f"(9) Use lesson_finish when the student is done or time is up."
     )
 
 
