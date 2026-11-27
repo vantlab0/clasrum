@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -66,6 +67,38 @@ MAX_VALIDATION_RETRIES = 1
 
 FOCUS_VALUES = {"none", "new_content", "region"}
 REGION_HINTS = {"left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"}
+
+
+def _semantic_key(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _intent_key(value: Any) -> str:
+    return _semantic_key(re.sub(r"[^\w\s]", " ", str(value or "")))
+
+
+def duplicate_plan_result(document: Mapping[str, Any] | None, intent: Any) -> dict[str, Any] | None:
+    """Return an acknowledgement for an already-present logical visual."""
+    intent_key = _intent_key(intent)
+    if not intent_key or not document:
+        return None
+    for element in document.get("elements", []) or []:
+        if not isinstance(element, Mapping) or element.get("removed_at_sequence") is not None:
+            continue
+        if element.get("type") != "draw_plan":
+            continue
+        payload = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+        if _intent_key(context.get("intent")) != intent_key:
+            continue
+        return {
+            "ok": True,
+            "duplicate": True,
+            "message": "visual intent already on the board; skipped duplicate draw",
+            "sequence": element.get("created_sequence"),
+            "element_id": element.get("element_id"),
+        }
+    return None
 
 _KNINDS_LINE = "line | polyline | polygon | rectangle | ellipse | arc | quad_bezier | cubic_bezier | path | text | arrow"
 
@@ -652,10 +685,21 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     raw_elements = source.get("elements") if isinstance(source.get("elements"), list) else []
     elements: list[dict[str, Any]] = []
     used_ids: set[str] = set()
+    used_labels: set[tuple[str, str, str]] = set()
     for index, raw in enumerate(raw_elements):
         element = _repair_element(raw, index)
         if element is None:
             continue
+        if element["kind"] == "text":
+            geometry = element.get("geometry") if isinstance(element.get("geometry"), Mapping) else {}
+            position = geometry.get("position") if isinstance(geometry.get("position"), Mapping) else {}
+            pos_key = ":".join(
+                f"{round(float(position.get(axis) or 0.0), 3)}" for axis in ("x", "y")
+            )
+            label_key = (_semantic_key(geometry.get("text")), pos_key)
+            if label_key in used_labels:
+                continue
+            used_labels.add(label_key)
         element_id = element["id"]
         if element_id in used_ids:
             suffix = 2
@@ -681,7 +725,10 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     for element in elements:
         stage_num = int(_clamp(element.get("stage"), 1, 12, 1) or 1)
         element["stage"] = stage_num
-        by_stage.setdefault(stage_num, []).append(str(element.get("id", "")))
+        stage_ids = by_stage.setdefault(stage_num, [])
+        element_id = str(element.get("id", ""))
+        if element_id not in stage_ids:
+            stage_ids.append(element_id)
 
     stages: list[dict[str, Any]] = []
     for stage_num in sorted(by_stage):
@@ -711,12 +758,15 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     focus = source.get("focus")
     if isinstance(focus, dict):
         target_ids = focus.get("target_ids")
-        repaired["focus"] = {
-            **focus,
-            "target_ids": [
-                str(target) for target in target_ids if str(target) in used_ids
-            ] if isinstance(target_ids, list) else [],
-        }
+        if isinstance(target_ids, list):
+            clean_targets: list[str] = []
+            for target in target_ids:
+                target_id = str(target)
+                if target_id in used_ids and target_id not in clean_targets:
+                    clean_targets.append(target_id)
+        else:
+            clean_targets = []
+        repaired["focus"] = {**focus, "target_ids": clean_targets}
     triggers = source.get("triggers")
     if isinstance(triggers, list):
         repaired["triggers"] = [
@@ -841,7 +891,8 @@ def fit_plan_to_region(
         elif kind == "text":
             geometry["position"] = point(geometry.get("position"))
             font_scale = _num(geometry.get("font_scale"), 1.0) * scale
-            geometry["font_scale"] = round(max(0.3, min(2.5, font_scale)), 4)
+            # Protocol v1 and the Flutter parser both require [0.5, 2.5].
+            geometry["font_scale"] = round(max(0.5, min(2.5, font_scale)), 4)
     return payload
 
 
@@ -869,6 +920,9 @@ class BoardIntentHandler:
         db: AsyncSession,
         lesson_id: str,
         arguments: Mapping[str, Any],
+        *,
+        source: str = "qwen_tool",
+        animate: bool = True,
     ) -> dict[str, Any]:
         intent = _clean_text(arguments.get("intent"), 1000)
         if not intent:
@@ -887,6 +941,9 @@ class BoardIntentHandler:
             # Missing/empty board state is valid (new lesson) – start from empty.
             document = {"elements": [], "last_sequence": 0}
         board_summary = summarize_board(document)
+        duplicate = duplicate_plan_result(document, intent)
+        if duplicate is not None:
+            return duplicate
         lesson_state = await fetch_lesson_context(db, lesson_id)
         transcript = await fetch_recent_transcript(db, lesson_id)
 
@@ -927,6 +984,9 @@ class BoardIntentHandler:
                 document = await self._board.reconstruct_document(db, lesson_id)
             except Exception:
                 document = {"elements": [], "last_sequence": 0}
+            duplicate = duplicate_plan_result(document, intent)
+            if duplicate is not None:
+                return duplicate
             manager = layout.BlackboardLayoutManager(document)
             preferred_region = str(region_hint) if region_hint else None
             try:
@@ -937,6 +997,9 @@ class BoardIntentHandler:
                 raise IntentHandlingError(str(exc), code=exc.code, retryable=True) from None
             region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
             plan_payload = fit_plan_to_region(plan_payload, region)
+            # Fitting mutates geometry and font_scale; validate the exact bytes
+            # that will be persisted, not the pre-fit plan.
+            plan_payload = validate_drawing_plan(plan_payload, repair=False)
 
             payload = {
                 **plan_payload,
@@ -954,8 +1017,8 @@ class BoardIntentHandler:
                 lesson_id,
                 "draw_plan",
                 payload,
-                source="qwen_tool",
-                animate=True,
+                source=source,
+                animate=animate,
             )
 
         id_map = {element["id"]: record.element_id for element in plan_payload.get("elements", [])

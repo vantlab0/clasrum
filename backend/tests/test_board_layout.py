@@ -59,6 +59,75 @@ def test_heading_then_subheading_uses_real_levels_and_vertical_flow():
     assert not _overlaps(_box(h1), _box(h3))
 
 
+def test_two_consecutive_h1_keep_full_size_and_vertical_spacing():
+    manager = BlackboardLayoutManager({"elements": []})
+    first = _write(manager, "h1", "Cell Structure")
+    second = _write(manager, "h1", "Energy Flow")
+    assert second["position"]["y"] > first["position"]["y"] + manager.config.element_gap
+    assert not _overlaps(_box(first), _box(second))
+    for item, text in ((first, "Cell Structure"), (second, "Energy Flow")):
+        expected = estimate_text_size(text, style="heading", heading_level=1)
+        assert item["size"]["w"] == pytest.approx(expected[0])
+        assert item["size"]["h"] == pytest.approx(expected[1])
+
+
+def test_heading_subtitle_and_body_keep_distinct_font_heights():
+    manager = BlackboardLayoutManager({"elements": []})
+    heading = _write(manager, "h2", "Photosynthesis")
+    subtitle = _write(manager, "h4", "Light reactions")
+    body = _write(manager, "body", "Chlorophyll absorbs light energy.")
+    heights = [item["size"]["h"] for item in (heading, subtitle, body)]
+    assert heights[0] > heights[1] > heights[2]
+    boxes = [_box(item) for item in (heading, subtitle, body)]
+    for index in range(1, len(boxes)):
+        assert boxes[index]["y"] > boxes[index - 1]["y"]
+        assert not _overlaps(boxes[index], boxes[index - 1])
+
+
+def test_font_scale_changes_reservation_and_never_shrinks_text():
+    manager = BlackboardLayoutManager({"elements": []})
+    normal = _write(manager, "body", "A carefully measured sentence.")
+    enlarged = _write(manager, "body", "A carefully measured sentence.", font_scale=2.0)
+    assert enlarged["size"]["h"] > normal["size"]["h"] * 1.8
+    assert enlarged["size"]["w"] >= normal["size"]["w"]
+    expected = estimate_text_size("A carefully measured sentence.", style="body", font_scale=2.0)
+    assert enlarged["size"]["w"] == pytest.approx(expected[0])
+    assert enlarged["size"]["h"] == pytest.approx(expected[1])
+    assert not _overlaps(_box(normal), _box(enlarged))
+
+
+def test_sizeless_heading_obstacle_uses_real_heading_footprint():
+    heading_w, heading_h = estimate_text_size(
+        "Cell Structure", style="heading", heading_level=2
+    )
+    doc = {"elements": [{
+        "element_id": "h2_1",
+        "type": "write_text",
+        "created_sequence": 1,
+        "position": {"x": 0.08, "y": 0.08},
+        "payload": {"text": "Cell Structure", "style": "heading", "heading_level": 2},
+    }]}
+    manager = BlackboardLayoutManager(doc)
+    obstacle = Rect(0.08, 0.08, heading_w, heading_h)
+    placed = _write(manager, "body", "The nucleus controls the cell.")
+    assert not Rect(**_box(placed)).intersects(obstacle)
+
+
+def test_flow_cursor_continues_across_manager_rebuilds():
+    first_manager = BlackboardLayoutManager({"elements": []})
+    first = _write(first_manager, "h2", "Overview")
+    doc = {"elements": [{
+        "element_id": "h2_1",
+        "type": "write_text",
+        "created_sequence": 1,
+        **first,
+        "payload": first,
+    }]}
+    second_manager = BlackboardLayoutManager(doc)
+    second = _write(second_manager, "body", "This lesson covers three ideas.")
+    assert second["position"]["y"] > first["position"]["y"]
+
+
 def test_multiple_body_texts_never_overlap():
     manager = BlackboardLayoutManager({"elements": []})
     placed = [_write(manager, "body", f"Definition number {i}: a short teaching sentence.") for i in range(8)]

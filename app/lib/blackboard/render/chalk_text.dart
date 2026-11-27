@@ -193,6 +193,8 @@ class ChalkTextLayout {
     required this.fontSizePx,
     required this.maxWidthPx,
     required this.grain,
+    required this.lines,
+    required this.revealSpan,
   });
 
   final String text;
@@ -203,8 +205,79 @@ class ChalkTextLayout {
   final double maxWidthPx;
   final List<ChalkSpeck> grain;
 
+  /// Painter line boxes, used to reveal wrapped text in reading order.
+  final List<ui.LineMetrics> lines;
+
+  /// Total horizontal distance of all lines (a short minimum per line so
+  /// empty lines still consume a slice of the reveal clock).
+  final double revealSpan;
+
   double get width => painter.width;
   double get height => painter.height;
+
+  /// Clip region for [progress].
+  ///
+  /// A wrapped run is revealed line by line instead of sweeping one block-wide
+  /// vertical band across every line at once. The returned path is a union of
+  /// non-overlapping line rectangles; painting the glyph run once through this
+  /// clip cannot duplicate a glyph.
+  ui.Path revealClip(double progress) {
+    final p = progress.clamp(0.0, 1.0);
+    final clip = ui.Path();
+    final padX = fontSizePx * 0.3;
+    final padY = fontSizePx * 0.28;
+
+    if (p >= 1) {
+      clip.addRect(Rect.fromLTWH(
+        -padX,
+        -fontSizePx * 0.45,
+        width + padX * 2,
+        height + fontSizePx * 0.9,
+      ));
+      return clip;
+    }
+    if (p <= 0) return clip;
+
+    var remaining = revealSpan * p;
+    for (final line in lines) {
+      if (remaining <= 0) break;
+      final lineWidth = math.max(line.width, fontSizePx * 0.6);
+      final shown = (remaining / lineWidth).clamp(0.0, 1.0);
+      clip.addRect(Rect.fromLTWH(
+        line.left - padX,
+        line.baseline - line.ascent - padY,
+        lineWidth * shown + padX * 2,
+        line.height + padY * 2,
+      ));
+      remaining -= lineWidth;
+    }
+    return clip;
+  }
+
+  /// Pixel position of the active chalk-dust edge for [progress].
+  ui.Offset revealEdge(double progress) {
+    final p = progress.clamp(0.0, 1.0);
+    if (lines.isEmpty) {
+      return ui.Offset(width * p, height * 0.5);
+    }
+    var remaining = revealSpan * p;
+    var last = lines.last;
+    for (final line in lines) {
+      last = line;
+      final lineWidth = math.max(line.width, fontSizePx * 0.6);
+      if (remaining <= lineWidth) {
+        return ui.Offset(
+          line.left + lineWidth * (remaining / lineWidth).clamp(0.0, 1.0),
+          line.baseline - line.ascent + line.height * 0.5,
+        );
+      }
+      remaining -= lineWidth;
+    }
+    return ui.Offset(
+      last.left + math.max(last.width, fontSizePx * 0.6),
+      last.baseline - last.ascent + last.height * 0.5,
+    );
+  }
 
   void dispose() => painter.dispose();
 }
@@ -258,6 +331,13 @@ class ChalkTextEngine {
       textAlign: textAlign,
       maxLines: null,
     )..layout(maxWidth: safeWidth);
+    final lines = painter.computeLineMetrics().toList(growable: false);
+    final revealSpan = lines.isEmpty
+        ? painter.width
+        : lines.fold<double>(
+            0,
+            (sum, line) => sum + math.max(line.width, safeSize * 0.6),
+          );
     final layout = ChalkTextLayout(
       text: text,
       painter: painter,
@@ -267,6 +347,8 @@ class ChalkTextEngine {
       maxWidthPx: safeWidth,
       grain:
           _generateGrain(text, spec, painter.width, painter.height, safeSize),
+      lines: lines,
+      revealSpan: revealSpan,
     );
     _cache[key] = layout;
     _lru.add(key);
@@ -343,41 +425,17 @@ class ChalkTextEngine {
   }) {
     final clamped = progress.clamp(0.0, 1.0);
     if (clamped <= 0.002 || opacity <= 0.002) return;
-    final scale = (layout.fontSizePx / 32).clamp(0.5, 3.0);
     canvas.save();
     canvas.translate(origin.dx, origin.dy);
-    final revealWidth = layout.width * clamped + layout.fontSizePx * 0.35 + 1;
-    final clipHeight = layout.height + layout.fontSizePx;
-    canvas.clipRect(
-      Rect.fromLTWH(
-        -layout.fontSizePx * 0.25,
-        -layout.fontSizePx * 0.45,
-        revealWidth,
-        clipHeight,
-      ),
-    );
+    // One clip region per painted line: wrapped text grows in reading order
+    // instead of every line being sliced at the same x at the same instant.
+    canvas.clipPath(layout.revealClip(clamped));
 
     final alpha = opacity * layout.spec.opacity;
-    if (clamped < 1) {
-      // Soft chalk halo only for the actively-drawn run (expensive layer blur).
-      final haloPaint = Paint()
-        ..color = Color.fromRGBO(0, 0, 0, 0.32 * alpha)
-        ..imageFilter = ui.ImageFilter.blur(
-          sigmaX: 1.15 * scale,
-          sigmaY: 1.15 * scale,
-          tileMode: TileMode.decal,
-        );
-      final bounds = Rect.fromLTWH(
-        -layout.fontSizePx * 0.3,
-        -layout.fontSizePx * 0.3,
-        layout.width + layout.fontSizePx,
-        layout.height + layout.fontSizePx,
-      );
-      canvas.saveLayer(bounds, haloPaint);
-      layout.painter.paint(canvas, Offset.zero);
-      canvas.restore();
-    }
-
+    // Paint the glyph run exactly once.  The old "halo" pass painted the same
+    // glyphs again beneath the base run, which reads as a dark ghost on the
+    // black board.  Chalk texture comes from the deterministic grain/dust band
+    // below, not from duplicating the silhouette.
     canvas.saveLayer(
       Rect.fromLTWH(0, 0, layout.width + 2, layout.height + 2),
       Paint()..color = Color.fromRGBO(0, 0, 0, alpha),
@@ -399,12 +457,11 @@ class ChalkTextEngine {
     double progress,
     double alpha,
   ) {
-    final revealX = layout.width * progress;
+    // The reveal clip already hides specks outside the written lines, so grain
+    // can be drawn in one pass without a second x-threshold per line.
+    final edge = layout.revealEdge(progress);
     final paint = Paint()..style = PaintingStyle.fill;
     for (final speck in layout.grain) {
-      if (progress < 1 && speck.dx > revealX + layout.fontSizePx * 0.3) {
-        continue;
-      }
       paint.color = layout.color.withValues(
         alpha: (speck.alpha * alpha).clamp(0.0, 1.0),
       );
@@ -421,10 +478,9 @@ class ChalkTextEngine {
         ..strokeCap = StrokeCap.round
         ..color = layout.color.withValues(alpha: 0.16 * alpha);
       for (var i = 0; i < 5; i++) {
-        final y = layout.fontSizePx * 0.25 +
-            (layout.height - layout.fontSizePx * 0.4) * (i / 4);
+        final y = edge.dy + (i - 2) * layout.fontSizePx * 0.13;
         final length = layout.fontSizePx * (0.22 + (i % 3) * 0.12);
-        final startX = revealX - length * 0.5;
+        final startX = edge.dx - length * 0.5;
         canvas.drawLine(
           Offset(startX, y),
           Offset(startX + length, y + layout.fontSizePx * 0.02),
@@ -503,7 +559,9 @@ class ChalkTextEngine {
     double fontSizePx,
   ) {
     if (width <= 0 || height <= 0) return const <ChalkSpeck>[];
-    final random = math.Random(_stableHash('${text.length}|${spec.cacheKey}'));
+    // Seed from the full content: same-length lines must not share a speckle
+    // pattern and look like duplicated chalk.
+    final random = math.Random(_stableHash('$text|${spec.cacheKey}'));
     final count = (text.length * 1.6 + 8).clamp(10, 120).round();
     final specks = <ChalkSpeck>[];
     for (var i = 0; i < count; i++) {

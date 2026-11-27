@@ -132,8 +132,59 @@ DEFAULT_SIZES: dict[str, tuple[float, float]] = {
     "annotation": (0.18, 0.06),
 }
 
-HEADING_SCALE: dict[int, float] = {1: 2.0, 2: 1.65, 3: 1.4, 4: 1.2, 5: 1.05, 6: 0.95}
-BODY_FONT_NORM_H = 0.032  # matches Flutter BoardTextMetrics
+
+@dataclass(frozen=True)
+class TextStyleMetrics:
+    """Backend mirror of Flutter's ``ChalkTextStyleSpec``.
+
+    Keep these numbers synchronized with
+    ``app/lib/blackboard/render/chalk_text.dart``.  A parity test parses that
+    file so a drift fails the backend suite instead of silently under-reserving
+    board space.
+    """
+
+    fraction: float
+    letter_spacing_em: float = 0.01
+    line_height: float = 1.28
+    glyph_width_factor: float = 0.54
+
+
+TEXT_STYLE_SPECS: dict[str, TextStyleMetrics] = {
+    "h1": TextStyleMetrics(0.076, 0.022),
+    "h2": TextStyleMetrics(0.062, 0.020),
+    "h3": TextStyleMetrics(0.054, 0.018),
+    "h4": TextStyleMetrics(0.047, 0.015),
+    "h5": TextStyleMetrics(0.041, 0.012),
+    "h6": TextStyleMetrics(0.036, 0.010),
+    "heading": TextStyleMetrics(0.076, 0.022),
+    "subheading": TextStyleMetrics(0.062, 0.020),
+    "body": TextStyleMetrics(0.032, 0.010),
+    "small": TextStyleMetrics(0.026, 0.010),
+    "equation": TextStyleMetrics(0.038, 0.005),
+    "definition": TextStyleMetrics(0.032, 0.010),
+    "definitionTerm": TextStyleMetrics(0.038, 0.015),
+    "bullet": TextStyleMetrics(0.031, 0.010),
+    "numbered": TextStyleMetrics(0.031, 0.010),
+    "label": TextStyleMetrics(0.024, 0.010),
+    "caption": TextStyleMetrics(0.021, 0.010),
+    "note": TextStyleMetrics(0.027, 0.010),
+    "code": TextStyleMetrics(0.026, 0.0, line_height=1.35, glyph_width_factor=0.62),
+}
+
+# Backwards-compatible aliases for older callers/tests.  The authoritative
+# values now live in TEXT_STYLE_SPECS.
+BODY_FONT_NORM_H = TEXT_STYLE_SPECS["body"].fraction
+HEADING_SCALE = {
+    level: TEXT_STYLE_SPECS[f"h{level}"].fraction / BODY_FONT_NORM_H
+    for level in range(1, 7)
+}
+
+TEXT_LIKE_EVENT_TYPES = frozenset(
+    {
+        "write_text", "write_heading", "write_definition", "write_bullet_list",
+        "update_text", "add_text", "text",
+    }
+)
 
 
 class LayoutNoSpaceError(RuntimeError):
@@ -299,6 +350,18 @@ def rect_from_element(element: Mapping[str, Any], config: LayoutConfig = DEFAULT
             if isinstance(size, Mapping):
                 w = _as_float(size.get("w")) or w
                 h = _as_float(size.get("h")) or h
+            elif _is_text_element(element):
+                # Direct realtime writes persist every semantic level as
+                # `write_text`; infer the real footprint from the payload so a
+                # size-less heading cannot be treated as a tiny body line.
+                w, h = estimate_text_size(
+                    _text_from_element(element),
+                    style=str(payload.get("style") or element.get("style") or "body"),
+                    heading_level=payload.get("heading_level") or element.get("heading_level"),
+                    font_scale=_as_float(payload.get("font_scale")) or 1.0,
+                    max_width=payload.get("max_width"),
+                    config=config,
+                )
             else:
                 etype = str(element.get("type") or "")
                 if "equation" in etype:
@@ -335,6 +398,37 @@ def rect_from_element(element: Mapping[str, Any], config: LayoutConfig = DEFAULT
     return rect.clamp_to_board(config) if rect is not None else None
 
 
+def _derived_flow_cursors(
+    document: Mapping[str, Any] | None, config: LayoutConfig = DEFAULT_CONFIG
+) -> dict[str, tuple[float, float]]:
+    """Derive a durable "write the next line here" cursor from the document.
+
+    A manager is rebuilt for every tool call, so an in-memory cursor alone
+    resets to the top of the board.  Deriving it from the most recently created
+    live text element keeps consecutive `board_write_on_board` calls in the
+    natural reading flow instead of first-fitting into earlier holes.
+    """
+    cursors: dict[str, tuple[int, float, float]] = {}
+    for element in (document or {}).get("elements", []) or []:
+        if not isinstance(element, Mapping) or not _is_text_element(element):
+            continue
+        if element.get("removed_at_sequence") is not None:
+            continue
+        rect = rect_from_element(element, config)
+        if rect is None:
+            continue
+        key = "left_column" if rect.cx < 0.5 else "main_column"
+        sequence = int(element.get("created_sequence") or element.get("updated_sequence") or 0)
+        y = min(config.safe.y2, rect.y2 + config.element_gap)
+        previous = cursors.get(key)
+        if previous is None or sequence >= previous[0]:
+            cursors[key] = (sequence, rect.x, y)
+    return {
+        key: (x, y)
+        for key, (_sequence, x, y) in cursors.items()
+    }
+
+
 def build_layout_state(document: Mapping[str, Any] | None, config: LayoutConfig = DEFAULT_CONFIG) -> LayoutState:
     state = LayoutState(config=config)
     if not document:
@@ -354,6 +448,7 @@ def build_layout_state(document: Mapping[str, Any] | None, config: LayoutConfig 
             parent_id=str(parent_id) if parent_id else None,
             kind=str(element.get("type") or "element"),
         )
+    state.region_cursors.update(_derived_flow_cursors(document, config))
     return state
 
 
@@ -411,6 +506,69 @@ def choose_region(
 # ---------------------------------------------------------------------------
 
 
+def _text_metrics(style: str | None, heading_level: int | None = None) -> TextStyleMetrics:
+    """Resolve a style name to the exact Flutter chalk typography metrics."""
+    normalized = str(style or "body").strip().lower()
+    level = int(heading_level or 0)
+    if normalized in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        level = int(normalized[1:])
+    if normalized in {"heading", "subheading"} or level > 0:
+        level = min(6, max(1, level or 1))
+        return TEXT_STYLE_SPECS[f"h{level}"]
+    return TEXT_STYLE_SPECS.get(normalized, TEXT_STYLE_SPECS["body"])
+
+
+def _is_text_placement(kind: str, payload: Mapping[str, Any]) -> bool:
+    style = str(payload.get("style") or "").lower()
+    return (
+        str(kind).lower() in TEXT_LIKE_EVENT_TYPES
+        or str(kind).lower() in {"text", "equation"}
+        or style in TEXT_STYLE_SPECS
+        or style in {"h1", "h2", "h3", "h4", "h5", "h6"}
+    )
+
+
+def _is_text_element(element: Mapping[str, Any]) -> bool:
+    payload = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+    return _is_text_placement(str(element.get("type") or ""), payload)
+
+
+def _text_from_element(element: Mapping[str, Any]) -> str:
+    payload = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+    value = payload.get("text")
+    if value is None:
+        value = payload.get("items")
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item) for item in value)
+    return str(value or "")
+
+
+def _wrapped_line_count(text: str, advance: float, usable_w: float) -> int:
+    """Conservative line count for Flutter's ``TextPainter`` word wrapping.
+
+    ``ceil(total_advance / usable_w)`` is only a lower bound: trailing space at
+    every word boundary can add another line. Simulate greedy wrapping and keep
+    the larger result so a reservation is never shorter than the painted run.
+    """
+    char_lines = max(1, math.ceil(len(text) * advance / max(usable_w, EPS)))
+    lines = 1
+    used = 0.0
+    for word in text.split():
+        word_w = len(word) * advance
+        separator = advance if used > 0 else 0.0
+        if used + separator + word_w <= usable_w + EPS:
+            used += separator + word_w
+            continue
+        lines += 1
+        used = word_w
+        if word_w > usable_w:
+            # Flutter soft-wraps a single word that cannot fit on one line.
+            extra = math.ceil((word_w - usable_w) / max(usable_w, EPS))
+            lines += extra
+            used -= extra * usable_w
+    return max(char_lines, lines)
+
+
 def estimate_text_size(
     text: str,
     *,
@@ -420,34 +578,38 @@ def estimate_text_size(
     max_width: float | None = None,
     config: LayoutConfig | None = None,
 ) -> tuple[float, float]:
-    """Estimate normalized ``(w, h)`` for a chalk text element."""
+    """Estimate normalized ``(w, h)`` reserved for a chalk text element.
+
+    The implementation mirrors Flutter's ``ChalkTextStyleSpec`` and
+    ``TextPainter`` wrapping closely enough that the reservation is never
+    smaller than the visible chalk.  It intentionally rounds generously:
+    positive letter spacing and word-wrap boundaries are over-estimated rather
+    than under-estimated.
+    """
     safe_text = " ".join(str(text or "").split())
     if not safe_text:
         return (0.12, 0.04)
-    style_key = (style or "body").strip().lower()
-    level = int(heading_level or 0)
-    if level <= 0 and style_key in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-        level = int(style_key[1:])
-    scale = HEADING_SCALE.get(level, 1.0) if level > 0 else 1.0
-    if style_key in {"small", "caption", "note"}:
-        scale *= 0.85
-    if style_key == "label":
-        scale *= 0.8
-    if style_key == "code":
-        scale *= 0.95
-    font_h = BODY_FONT_NORM_H * scale * max(0.5, min(2.5, float(font_scale or 1.0)))
-    glyph_w = font_h * 0.52
-    usable_w = max(0.12, min(
-        config.max_content_width if config else DEFAULT_CONFIG.max_content_width,
-        float(max_width or (config.max_content_width if config else DEFAULT_CONFIG.max_content_width)),
-    ))
-    if style_key == "label":
-        usable_w = min(usable_w, 0.36)
-    natural_w = max(glyph_w * 2, len(safe_text) * glyph_w)
-    width = min(natural_w, usable_w)
-    lines = min(12, max(1, int(math.ceil(natural_w / max(usable_w, EPS)))))
-    height = lines * font_h * 1.35 + font_h * 0.35
-    return (_r(max(0.08, min(0.92, width))), _r(max(0.035, min(0.60, height))))
+    metrics = _text_metrics(style, heading_level)
+    scale = max(0.5, min(2.5, float(font_scale or 1.0)))
+    font_h = metrics.fraction * scale
+    # Flutter applies letterSpacing after every glyph, including the last one.
+    advance = font_h * (metrics.glyph_width_factor + metrics.letter_spacing_em)
+    usable_w = max(
+        0.12,
+        min(
+            config.max_content_width if config else DEFAULT_CONFIG.max_content_width,
+            float(max_width or 0)
+            or (config.max_content_width if config else DEFAULT_CONFIG.max_content_width),
+        ),
+    )
+    natural_w = max(advance * 2, len(safe_text) * advance)
+    # No 12-line cap: generated/lesson text must never under-reserve height.
+    lines = _wrapped_line_count(safe_text, advance, usable_w)
+    height = lines * font_h * metrics.line_height + font_h * 0.35
+    # Flutter's TextPainter wraps at maxWidth, so the painted box can never be
+    # wider than the usable width (allow one glyph of letter-spacing slack).
+    reserved_w = min(natural_w, usable_w + advance)
+    return (_r(max(0.08, min(0.92, reserved_w))), _r(max(0.035, min(0.60, height))))
 
 
 def estimate_equation_size(latex: str, *, font_scale: float = 1.0) -> tuple[float, float]:
@@ -549,8 +711,9 @@ class BlackboardLayoutManager:
     def refresh(self, document: Mapping[str, Any] | None) -> None:
         with self._lock:
             self.document = document or {"elements": []}
+            # build_layout_state derives durable flow cursors from persisted
+            # elements; do not clear them here.
             self.state = build_layout_state(self.document, self.config)
-            self.state.region_cursors.clear()
 
     # -- public placement API ------------------------------------------------
 
@@ -610,7 +773,11 @@ class BlackboardLayoutManager:
             for name in FALLBACK_ORDER:
                 candidates.append((name, region_rect(name, self.config)))
 
-            for scale in (1.0, 0.9, 0.8, 0.7):
+            # Text reserves must stay font-accurate: shrinking only the box
+            # while leaving font_scale/text untouched makes the renderer overflow
+            # the reservation.  Text either fits at full size or fails cleanly.
+            scales = (1.0,) if _is_text_placement(kind, data) else (1.0, 0.9, 0.8, 0.7)
+            for scale in scales:
                 target = size.scaled(scale, self.config)
                 if target.w < self.config.min_width - EPS or target.h < self.config.min_height - EPS:
                     continue
@@ -631,7 +798,6 @@ class BlackboardLayoutManager:
         data = dict(payload)
         style = str(data.get("style") or "body").lower()
         kind = "equation" if style == "equation" else "text"
-        level = int(data.get("heading_level") or 0)
         result = self.place_element(
             kind,
             payload=data,
@@ -640,13 +806,14 @@ class BlackboardLayoutManager:
             region=default_region,
             related_to=data.get("related_concept"),
             element_id=data.get("element_id"),
-            section_break=level in {1, 2},
         )
         if not result.ok or result.rect is None:
             raise LayoutNoSpaceError(kind=kind)
         data["position"] = {"x": result.rect.x, "y": result.rect.y}
         data["size"] = {"w": result.rect.w, "h": result.rect.h}
         data["region"] = result.region
+        if not _as_float(data.get("max_width")):
+            data["max_width"] = result.rect.w
         return data
 
     def place_payload(
@@ -671,6 +838,8 @@ class BlackboardLayoutManager:
         data["position"] = {"x": result.rect.x, "y": result.rect.y}
         data["size"] = {"w": result.rect.w, "h": result.rect.h}
         data["region"] = result.region
+        if _is_text_placement(kind, data) and not _as_float(data.get("max_width")):
+            data["max_width"] = result.rect.w
         return data
 
     def place_group(
@@ -693,6 +862,10 @@ class BlackboardLayoutManager:
         if not entries:
             return PlacementResult(False, kind, None, None, "empty_group")
         bounds = self._group_bounds(entries)
+        # Only internal members share a group id.  The group's top-level
+        # footprint is an ordinary obstacle, so two unrelated visuals can never
+        # be exempted from collision checks by a shared literal id.
+        internal_group_id = group_id or f"group:{kind}:{entries[0].get('id') or 'anonymous'}"
         result = self.place_element(
             kind,
             width=bounds.w, height=bounds.h,
@@ -700,8 +873,7 @@ class BlackboardLayoutManager:
             position_hint=preferred_region,
             side_preference=side_preference,
             related_to=related_to,
-            group_id=group_id or "group",
-            element_id=group_id,
+            element_id=group_id or str(entries[0].get("id") or "") or None,
         )
         if not result.ok or result.rect is None:
             return result
@@ -715,7 +887,7 @@ class BlackboardLayoutManager:
             ).clamp_to_board(self.config)
             self.state.add(
                 rect, element_id=str(item.get("id") or "") or None,
-                group_id=group_id or "group", parent_id=group_id, kind=str(item.get("kind") or kind),
+                group_id=internal_group_id, parent_id=internal_group_id, kind=str(item.get("kind") or kind),
             )
             item["position"] = {"x": rect.x, "y": rect.y}
             item["size"] = {"w": rect.w, "h": rect.h}
@@ -734,7 +906,7 @@ class BlackboardLayoutManager:
             result = self.place_element(
                 "visual", width=width, height=height,
                 region=preferred, position_hint=preferred,
-                group_id="visual", element_id="visual",
+                element_id=None,
             )
         if result.ok and result.rect is not None:
             return result.region or DEFAULT_REGION, result.rect
@@ -820,15 +992,19 @@ class BlackboardLayoutManager:
         key = "left_column" if prefer_left else "main_column"
         cursor = self.state.region_cursors.get(key)
         safe = self.config.safe
-        if cursor is None or section_break:
-            x = safe.x
-            y = safe.y if cursor is None else max(safe.y, cursor[1] + self.config.section_gap)
-            if y + size.h > safe.y2:
-                y = safe.y
+        if cursor is None:
+            x, y = safe.x, safe.y
         else:
             x, y = cursor
-        x = min(x, max(safe.x, safe.x2 - self.config.column_width))
-        return key, Rect(x, y, min(self.config.column_width, safe.x2 - x), max(0.0, safe.y2 - y))
+            if section_break:
+                y += self.config.section_gap
+        if y + size.h > safe.y2:
+            # Start a fresh column/band; _scan_area still rejects collisions.
+            y = safe.y
+            x = safe.x if x <= safe.x + EPS else safe.x + self.config.column_width + self.config.element_gap
+        x = max(safe.x, min(x, safe.x2 - max(size.w, self.config.min_width)))
+        width = max(0.0, min(self.config.column_width, safe.x2 - x))
+        return key, Rect(x, y, width, max(0.0, safe.y2 - y))
 
     def _advance_flow(self, region: str, rect: Rect, *, section_break: bool) -> None:
         if region not in {"main_column", "left_column"}:
@@ -951,6 +1127,8 @@ __all__ = [
     "PlacementResult",
     "Rect",
     "REGION_RECTS",
+    "TEXT_STYLE_SPECS",
+    "TextStyleMetrics",
     "board_layout_lock",
     "build_layout_state",
     "choose_region",

@@ -192,6 +192,10 @@ class LessonSocket:
     lesson_finished: bool = False
     auto_continue_count: int = 0
     last_auto_continue_at: float = 0.0
+    # Replayed function_call_arguments.done events must never execute a tool
+    # twice. Cache the first result per (response_id, call_id) and resend it.
+    tool_call_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_call_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
 
 class LessonRealtimeHub:
@@ -873,6 +877,45 @@ class LessonRealtimeHub:
         event: dict[str, Any],
         response_id: str | None = None,
     ) -> None:
+        """Execute a tool call at most once, even if Qwen replays the event."""
+        call_id = str(event.get("call_id") or "")
+        if not call_id:
+            return
+        key = f"{response_id or event.get('response_id') or '-'}:{call_id}"
+        lock = socket.tool_call_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = socket.tool_call_results.get(key)
+            if cached is not None:
+                logger.info(
+                    "qwen function_call replay ignored lesson=%s call_id=%s response_id=%s",
+                    lesson_id, call_id, response_id,
+                )
+                try:
+                    if socket.qwen is not None:
+                        await socket.qwen.function_call_output(
+                            call_id,
+                            json.dumps(cached),
+                            continue_response=str(event.get("name") or "") != "wait_for_student",
+                        )
+                except Exception:  # pragma: no cover - replay ack must not kill the socket
+                    logger.warning("replayed function_call_output failed lesson=%s", lesson_id, exc_info=True)
+                return
+            result = await self._execute_qwen_tool_call(socket, lesson_id, event, response_id=response_id)
+            if result is not None:
+                socket.tool_call_results[key] = result
+                if len(socket.tool_call_results) > 256:
+                    stale = list(socket.tool_call_results)[:-256]
+                    for old_key in stale:
+                        socket.tool_call_results.pop(old_key, None)
+                        socket.tool_call_locks.pop(old_key, None)
+
+    async def _execute_qwen_tool_call(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        event: dict[str, Any],
+        response_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Execute a Qwen tool call via the registry and return the result."""
         import time as _time
 
@@ -894,17 +937,18 @@ class LessonRealtimeHub:
             # questions and routine checks must not pause automatic teaching.
             socket.waiting_for_student = True
             socket.auto_continue_count = 0
+            result = {"ok": True, "waiting_for_student": True}
             logger.info("wait_for_student accepted lesson=%s response_id=%s", lesson_id, response_id)
             if socket.qwen is not None:
                 try:
                     await socket.qwen.function_call_output(
                         call_id,
-                        json.dumps({"ok": True, "waiting_for_student": True}),
+                        json.dumps(result),
                         continue_response=False,
                     )
                 except Exception:  # pragma: no cover
                     logger.warning("wait_for_student output failed lesson=%s", lesson_id, exc_info=True)
-            return
+            return result
 
         if name == "lesson_finish":
             socket.lesson_finished = True
@@ -999,6 +1043,7 @@ class LessonRealtimeHub:
                 await socket.qwen.function_call_output(call_id, json.dumps(result))
         except Exception:  # pragma: no cover
             logger.warning("qwen function_call_output failed lesson=%s", lesson_id, exc_info=True)
+        return result
 
     # -- helpers ----------------------------------------------------------
 

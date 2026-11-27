@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
@@ -68,6 +69,73 @@ class LessonStatePublisher(Protocol):
         self, lesson_id: str, event_type: str, payload: dict[str, Any]
     ) -> None:
         ...
+
+
+def _semantic_key(value: Any) -> str:
+    """Stable comparison key that ignores case, spacing and volatile metadata."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _intent_key(value: Any) -> str:
+    """Visual-intent key: also ignores punctuation and filler whitespace."""
+    return _semantic_key(re.sub(r"[^\w\s]", " ", str(value or "")))
+
+
+def _duplicate_plan_result(document: Mapping[str, Any], intent: Any) -> dict[str, Any] | None:
+    """Acknowledge an already-drawn logical visual instead of drawing it again."""
+    intent_key = _intent_key(intent)
+    if not intent_key:
+        return None
+    for element in document.get("elements", []) or []:
+        if not isinstance(element, Mapping) or element.get("removed_at_sequence") is not None:
+            continue
+        if element.get("type") != "draw_plan":
+            continue
+        payload = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), Mapping) else {}
+        if _intent_key(context.get("intent")) != intent_key:
+            continue
+        return {
+            "ok": True,
+            "duplicate": True,
+            "message": "visual intent already on the board; skipped duplicate draw",
+            "sequence": element.get("created_sequence"),
+            "element_id": element.get("element_id"),
+        }
+    return None
+
+
+def _duplicate_text_result(document: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return an acknowledgement for an already-present logical text line."""
+    text_key = _semantic_key(payload.get("text"))
+    if not text_key:
+        return None
+    style_key = _semantic_key(payload.get("style") or "body")
+    heading_key = str(payload.get("heading_level") or 0)
+    color_key = _semantic_key(payload.get("color"))
+    for element in document.get("elements", []) or []:
+        if not isinstance(element, Mapping) or element.get("removed_at_sequence") is not None:
+            continue
+        if element.get("type") not in {"write_text", "write_heading", "write_definition", "write_bullet_list"}:
+            continue
+        existing = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+        if _semantic_key(existing.get("text")) != text_key:
+            continue
+        if _semantic_key(existing.get("style") or element.get("style") or "body") != style_key:
+            continue
+        if str(existing.get("heading_level") or 0) != heading_key:
+            continue
+        if _semantic_key(existing.get("color") or element.get("color")) != color_key:
+            continue
+        return {
+            "ok": True,
+            "duplicate": True,
+            "message": "text already on the board; skipped duplicate write",
+            "event_id": element.get("event_id"),
+            "sequence": element.get("created_sequence"),
+            "element_id": element.get("element_id"),
+        }
+    return None
 
 
 def _json_dumps(payload: Mapping[str, Any]) -> str:
@@ -340,6 +408,9 @@ class ToolRegistry:
         except Exception:
             document = {"elements": [], "last_sequence": 0}
         board_summary = summarize_board(document)
+        duplicate = _duplicate_plan_result(document, intent)
+        if duplicate is not None:
+            return duplicate
         lesson_state = await fetch_lesson_context(db, lesson_id)
         transcript = await fetch_recent_transcript(db, lesson_id)
 
@@ -394,6 +465,9 @@ class ToolRegistry:
                 document = await self._board.reconstruct_document(db, lesson_id)
             except Exception:
                 document = {"elements": [], "last_sequence": 0}
+            duplicate = _duplicate_plan_result(document, intent)
+            if duplicate is not None:
+                return duplicate
             manager = BlackboardLayoutManager(document)
             preferred_region = str(region_hint) if region_hint else None
             try:
@@ -410,6 +484,8 @@ class ToolRegistry:
                 }
             region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
             plan_payload = fit_plan_to_region(validated, region)
+            # Revalidate after fitting: geometry and font_scale changed.
+            plan_payload = validate_drawing_plan(plan_payload, repair=False)
 
             payload = {
                 **plan_payload,
@@ -517,7 +593,9 @@ class ToolRegistry:
                     trigger_system=self._trigger_system,
                 )
                 try:
-                    return await handler.handle(db, lesson_id, args.model_dump())
+                    return await handler.handle(
+                        db, lesson_id, args.model_dump(), source=source, animate=animate
+                    )
                 except IntentHandlingError as exc:
                     logger.warning("board_intent failed lesson=%s: %s", lesson_id, exc.message)
                     return exc.to_tool_result()
@@ -726,6 +804,11 @@ class ToolRegistry:
                 except Exception:
                     document = {"elements": []}
                 from app.board.layout import BlackboardLayoutManager
+
+                if spec.name == "board_write_on_board":
+                    duplicate = _duplicate_text_result(document, payload)
+                    if duplicate is not None:
+                        return duplicate
 
                 manager = BlackboardLayoutManager(document)
                 try:

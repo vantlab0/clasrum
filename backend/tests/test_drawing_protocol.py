@@ -9,7 +9,11 @@ from app.board.drawing_protocol import (
     plan_element_bounds,
     plan_total_duration_ms,
 )
-from app.board.intent_handler import fit_plan_to_region
+from app.board.intent_handler import (
+    _repair_drawing_plan,
+    fit_plan_to_region,
+    validate_drawing_plan,
+)
 
 
 def _plan(**overrides) -> dict:
@@ -275,3 +279,48 @@ def test_fit_plan_to_region_uniform_scale_and_center():
     original_aspect = (original_bounds[0][2]) / (original_bounds[0][3])
     fitted_aspect = (fitted_bounds[0][2]) / (fitted_bounds[0][3])
     assert fitted_aspect == pytest.approx(original_aspect, rel=0.05)
+
+
+def test_repair_drops_duplicate_labels_stages_and_focus_targets():
+    plan = _plan()
+    label = plan["elements"][2]
+    plan["elements"].append(
+        {
+            "id": "label_duplicate",
+            "kind": "text",
+            "geometry": dict(label["geometry"]),
+            "layer": 2,
+            "stage": 3,
+            "duration_ms": 250,
+        }
+    )
+    plan["stages"].append(
+        {"stage": 1, "description": "duplicate stage", "element_ids": ["body"]}
+    )
+    plan["focus"] = {
+        "type": "region",
+        "target_ids": ["body", "body", "missing", "body"],
+    }
+
+    repaired = _repair_drawing_plan(plan)
+    texts = [
+        element for element in repaired["elements"] if element["kind"] == "text"
+    ]
+    assert len(texts) == 1
+    stage_numbers = [stage["stage"] for stage in repaired["stages"]]
+    assert len(stage_numbers) == len(set(stage_numbers))
+    for stage in repaired["stages"]:
+        ids = stage["element_ids"]
+        assert len(ids) == len(set(ids))
+    assert repaired["focus"]["target_ids"] == ["body"]
+    # The repaired plan is the exact payload that will be persisted.
+    validate_drawing_plan(repaired, repair=False)
+
+
+def test_fit_plan_clamps_font_scale_and_revalidates_persisted_payload():
+    plan = parse_drawing_plan(_plan()).to_payload()
+    plan["elements"][2]["geometry"]["font_scale"] = 0.1
+    fitted = fit_plan_to_region(plan, (0.55, 0.2, 0.2, 0.3))
+    scale = fitted["elements"][2]["geometry"]["font_scale"]
+    assert 0.5 <= scale <= 2.5
+    validate_drawing_plan(fitted, repair=False)

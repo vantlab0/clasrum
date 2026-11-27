@@ -6,6 +6,7 @@ import '../model/board_collision.dart';
 import '../model/board_document.dart';
 import '../model/board_event.dart';
 import '../model/board_geometry.dart';
+import '../render/board_render_cache.dart';
 import 'animation_scheduler.dart';
 import 'event_queue.dart';
 
@@ -43,6 +44,9 @@ class BlackboardController extends ChangeNotifier {
   final BoardEventQueue _queue;
   final BoardAnimationScheduler _scheduler;
   final Set<String> _instantEventIds = <String>{};
+
+  /// Shared measurement/bounds state survives repaints and animation frames.
+  final BoardRenderCache renderCache = BoardRenderCache();
 
   BoardDocument _document;
   BoardEvent? _currentEvent;
@@ -344,12 +348,14 @@ class BlackboardController extends ChangeNotifier {
 
   /// Resolves the element id created/updated by [event] in [document].
   String? _elementIdFor(BoardEvent event, BoardDocument document) {
-    final explicit = event.elementId;
-    if (explicit != null && document[explicit] != null) return explicit;
-    // Annotations are created with a derived id; the created sequence is unique.
+    // Annotation events carry an explicit *target* id but create a separate
+    // annotation element. Prefer the element created by this sequence so the
+    // reveal animates the visible annotation, not the already-painted target.
     for (final element in document.elements.values) {
       if (element.createdSequence == event.sequence) return element.elementId;
     }
+    final explicit = event.elementId;
+    if (explicit != null && document[explicit] != null) return explicit;
     return explicit;
   }
 
@@ -397,6 +403,7 @@ class BlackboardController extends ChangeNotifier {
     _scheduler.cancelAll();
     _scheduler.dispose();
     _queue.dispose();
+    renderCache.dispose();
     _document = BoardDocument.empty();
     super.dispose();
   }

@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:convert';
 
 import 'board_collision.dart';
 import 'board_element.dart';
@@ -6,6 +7,68 @@ import 'board_event.dart';
 import 'board_geometry.dart';
 import 'board_metrics.dart';
 import 'drawing_plan.dart';
+
+/// Fields that change between two copies of the same logical board event.
+const Set<String> _fingerprintVolatileKeys = <String>{
+  'event_id',
+  'sequence',
+  'created_at',
+  'board_revision',
+  'animate',
+  'updatedSequence',
+};
+
+Object? _canonicalValue(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.map((dynamic key) => key.toString()).toList()
+      ..sort();
+    return <String, Object?>{
+      for (final key in keys)
+        key: _canonicalValue(value[key]),
+    };
+  }
+  if (value is List) {
+    return value.map(_canonicalValue).toList(growable: false);
+  }
+  return value;
+}
+
+/// Stable logical-event key, independent of event id/sequence/timestamp.
+///
+/// This is the client-side counterpart of the backend's event dedupe: a replay
+/// with a fresh id must not create a second visible copy of the same content.
+String boardEventFingerprint(
+  String type,
+  String? elementId,
+  Map<String, dynamic> payload,
+) {
+  final clean = <String, dynamic>{};
+  payload.forEach((key, value) {
+    if (!_fingerprintVolatileKeys.contains(key)) {
+      clean[key] = value;
+    }
+  });
+  return jsonEncode(<Object?>[
+    type,
+    elementId ?? '',
+    _canonicalValue(clean),
+  ]);
+}
+
+String _stableAnnotationId(
+  String prefix,
+  Iterable<String> targets,
+  String style,
+  String? color,
+) {
+  final parts = targets.toList()..sort();
+  final key = jsonEncode(<Object?>[prefix, parts, style, color]);
+  var hash = 0x811c9dc5;
+  for (final codeUnit in key.codeUnits) {
+    hash = ((hash ^ codeUnit) * 0x01000193) & 0xffffffff;
+  }
+  return '${prefix}_${hash.toRadixString(16).padLeft(8, '0')}';
+}
 
 /// Immutable board document (CONTRACTS §5) with the pure event reducer.
 ///
@@ -25,6 +88,7 @@ class BoardDocument {
     required this.lastSequence,
     Map<String, BoardElement>? elements,
     Set<String>? appliedEventIds,
+    Set<String>? appliedFingerprints,
     this.createdAt,
     this.updatedAt,
     List<String> warnings = const <String>[],
@@ -33,6 +97,19 @@ class BoardDocument {
         ),
         _appliedEventIds = Set<String>.unmodifiable(
           appliedEventIds ?? const <String>{},
+        ),
+        _appliedFingerprints = Set<String>.unmodifiable(
+          appliedFingerprints ??
+              (elements?.values
+                      .map(
+                        (element) => boardEventFingerprint(
+                          element.kind.wireName,
+                          element.elementId,
+                          element.payload,
+                        ),
+                      )
+                      .toSet() ??
+                  const <String>{}),
         ),
         _warnings = List<String>.unmodifiable(warnings);
 
@@ -87,12 +164,20 @@ class BoardDocument {
         if (id != null) applied.add(id.toString());
       }
     }
+    final appliedFingerprints = <String>{};
+    final rawFingerprints = json['applied_fingerprints'];
+    if (rawFingerprints is List) {
+      for (final fingerprint in rawFingerprints) {
+        if (fingerprint != null) appliedFingerprints.add(fingerprint.toString());
+      }
+    }
     return BoardDocument(
       sessionId: sessionId,
       revision: revision,
       lastSequence: lastSequence,
       elements: elements,
       appliedEventIds: applied,
+      appliedFingerprints: appliedFingerprints,
       createdAt: _parseDate(json['created_at']),
       updatedAt: _parseDate(json['updated_at']),
     );
@@ -149,6 +234,7 @@ class BoardDocument {
   /// Insertion-ordered element map (insertion = z-order within a level).
   final Map<String, BoardElement> _elements;
   final Set<String> _appliedEventIds;
+  final Set<String> _appliedFingerprints;
   final List<String> _warnings;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -156,6 +242,8 @@ class BoardDocument {
   Map<String, BoardElement> get elements => _elements;
 
   Set<String> get appliedEventIds => _appliedEventIds;
+
+  Set<String> get appliedFingerprints => _appliedFingerprints;
 
   /// Most recent non-fatal reducer warnings (bounded, newest last).
   List<String> get warnings => _warnings;
@@ -255,6 +343,18 @@ class BoardDocument {
     if (!event.isWellFormed) return _withWarning('ignored malformed event');
     if (event.sequence <= lastSequence) return this;
     if (_appliedEventIds.contains(event.eventId)) return this;
+    final fingerprint = boardEventFingerprint(
+      event.kind.wireName,
+      event.elementId,
+      event.payload,
+    );
+    if (_appliedFingerprints.contains(fingerprint)) {
+      // A replay with a fresh id must not create a second visible element, but
+      // it still advances the stream position so later sequences stay live.
+      final builder = _DocumentBuilder(this);
+      builder.warn('ignored semantic duplicate event ${event.eventId}');
+      return builder.commit(event);
+    }
     if (sessionId.isNotEmpty &&
         event.sessionId.isNotEmpty &&
         event.sessionId != sessionId) {
@@ -355,6 +455,8 @@ class BoardDocument {
             _elements.values.map((element) => element.toJson()).toList(),
         if (_appliedEventIds.isNotEmpty)
           'applied_event_ids': _appliedEventIds.toList(growable: false),
+        if (_appliedFingerprints.isNotEmpty)
+          'applied_fingerprints': _appliedFingerprints.toList(growable: false),
         if (createdAt != null)
           'created_at': createdAt!.toUtc().toIso8601String(),
         if (updatedAt != null)
@@ -367,6 +469,7 @@ class BoardDocument {
         lastSequence: lastSequence,
         elements: _elements,
         appliedEventIds: _appliedEventIds,
+        appliedFingerprints: _appliedFingerprints,
         createdAt: createdAt,
         updatedAt: updatedAt,
         warnings: _warnings,
@@ -378,6 +481,7 @@ class BoardDocument {
         lastSequence: lastSequence,
         elements: _elements,
         appliedEventIds: _appliedEventIds,
+        appliedFingerprints: _appliedFingerprints,
         createdAt: createdAt,
         updatedAt: updatedAt,
         warnings: _appendWarning(_warnings, message),
@@ -598,7 +702,12 @@ class BoardDocument {
     }
     final bounds = builder.document.boundsOf(targets);
     final id = event.elementId ??
-        'hl_${event.eventId.isNotEmpty ? event.eventId : event.sequence}';
+        _stableAnnotationId(
+          'hl',
+          targets,
+          event.style ?? 'box',
+          event.color,
+        );
     final annotationPayload = Map<String, dynamic>.of(event.payload);
     annotationPayload['target_ids'] = targets;
     if (bounds == null) {
@@ -644,8 +753,12 @@ class BoardDocument {
     final payload = event.payloadParsed;
     final style =
         payload is HighlightEquationPayload ? (payload.style ?? 'box') : 'box';
-    final id =
-        'hl_${event.eventId.isNotEmpty ? event.eventId : event.sequence}';
+    final id = _stableAnnotationId(
+      'hle',
+      <String>[target],
+      style,
+      event.color,
+    );
     builder.elements[id] = BoardElement(
       elementId: id,
       type: BoardEventType.highlight.wireName,
@@ -800,6 +913,17 @@ class _DocumentBuilder {
     if (applied.length > 2048) {
       applied.removeAll(applied.take(applied.length - 2048).toList());
     }
+    final fingerprints = Set<String>.of(document.appliedFingerprints)
+      ..add(
+        boardEventFingerprint(
+          event.kind.wireName,
+          event.elementId,
+          event.payload,
+        ),
+      );
+    if (fingerprints.length > 2048) {
+      fingerprints.removeAll(fingerprints.take(fingerprints.length - 2048).toList());
+    }
     final newRevision = event.boardRevision > document.revision
         ? event.boardRevision
         : document.revision;
@@ -812,6 +936,7 @@ class _DocumentBuilder {
       lastSequence: event.sequence,
       elements: _elements,
       appliedEventIds: applied,
+      appliedFingerprints: fingerprints,
       createdAt: document.createdAt ?? event.createdAt,
       updatedAt: event.createdAt,
       warnings: warnings,

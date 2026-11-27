@@ -21,6 +21,13 @@ import 'runtime/animation_scheduler.dart';
 import 'runtime/blackboard_controller.dart';
 import 'runtime/board_viewport_controller.dart';
 
+/// True when a `draw_diagram` payload uses the legacy step list.
+///
+/// `steps` and `nodes`/`edges` are alternative encodings of the same diagram;
+/// dispatching both would paint the same logical element twice.
+bool boardDiagramUsesLegacySteps(Map<String, dynamic> payload) =>
+    (payload['steps'] as List?)?.isNotEmpty ?? false;
+
 /// The tutorial board widget (CONTRACTS §10).
 ///
 /// Six layered [CustomPainter]s — background, text, equation, drawing, graph,
@@ -77,8 +84,9 @@ class BlackboardView extends StatelessWidget {
                     document: document,
                     transform: transform,
                     animations: controller.animations,
-                    bounds: BoardBoundsRegistry(),
+                    bounds: controller.renderCache.bounds,
                     interactive: interactive,
+                    textEngine: controller.renderCache.textEngine,
                   ),
                 ),
                 // LaTeX elements are real flutter_math_fork widgets layered on
@@ -267,6 +275,7 @@ class _BoardPainter extends CustomPainter {
     required this.animations,
     required this.bounds,
     required this.interactive,
+    required this.textEngine,
   });
 
   final BoardDocument document;
@@ -274,13 +283,17 @@ class _BoardPainter extends CustomPainter {
   final BoardAnimationScheduler animations;
   final BoardBoundsRegistry bounds;
   final bool interactive;
+  final ChalkTextEngine textEngine;
 
-  final _textEngine = ChalkTextEngine();
+  ChalkTextEngine get _textEngine => textEngine;
 
   @override
   void paint(ui.Canvas canvas, ui.Size size) {
     try {
       final rect = transform.contentRect;
+      // Drop measurement bounds for erased/removed elements so a restored board
+      // cannot reuse stale geometry from a previous revision.
+      bounds.retainOnly(document.elements.keys.toSet());
 
       // 1. background — true black board (no border frame)
       final bgPaint = Paint()..color = ChalkPalette.board;
@@ -296,8 +309,7 @@ class _BoardPainter extends CustomPainter {
       }
     } catch (_) {
       // Never crash the board painter; keep the last stable frame.
-    } finally {
-      _textEngine.clear();
+      // The text measurement cache is intentionally retained across frames.
     }
   }
 
@@ -346,8 +358,13 @@ class _BoardPainter extends CustomPainter {
         _paintDrawArrow(canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.drawDiagram:
-        _paintDrawing(canvas, element, resolvedPosition, progress, color);
-        _paintDrawDiagram(canvas, element, resolvedPosition, progress, color);
+        // A diagram is one logical element. Legacy `steps` and modern
+        // `nodes`/`edges` are alternative encodings, never two paint passes.
+        if (boardDiagramUsesLegacySteps(element.payload)) {
+          _paintDrawing(canvas, element, resolvedPosition, progress, color);
+        } else {
+          _paintDrawDiagram(canvas, element, resolvedPosition, progress, color);
+        }
         break;
       case BoardEventType.drawPlan:
         _paintDrawPlan(canvas, element, resolvedPosition, progress, color);
@@ -516,6 +533,37 @@ class _BoardPainter extends CustomPainter {
       }
     }
     return (asDouble(raw)?.round() ?? 1).clamp(1, 6);
+  }
+
+  /// Paints every non-prose label through the same chalk engine as board text.
+  ///
+  /// Raw TextPainter labels ignored `font_scale`, reveal progress, grain and
+  /// the H1-H6 style contract, which made diagrams look doubled/scattered
+  /// next to ordinary chalk writing.
+  Size _paintChalkLabel(
+    ui.Canvas canvas,
+    String text,
+    Offset origin, {
+    required Color color,
+    required double progress,
+    required double maxWidthPx,
+    Map<String, dynamic>? payload,
+    String style = 'label',
+  }) {
+    final spec = ChalkTextStyleSpec.forName(style);
+    final fontScale =
+        ((payload?['font_scale'] as num?)?.toDouble() ?? 1.0).clamp(0.5, 2.5);
+    final painted = _textEngine.paintText(
+      canvas,
+      text,
+      origin: origin,
+      spec: spec,
+      color: color,
+      fontSizePx: transform.fontPixels(spec.heightFraction) * fontScale,
+      maxWidthPx: math.max(24.0, maxWidthPx),
+      progress: progress,
+    );
+    return Size(painted.width, painted.height);
   }
 
   // ------------------------------------------------------------- equation --
@@ -751,18 +799,15 @@ class _BoardPainter extends CustomPainter {
     );
     final label = payload['label'] as String?;
     if (label != null && label.isNotEmpty) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: TextStyle(
-            fontSize: transform.fontPixels(0.024),
-            color: color,
-            fontFamily: 'Chalkboard',
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: transform.width * 0.3);
-      tp.paint(canvas, tip + const Offset(8, -10));
+      _paintChalkLabel(
+        canvas,
+        label,
+        tip + const Offset(8, -10),
+        color: color,
+        progress: progress,
+        maxWidthPx: transform.width * 0.3,
+        payload: element.payload,
+      );
     }
     bounds.put(element.elementId, BoardRect.fromPoints(start, end));
   }
@@ -778,29 +823,11 @@ class _BoardPainter extends CustomPainter {
     final nodesRaw = payload['nodes'] as List? ?? const [];
     final edgesRaw = payload['edges'] as List? ?? const [];
 
-    // edges first (under nodes)
-    for (final raw in edgesRaw) {
-      if (raw is! Map) continue;
-      final from = raw['from'] as String?;
-      final to = raw['to'] as String?;
-      if (from == null || to == null) continue;
-      final fromRect = bounds[from];
-      final toRect = bounds[to];
-      if (fromRect == null || toRect == null) continue;
-      final p1 = transform.toPixels(fromRect.center);
-      final p2 = transform.toPixels(toRect.center);
-      final strokeWidth = transform.strokePixels(2.0);
-      final edgePath = Path()
-        ..moveTo(p1.dx, p1.dy)
-        ..lineTo(p2.dx, p2.dy);
-      final edgePaint = Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = strokeWidth;
-      canvas.drawPath(edgePath, edgePaint);
-    }
-
-    // nodes then labels
+    // Register same-event node geometry before resolving edges. Previously
+    // edges were drawn first and their own endpoints were missing from the
+    // bounds registry, so most diagrams silently lost their connections.
+    final nodeBounds = <String, BoardRect>{};
+    final nodeRects = <String, ui.Rect>{};
     for (final raw in nodesRaw) {
       if (raw is! Map) continue;
       final id = raw['id'] as String?;
@@ -808,14 +835,46 @@ class _BoardPainter extends CustomPainter {
       final nodeSize =
           BoardSize.tryParse(raw['size']) ?? const BoardSize(0.09, 0.06);
       if (nodePos == null || id == null) continue;
-      final rect = transform.rectToPixels(
-        BoardRect.fromPositionSize(nodePos, nodeSize),
+      final logical = BoardRect.fromPositionSize(nodePos, nodeSize);
+      nodeBounds[id] = logical;
+      nodeRects[id] = transform.rectToPixels(logical);
+      bounds.put(id, logical);
+    }
+
+    // Edges first (under nodes), revealed with the same progress clock.
+    for (final raw in edgesRaw) {
+      if (raw is! Map) continue;
+      final fromId = raw['from'] as String?;
+      final toId = raw['to'] as String?;
+      if (fromId == null || toId == null) continue;
+      final from = bounds[fromId];
+      final to = bounds[toId];
+      if (from == null || to == null) continue;
+      final p1 = transform.toPixels(from.center);
+      final p2 = transform.toPixels(to.center);
+      final edgePath = Path()
+        ..moveTo(p1.dx, p1.dy)
+        ..lineTo(p2.dx, p2.dy);
+      _strokePath(
+        canvas,
+        edgePath,
+        color,
+        transform.strokePixels(2.0),
+        progress: progress,
       );
+    }
+
+    // Nodes and chalk labels.
+    for (final raw in nodesRaw) {
+      if (raw is! Map) continue;
+      final id = raw['id'] as String?;
+      final rect = id == null ? null : nodeRects[id];
+      if (rect == null) continue;
       final nodeColor = ChalkPalette.resolve(raw['color'], fallback: color);
-      final shape = raw['shape'] as String?;
+      final visibleColor = ChalkPalette.withOpacity(nodeColor, progress);
 
       final path = Path();
-      switch (shape) {
+      switch (raw['shape'] as String?) {
         case 'circle':
         case 'ellipse':
           path.addOval(rect);
@@ -825,33 +884,51 @@ class _BoardPainter extends CustomPainter {
               RRect.fromRectAndRadius(rect, const Radius.circular(8)));
           break;
       }
-      final fillPaint = Paint()
-        ..color = ChalkPalette.withOpacity(nodeColor, 0.18);
-      canvas.drawPath(path, fillPaint);
-      final strokePaint = Paint()
-        ..color = nodeColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = transform.strokePixels(1.5);
-      canvas.drawPath(path, strokePaint);
+      canvas.drawPath(
+        path,
+        Paint()..color = ChalkPalette.withOpacity(visibleColor, 0.18),
+      );
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = visibleColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = transform.strokePixels(1.5),
+      );
 
       final label = raw['label'] as String?;
       if (label != null && label.isNotEmpty) {
-        final tp = TextPainter(
-          text: TextSpan(
-            text: label,
-            style: TextStyle(
-              fontSize: transform.fontPixels(0.026),
-              color: color,
-              fontFamily: 'Chalkboard',
-            ),
+        final spec = ChalkTextStyleSpec.forName('label');
+        final fontScale = ((element.payload['font_scale'] as num?)?.toDouble() ??
+                1.0).clamp(0.5, 2.5);
+        final labelSize = _textEngine.measure(
+          text: label,
+          spec: spec,
+          color: nodeColor,
+          fontSizePx: transform.fontPixels(spec.heightFraction) * fontScale,
+          maxWidthPx: math.max(24.0, rect.width - 12),
+        );
+        _paintChalkLabel(
+          canvas,
+          label,
+          Offset(
+            rect.left + 6,
+            rect.top + math.max(0.0, (rect.height - labelSize.height) / 2),
           ),
-          textDirection: TextDirection.ltr,
-        )..layout(maxWidth: rect.width - 12);
-        tp.paint(canvas,
-            Offset(rect.left + 6, rect.top + (rect.height - tp.height) / 2));
+          color: nodeColor,
+          progress: progress,
+          maxWidthPx: rect.width - 12,
+          payload: element.payload,
+        );
       }
-      bounds.put(
-          id, BoardRect.fromLTWH(nodePos.x, nodePos.y, nodeSize.w, nodeSize.h));
+    }
+
+    if (nodeBounds.isNotEmpty) {
+      var union = nodeBounds.values.first;
+      for (final box in nodeBounds.values.skip(1)) {
+        union = union.union(box);
+      }
+      bounds.put(element.elementId, union.clamp01());
     }
   }
 
@@ -918,32 +995,42 @@ class _BoardPainter extends CustomPainter {
 
     final xLabel = payload['x_label'] as String?;
     final yLabel = payload['y_label'] as String?;
-    if (xLabel != null) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: xLabel,
-          style: TextStyle(
-              fontSize: transform.fontPixels(0.024),
-              color: color,
-              fontFamily: 'Chalkboard'),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(rect.center.dx - tp.width / 2, rect.bottom + 6));
+    if (xLabel != null && xLabel.isNotEmpty) {
+      final size = _textEngine.measure(
+        text: xLabel,
+        spec: ChalkTextStyleSpec.forName('label'),
+        color: color,
+        fontSizePx: transform.fontPixels(ChalkTextStyleSpec.forName('label').heightFraction),
+        maxWidthPx: rect.width,
+      );
+      _paintChalkLabel(
+        canvas,
+        xLabel,
+        Offset(rect.center.dx - size.width / 2, rect.bottom + 6),
+        color: color,
+        progress: progress,
+        maxWidthPx: rect.width,
+        payload: element.payload,
+      );
     }
-    if (yLabel != null) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: yLabel,
-          style: TextStyle(
-              fontSize: transform.fontPixels(0.024),
-              color: color,
-              fontFamily: 'Chalkboard'),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas,
-          Offset(rect.left - tp.width - 6, rect.center.dy - tp.height / 2));
+    if (yLabel != null && yLabel.isNotEmpty) {
+      final spec = ChalkTextStyleSpec.forName('label');
+      final size = _textEngine.measure(
+        text: yLabel,
+        spec: spec,
+        color: color,
+        fontSizePx: transform.fontPixels(spec.heightFraction),
+        maxWidthPx: rect.width,
+      );
+      _paintChalkLabel(
+        canvas,
+        yLabel,
+        Offset(rect.left - size.width - 6, rect.center.dy - size.height / 2),
+        color: color,
+        progress: progress,
+        maxWidthPx: rect.width,
+        payload: element.payload,
+      );
     }
 
     bounds.put(element.elementId,
@@ -1048,21 +1135,19 @@ class _BoardPainter extends CustomPainter {
     if (text == null || text.isEmpty) return;
     final at = BoardPoint.tryParse(payload['at']) ?? position;
     final center = transform.toPixels(at);
-    final tp = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-            fontSize: transform.fontPixels(0.026),
-            color: color,
-            fontFamily: 'Chalkboard'),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas, Offset(center.dx + 6, center.dy - tp.height / 2));
+    final size = _paintChalkLabel(
+      canvas,
+      text,
+      Offset(center.dx + 6, center.dy),
+      color: color,
+      progress: progress,
+      maxWidthPx: transform.width * 0.3,
+      payload: element.payload,
+    );
     bounds.put(
         element.elementId,
-        BoardRect.fromLTWH(at.x, at.y, tp.width / transform.width,
-            tp.height / transform.height));
+        BoardRect.fromLTWH(at.x, at.y, size.width / transform.width,
+            size.height / transform.height));
   }
 
   // ----------------------------------------------------------- annotations --
@@ -1140,18 +1225,23 @@ class _BoardPainter extends CustomPainter {
     }
     final label = payload['label'] as String?;
     if (label != null && label.isNotEmpty) {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: TextStyle(
-            fontSize: transform.fontPixels(0.024),
-            color: color,
-            fontFamily: 'Chalkboard',
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      tp.paint(canvas, Offset(pixelRect.left, pixelRect.top - tp.height - 6));
+      final spec = ChalkTextStyleSpec.forName('label');
+      final labelSize = _textEngine.measure(
+        text: label,
+        spec: spec,
+        color: highlightColor,
+        fontSizePx: transform.fontPixels(spec.heightFraction),
+        maxWidthPx: pixelRect.width,
+      );
+      _paintChalkLabel(
+        canvas,
+        label,
+        Offset(pixelRect.left, pixelRect.top - labelSize.height - 6),
+        color: highlightColor,
+        progress: progress,
+        maxWidthPx: pixelRect.width,
+        payload: element.payload,
+      );
     }
     bounds.put(element.elementId, union);
   }
