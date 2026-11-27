@@ -1435,8 +1435,9 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "Write ONE single short line of actual teaching content onto the blackboard per call "
         "(1-8 words, max 80 chars; one or two words is fine). Never write a paragraph, "
         "several lines, or a list in one call - make separate calls for each line instead. "
-        "Write the lesson title first with style h2, then add one short line at a time as "
-        "you teach, each line matching what you are saying aloud. Write the real content, "
+        "Write the lesson title first with style h2, create_board_visual next for the concept "
+        "diagram, then add one short line at a time as you teach, each line matching what you "
+        "are saying aloud. Write the real content, "
         "not meta labels or narration like 'Definition', 'Intuition', 'Example', or "
         "'Let's start'. Use for headings, key points, short definitions, and single-line "
         "equations. Prefer this over board_intent for simple text; it appears progressively on the board. "
@@ -1452,10 +1453,10 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "new",
         CreateBoardVisualArgs,
         "Generate a complex educational visual diagram using Qwen3.7-Flash. Delegates to "
-        "the board director for structured drawing-plan generation. Use when an explanation "
-        "genuinely benefits from a diagram, illustration, comparison table, graph, or other "
-        "structured visual. Its parts are revealed one stage at a time: the tool result "
-        "lists 'cue_phrases', and you must say each exact phrase while explaining its part. "
+        "the board director for structured drawing-plan generation. Call this immediately "
+        "after writing the lesson title to explain the central concept of a new topic. "
+        "Its parts are revealed one stage at a time: the tool result lists 'cue_phrases', "
+        "and you must say each exact phrase while explaining its part. "
         "Do not call for ordinary headings, labels, short explanations, or simple text.",
         (),
     ),

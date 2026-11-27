@@ -31,6 +31,7 @@ class FakeQwen:
         self.create_response_count = 0
         self.clear_audio_count = 0
         self.function_outputs: list[tuple[str, str]] = []
+        self.prompt_texts: list[str] = []
         self.instructions = ""
 
     async def connect(self, instructions: str, tools: list[dict]) -> None:
@@ -57,7 +58,7 @@ class FakeQwen:
         self.function_outputs.append((call_id, output, continue_response))
 
     async def prompt_text(self, text: str) -> None:
-        return None
+        self.prompt_texts.append(text)
 
     async def iterate(self):
         while True:
@@ -81,6 +82,7 @@ def _socket(qwen: FakeQwen) -> LessonSocket:
         lease_id="lease-1",
         qwen=qwen,
         startup_has_board_event=True,
+        startup_has_visual_event=True,
     )
 
 
@@ -114,6 +116,25 @@ async def test_incomplete_teaching_response_also_auto_continues() -> None:
     await asyncio.wait_for(task, timeout=2)
     assert qwen.create_response_count == 1
     assert socket.auto_continue_count == 1
+
+
+@pytest.mark.asyncio
+async def test_title_only_startup_requests_diagram_before_auto_continue() -> None:
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    # The title was written, but the concept diagram is still missing.
+    socket.startup_has_visual_event = False
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push({"type": "response.created", "response": {"id": "r1", "status": "in_progress"}})
+    qwen.push({"type": "response.audio_transcript.done", "response_id": "r1", "speaker": "tutor", "transcript": "Photosynthesis."})
+    qwen.push({"type": "response.done", "response": {"id": "r1", "status": "completed"}})
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert qwen.create_response_count == 0
+    assert qwen.prompt_texts
+    assert "create_board_visual" in qwen.prompt_texts[-1]
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ from fastapi import WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.board.service import (
+    EVENT_DRAW_PLAN,
     BoardEventPublisher,
     BoardService,
     BoardValidationError,
@@ -187,6 +188,9 @@ class LessonSocket:
     startup_response_ids: set[str] = field(default_factory=set)
     startup_has_board_tool_call: bool = False
     startup_has_board_event: bool = False
+    # A fresh lesson is not ready until a concept diagram has been committed.
+    startup_has_visual_event: bool = False
+    last_draw_plan_event_at: float = 0.0
     startup_last_nudge_at: float = 0.0
     startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     response_lifecycles: dict[str, ResponseLifecycle] = field(default_factory=dict)
@@ -253,6 +257,11 @@ class LessonRealtimeHub:
         """Attach the transcript trigger system (shared with the Board Director)."""
         self._trigger_system = trigger_system
 
+    @staticmethod
+    def _startup_board_ready(socket: LessonSocket) -> bool:
+        """Startup is complete only after the first concept diagram exists."""
+        return socket.startup_has_visual_event or socket.last_draw_plan_event_at > 0
+
     @property
     def trigger_system(self) -> TranscriptTriggerSystem | None:
         return self._trigger_system
@@ -273,13 +282,17 @@ class LessonRealtimeHub:
             socket.startup_has_board_event = True
             socket.startup_phase = LessonStartupPhase.BOARD_EVENT_PERSISTED
             socket.last_board_director_error = None
+            event_type = event.get("type") if isinstance(event, dict) else None
+            if event_type == EVENT_DRAW_PLAN:
+                socket.startup_has_visual_event = True
+                socket.last_draw_plan_event_at = socket.last_board_event_at
             if socket.last_board_director_finished_at == 0.0 and socket.last_board_director_started_at > 0:
                 socket.last_board_director_finished_at = time.monotonic()
             async with self._lock:
-                self._startup_completed_lessons.add(lesson_id)
-                if self._startup_active_lease.get(lesson_id) == socket.lease_id:
-                    self._startup_active_lease.pop(lesson_id, None)
-            event_type = event.get("type") if isinstance(event, dict) else None
+                if self._startup_board_ready(socket):
+                    self._startup_completed_lessons.add(lesson_id)
+                    if self._startup_active_lease.get(lesson_id) == socket.lease_id:
+                        self._startup_active_lease.pop(lesson_id, None)
             logger.info(
                 "board event broadcast lesson=%s seq=%s type=%s event_id=%s",
                 lesson_id,
@@ -392,7 +405,14 @@ class LessonRealtimeHub:
                 assert lesson is not None
                 detail = _detail_dict(await lessons_service.build_lesson_detail(db, lesson))
                 board_envelope = await get_board_snapshot(db, lesson, include_events=False)
+                board_events = await BoardService().get_events(db, lesson.id)
                 cursor = await get_transcript_cursor(db, lesson.id)
+
+            # A resumed lesson with an existing diagram is already prepared.
+            socket.startup_has_visual_event = any(
+                getattr(event, "type", None) == EVENT_DRAW_PLAN
+                for event in board_events
+            )
 
             # Open the real Qwen Realtime transport. No offline fallback exists.
             settings = get_settings()
@@ -508,7 +528,10 @@ class LessonRealtimeHub:
                 self._sockets.pop(socket.lesson_id, None)
             # If this socket owned startup and startup never completed, allow retry.
             if self._startup_active_lease.get(socket.lesson_id) == socket.lease_id:
-                if socket.lesson_id not in self._startup_completed_lessons and not socket.startup_has_board_event:
+                if (
+                    socket.lesson_id not in self._startup_completed_lessons
+                    and not self._startup_board_ready(socket)
+                ):
                     self._startup_active_lease.pop(socket.lesson_id, None)
 
     async def _lock_answer_mic(self, socket: LessonSocket, *, reason: str) -> None:
@@ -1090,7 +1113,11 @@ class LessonRealtimeHub:
                 response_id = str(event.get("response_id") or socket.active_response_id or "")
                 if response_id and response_id in socket.response_lifecycles:
                     socket.response_lifecycles[response_id].has_function_call = True
-                response_has_board_tool_call[response_id] = response_has_board_tool_call.get(response_id, False) or str(event.get("name") or "") == "board_intent"
+                tool_name = str(event.get("name") or "")
+                response_has_board_tool_call[response_id] = (
+                    response_has_board_tool_call.get(response_id, False)
+                    or tool_name in {"board_intent", "create_board_visual"}
+                )
                 await self._handle_qwen_tool_call(socket, lesson_id, event, response_id=response_id)
                 continue
 
@@ -1104,7 +1131,7 @@ class LessonRealtimeHub:
                     lifecycle.status = status or lifecycle.status or "done"
                 socket.active_response_id = None if socket.active_response_id == response_id else socket.active_response_id
                 has_board_call_in_response = response_has_board_tool_call.get(response_id, False)
-                board_satisfied = socket.startup_has_board_event or socket.last_board_event_at > 0
+                board_satisfied = self._startup_board_ready(socket)
                 logger.info(
                     "qwen response.done lesson=%s response_id=%s status=%s has_audio=%s has_text=%s has_function_call=%s board_tool_call=%s board_satisfied=%s",
                     lesson_id, response_id, status,
@@ -1150,8 +1177,9 @@ class LessonRealtimeHub:
                     await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
                     try:
                         await socket.qwen.prompt_text(
-                            "System instruction: You responded, but no board visual was created. "
-                            "Call board_intent now to draw the lesson heading and the first concept visual, then continue explaining aloud. "
+                            "System instruction: The concept diagram is still missing. If the lesson title is not on the board, "
+                            "write it first with board_write_on_board, then immediately call create_board_visual to draw a diagram "
+                            "explaining the core concept. Say the cue phrases aloud as the stages appear, then keep teaching. "
                             "Do not wait for the student."
                         )
                     except Exception:  # pragma: no cover
@@ -1168,10 +1196,9 @@ class LessonRealtimeHub:
                     await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
                     try:
                         await socket.qwen.prompt_text(
-                            "System instruction: The previous board drawing attempt did not produce a visible board update. "
-                            "Call board_intent again with a clear intent for the lesson heading, a short introduction, "
-                            "the first concept heading, one meaningful explanation, and a simple relevant diagram. "
-                            "Then continue teaching aloud."
+                            "System instruction: The previous diagram attempt did not produce a visible board update. "
+                            "Call create_board_visual again with a clear intent for a diagram that explains the core concept, "
+                            "using accurate short labels and stage cues. Then continue teaching aloud."
                         )
                     except Exception:  # pragma: no cover
                         logger.warning("startup recovery nudge after failed board_intent failed lesson=%s", lesson_id, exc_info=True)
@@ -1337,16 +1364,18 @@ class LessonRealtimeHub:
             ok = bool(result.get("ok")) if isinstance(result, dict) else False
             if response_id and response_id in socket.response_lifecycles:
                 socket.response_lifecycles[response_id].function_call_executed_ok = ok
-            if name == "board_intent":
+            if name in {"board_intent", "create_board_visual"}:
                 socket.last_board_director_finished_at = _time.monotonic()
                 if not ok:
-                    socket.last_board_director_error = str((result or {}).get("message") or (result or {}).get("error") or "board_intent_failed")
+                    socket.last_board_director_error = str((result or {}).get("message") or (result or {}).get("error") or "board_visual_failed")
                 else:
                     socket.last_board_director_error = None
                     socket.startup_has_board_event = True
+                    socket.startup_has_visual_event = True
+                    socket.last_draw_plan_event_at = _time.monotonic()
                     socket.startup_phase = LessonStartupPhase.BOARD_EVENT_PERSISTED
                     if socket.last_board_event_at == 0:
-                        socket.last_board_event_at = _time.monotonic()
+                        socket.last_board_event_at = socket.last_draw_plan_event_at
                     async with self._lock:
                         self._startup_completed_lessons.add(lesson_id)
                         if self._startup_active_lease.get(lesson_id) == socket.lease_id:
@@ -1427,7 +1456,7 @@ class LessonRealtimeHub:
             cursor_val = 0
 
         # If board content already exists from this session/startup, don't restart.
-        if lesson.id in self._startup_completed_lessons or socket.startup_has_board_event:
+        if lesson.id in self._startup_completed_lessons or self._startup_board_ready(socket):
             logger.info(
                 "skip initial teaching: startup already satisfied lesson=%s lease=%s last_seq=%s",
                 lesson.id, socket.lease_id, last_seq,
@@ -1447,7 +1476,7 @@ class LessonRealtimeHub:
             async with self._lock:
                 active_lease = self._startup_active_lease.get(lesson.id)
                 current = self._sockets.get(lesson.id)
-                if lesson.id in self._startup_completed_lessons:
+                if lesson.id in self._startup_completed_lessons or self._startup_board_ready(socket):
                     socket.startup_phase = LessonStartupPhase.READY
                     return
                 if active_lease and active_lease != socket.lease_id and current is not None and not current.closed.is_set():
@@ -1482,15 +1511,17 @@ class LessonRealtimeHub:
                     f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
                     "Begin teaching immediately without waiting for the student to speak first. "
                     "Your first board call must be board_write_on_board writing ONLY the lesson title as ONE short line (style h2). "
-                    "Then give a short spoken introduction. After that, write ONE short line per board_write_on_board call "
+                    "Your second board call must be create_board_visual: draw a clear diagram that explains the central concept of this topic, "
+                    "with accurate short labels. The tool result lists 'cue_phrases'; say each exact phrase aloud while explaining its stage so the diagram reveals with your speech. "
+                    "Do not write definition, intuition or example lines before that diagram exists. "
+                    "After the diagram, write ONE short line per board_write_on_board call "
                     "(1-8 words, one or two words is fine, no newlines, no paragraphs, no lists), each line matching what you are "
                     "explaining at that moment; make a separate call for every additional line. Never dump a block of text or "
                     "several lines in a single call, and never repeat a line already on the board. "
                     "Write actual teaching content, not meta labels or narration: never write standalone labels like "
                     "'Definition', 'Intuition', 'Example', or 'Step 1'; write the real definition/intuition/example content. "
                     "never supply x/y coordinates - describe the semantic position and the backend layout manager places it. "
-                    "Use create_board_visual only when the concept genuinely needs a diagram, table or graph, and keep any labels "
-                    "to one short line of actual content. Keep teaching automatically through the lesson plan after each spoken turn - the backend "
+                    "Keep teaching automatically through the lesson plan after each spoken turn - the backend "
                     "starts your next response for you, so never stop just because you asked a rhetorical question or a quick check. "
                     "Call wait_for_student ONLY when you need the student's actual answer before you can continue; that call unlocks their microphone automatically, then listen."
                 )
@@ -1501,6 +1532,8 @@ class LessonRealtimeHub:
                     f"Current lesson state: {json.dumps(detail.get('lesson_state') or {}, ensure_ascii=False)[:1500]}. "
                     f"Board last_sequence={last_seq}, transcript_cursor={cursor_val}. "
                     "Briefly reorient the student and continue from the current progress. "
+                    "If the board has only the title and no concept diagram, call create_board_visual next before writing more explanation; "
+                    "say each returned cue phrase aloud as its stage is explained. "
                     "Do not repeat already completed content or any line already on the board; use board_intent only for new or resumed visuals. "
                     "Write each new heading, definition or equation with board_write_on_board as ONE short line per call "
                     "(1-8 words, no newlines, no paragraphs, no lists), aligned with what you say aloud; make a separate call per line. "
@@ -1555,7 +1588,7 @@ class LessonRealtimeHub:
         return (now - started) < 120
 
     def _startup_status_message(self, socket: LessonSocket) -> str:
-        if socket.last_board_event_at > 0 or socket.startup_has_board_event:
+        if self._startup_board_ready(socket):
             return "Restoring your classroom..."
         if self._director_busy(socket):
             return "Creating the first board illustration..."
@@ -1575,8 +1608,8 @@ class LessonRealtimeHub:
         """
         if socket.last_board_director_error:
             return "board_start_failed", f"The board illustration could not be created: {socket.last_board_director_error}", True
-        if socket.last_tool_call_at > 0 and socket.last_board_event_at == 0:
-            return "board_start_failed", "A board drawing request was received, but no board update was shown. Please retry.", True
+        if socket.last_tool_call_at > 0 and not self._startup_board_ready(socket):
+            return "board_start_failed", "The first concept diagram was not created. Please retry.", True
         if socket.last_qwen_audio_at > 0 or socket.last_qwen_transcript_at > 0:
             return "board_start_delayed", "The tutor is speaking, but the first board visual is still being prepared.", False
         if socket.last_qwen_response_created_at > 0:
@@ -1666,7 +1699,7 @@ class LessonRealtimeHub:
                     prev = checkpoint
                     if socket.closed.is_set():
                         return
-                    if socket.last_board_event_at > 0 or socket.startup_has_board_event:
+                    if self._startup_board_ready(socket):
                         socket.startup_phase = LessonStartupPhase.READY
                         return
 
@@ -1700,17 +1733,18 @@ class LessonRealtimeHub:
                         if not has_response_activity:
                             nudge = (
                                 "System instruction: The classroom is connected. Begin teaching now. "
-                                "Start by calling board_write_on_board to write ONLY the lesson title as one short line (style h2), then explain it aloud. "
-                                "Write one short line per call (1-8 words, no newlines) as you teach. Keep teaching automatically; "
+                                "First call board_write_on_board to write ONLY the lesson title as one short line (style h2). "
+                                "Immediately call create_board_visual to draw a concept diagram and say its cue phrases aloud as stages appear. "
+                                "Then write one short line per call (1-8 words, no newlines) as you teach. Keep teaching automatically; "
                                 "only call wait_for_student when you need the student's answer."
                             )
                             reason = "watchdog_nudge_start"
                         else:
                             nudge = (
-                                "System instruction: Continue teaching, but you must create the first visible board content now. "
-                                "Call board_write_on_board with the lesson title as one short line (style h2), then write one short line "
-                                "per call (1-8 words, no newlines) as you teach. Use create_board_visual only if a diagram is genuinely needed. "
-                                "Then continue explaining aloud. Keep teaching after each spoken turn; pause only via wait_for_student."
+                                "System instruction: Continue teaching, but the concept diagram is still missing. "
+                                "Call create_board_visual now with accurate short labels and stage cues, then continue explaining aloud. "
+                                "Write one short line per call (1-8 words, no newlines) only after the diagram exists. "
+                                "Keep teaching after each spoken turn; pause only via wait_for_student."
                             )
                             reason = "watchdog_nudge_board_intent"
                         sent = await self._safe_prompt_text(socket, nudge, reason=reason)
@@ -1718,8 +1752,8 @@ class LessonRealtimeHub:
                             socket.startup_nudge_count += 1
                             await self._send_startup_status(socket, reason, "Preparing your first lesson...")
 
-                # Final check: if still no board event, report clear failure but keep session alive for retry.
-                if not socket.closed.is_set() and socket.last_board_event_at == 0 and not socket.startup_has_board_event:
+                # Final check: if still no concept diagram, report a clear failure but keep the session alive for retry.
+                if not socket.closed.is_set() and not self._startup_board_ready(socket):
                     if self._director_busy(socket):
                         await self._send_startup_status(socket, "board_director", "Creating the first board illustration...")
                         logger.info("startup watchdog final check deferred: director busy lesson=%s", lesson_id)
@@ -1921,34 +1955,35 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"at {level} level. You speak out loud while writing on a shared blackboard. "
         f"Concepts to cover: {concept_list}. "
         f"Rules: (1) Write the lesson title FIRST with board_write_on_board using "
-        f"style h2, as ONE short line. (2) Then teach aloud and write on the board "
-        f"ONE SHORT LINE PER TOOL CALL: each board_write_on_board call must contain "
-        f"only one line of 1-8 words (one or two words is fine), with no newlines, no "
-        f"paragraphs and no lists. Make a separate call for every new line, and let "
-        f"each line say only what you are explaining at that moment so the board "
-        f"grows naturally with your speech. NEVER dump a long text or several lines "
-        f"in a single call, and never repeat a line already on the board. "
-        f"(3) Write actual teaching content, not meta labels or narration. NEVER write "
-        f"standalone labels/placeholders like 'Definition', 'Intuition', 'Example', "
-        f"'Step 1', 'Explanation', or 'Let's start'; instead write the real definition, "
-        f"intuition, example, or step content itself. Do not write what you are about "
-        f"to do; write the content. (4) KEEP TEACHING AUTOMATICALLY. The backend starts "
-        f"your next response as soon as yours ends, so continue with the next small "
-        f"teaching step instead of stopping or staying silent. Each new board line is "
-        f"placed below the previous one; when the board fills it is cleared automatically "
-        f"and you should simply keep teaching. For diagrams, the board tool result lists "
-        f"'cue_phrases'; say each exact phrase aloud while explaining that part so the matching "
-        f"stage is revealed. Do not wait for the "
-        f"student after every question: rhetorical questions and quick understanding "
-        f"checks are part of your teaching, so carry on explaining them yourself. "
-        f"(5) Call wait_for_student ONLY when you have asked a direct question and "
-        f"genuinely need the student's answer before you can continue. That call "
-        f"unlocks the student's microphone automatically; stop speaking and listen for "
-        f"the answer. Never call it for rhetorical questions. (6) Use create_board_visual "
-        f"only when a diagram, table or graph genuinely helps, and keep its text labels "
-        f"to single short lines of actual content. (7) Never modify database state "
-        f"directly — only through the exposed tools. (8) Keep explanations concise. "
-        f"(9) Use lesson_finish when the student is done or time is up."
+        f"style h2, as ONE short line. (2) IMMEDIATELY after the title, call "
+        f"create_board_visual to draw a diagram that explains the central concept, before "
+        f"any definition or explanation lines. The tool result lists 'cue_phrases'; say "
+        f"each exact phrase aloud while explaining that stage so the diagram reveals with "
+        f"your speech. (3) Then teach aloud and write on the board ONE SHORT LINE PER TOOL "
+        f"CALL: each board_write_on_board call must contain only one line of 1-8 words "
+        f"(one or two words is fine), with no newlines, no paragraphs and no lists. Make a "
+        f"separate call for every new line, and let each line say only what you are "
+        f"explaining at that moment so the board grows naturally with your speech. NEVER "
+        f"dump a long text or several lines in a single call, and never repeat a line "
+        f"already on the board. (4) Write actual teaching content, not meta labels or "
+        f"narration. NEVER write standalone labels/placeholders like 'Definition', "
+        f"'Intuition', 'Example', 'Step 1', 'Explanation', or 'Let's start'; instead write "
+        f"the real definition, intuition, example, or step content itself. Do not write "
+        f"what you are about to do; write the content. (5) KEEP TEACHING AUTOMATICALLY. "
+        f"The backend starts your next response as soon as yours ends, so continue with "
+        f"the next small teaching step instead of stopping or staying silent. Each new "
+        f"board line is placed below the previous one; when the board fills it is cleared "
+        f"automatically and you should simply keep teaching. Do not wait for the student "
+        f"after every question: rhetorical questions and quick understanding checks are "
+        f"part of your teaching, so carry on explaining them yourself. (6) Call "
+        f"wait_for_student ONLY when you have asked a direct question and genuinely need "
+        f"the student's answer before you can continue. That call unlocks the student's "
+        f"microphone automatically; stop speaking and listen for the answer. Never call "
+        f"it for rhetorical questions. (7) Keep every diagram label to one short line of "
+        f"accurate content next to the feature it names; never invent decorative parts. "
+        f"(8) Never modify database state directly — only through the exposed tools. "
+        f"(9) Keep explanations concise and use lesson_finish when the student is done "
+        f"or time is up."
     )
 
 

@@ -22,7 +22,6 @@ from app.graph.state import (
 )
 
 MAX_PROMPT_CHARS = 11_500
-MAX_MEMORY_LINES = 12
 MAX_OBSERVATION_LINES = 6
 
 _PALETTE = (
@@ -53,51 +52,18 @@ def _format_plan(plan: LessonPlan | dict[str, Any], current_concept_id: str | No
 
 
 def _format_memory(memory: StudentMemory | dict[str, Any] | None) -> str:
-    if not isinstance(memory, dict) or not memory:
-        return "No prior memory for this student yet (first lesson)."
-    sections: list[str] = []
-    profile = memory.get("profile") or {}
-    if isinstance(profile, dict):
-        bits: list[str] = []
-        if profile.get("level"):
-            bits.append(f"level={profile['level']}")
-        if profile.get("preferred_duration_minutes"):
-            bits.append(f"preferred_duration={profile['preferred_duration_minutes']}m")
-        if profile.get("strengths"):
-            bits.append("strengths=" + ", ".join(str(v) for v in profile["strengths"][:4]))
-        if profile.get("weaknesses"):
-            bits.append("weaknesses=" + ", ".join(str(v) for v in profile["weaknesses"][:4]))
-        if bits:
-            sections.append("Profile: " + " | ".join(bits))
-
-    mastery_lines: list[str] = []
-    for item in (memory.get("mastery") or [])[:MAX_MEMORY_LINES]:
-        if not isinstance(item, dict):
-            continue
-        concept = str(item.get("concept") or "").strip()
-        if not concept:
-            continue
-        status = str(item.get("status") or "not_started")
-        level = item.get("mastery_level", 0)
-        mastery_lines.append(_truncate(f"- {concept}: {status} ({level}/5)", 120))
-    if mastery_lines:
-        sections.append("Mastery (0-5, from evidence):\n" + "\n".join(mastery_lines))
-
-    difficulties = [str(item) for item in (memory.get("prior_difficulty") or []) if item][:5]
-    if difficulties:
-        sections.append("Recently difficult: " + ", ".join(_truncate(d, 60) for d in difficulties))
-
+    """Render only lesson-local observations, never student-wide history."""
     observation_lines: list[str] = []
-    for item in (memory.get("observations") or [])[:MAX_OBSERVATION_LINES]:
-        if not isinstance(item, dict):
-            continue
-        observation = str(item.get("observation") or "").strip()
-        if observation:
-            observation_lines.append(_truncate(f"- {observation}", 180))
+    if isinstance(memory, dict):
+        for item in (memory.get("observations") or [])[:MAX_OBSERVATION_LINES]:
+            if not isinstance(item, dict):
+                continue
+            observation = str(item.get("observation") or "").strip()
+            if observation:
+                observation_lines.append(_truncate(f"- {observation}", 180))
     if observation_lines:
-        sections.append("Recent observations:\n" + "\n".join(observation_lines))
-
-    return "\n".join(sections) if sections else "No prior memory for this student yet (first lesson)."
+        return "Observations recorded in this lesson:\n" + "\n".join(observation_lines)
+    return "No memory carried in from other lessons."
 
 
 def _format_current_concept(
@@ -171,7 +137,7 @@ def build_teacher_system_prompt(
         "## The plan (follow it, one concept at a time)\n" + _format_plan(plan, current_concept_id)
     )
     sections.append("## Right now\n" + _format_current_concept(plan, current_concept_id))
-    sections.append("## What you remember about this student\n" + _format_memory(student_memory))
+    sections.append("## What you know from THIS lesson only\n" + _format_memory(student_memory))
 
     if checkpoint_lines:
         sections.append(
@@ -225,6 +191,10 @@ def build_teacher_system_prompt(
         "## Tool-call etiquette (function calling)\n"
         "- Call exactly one tool at a time and wait for its result (the tool result JSON "
         "includes event_id, sequence and element_id).\n"
+        "- Opening sequence for a fresh lesson: write the title with board_write_on_board, "
+        "then immediately call create_board_visual for a diagram explaining the central "
+        "concept. Say its cue_phrases aloud as the stages reveal before writing further "
+        "explanation lines.\n"
         "- Sequence for each concept: explain briefly (speech) → write the essentials on the "
         "board → ask a question with lesson_ask_question → evaluate the answer with "
         "lesson_check_answer → advance with lesson_next_concept only when it is understood.\n"

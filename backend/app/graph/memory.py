@@ -1,17 +1,11 @@
-"""Long-term student memory: retrieval, evidence-based mastery, observations.
+"""Student memory with strict per-lesson isolation.
 
-Ownership (contract §8/§9): the LangGraph **Store** is the primary memory store
-with namespaces ``("students", student_id, "profile" | "concepts" |
-"observations")``; the relational tables ``student_concept_mastery``,
-``student_learning_observations`` and ``student_learning_profiles`` are the
-*queryable mirror* that the graph reads from on every turn (and that survives
-in SQLite dev/test where the Store is in-memory). Both are always written
-together by the functions here — one owner, two representations.
-
-Mastery is evidence-based: it only changes from an evaluated answer, an explicit
-revisit, or an explicit progress observation — never from a model monologue. It
-is clamped to 0..5 and mapped to the status vocabulary
-``not_started | learning | needs_practice | mastered``.
+Memory writes remain available for analytics and future features, but the
+teaching graph only reads memory belonging to the *active lesson*. A new topic
+therefore starts fresh: no profile strengths, mastery, previous lessons or
+student-wide observations are injected into its plan or tutor instructions.
+Evidence-based mastery is still recorded from evaluated answers, but it is not
+allowed to seed a later lesson.
 """
 from __future__ import annotations
 
@@ -25,11 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
 from app.db.models import (
-    Lesson,
     StudentConceptMastery,
     StudentLearningObservation,
     StudentLearningProfile,
-    User,
 )
 from app.graph.state import (
     STATUS_MASTERED,
@@ -44,11 +36,9 @@ logger = logging.getLogger(__name__)
 
 MAX_MASTERY_ROWS = 20
 MAX_OBSERVATION_ROWS = 10
-MAX_RECENT_LESSONS = 5
 MAX_OBSERVATION_CHARS = 600
 MIN_MEANINGFUL_OBSERVATION_CHARS = 8
 MAX_MISCONCEPTIONS = 5
-MAX_STRENGTH_WEAKNESS = 8
 
 VALID_OBSERVATION_KINDS = frozenset(
     {
@@ -95,80 +85,30 @@ async def retrieve_memory(
     mastery_limit: int = MAX_MASTERY_ROWS,
     observation_limit: int = MAX_OBSERVATION_ROWS,
 ) -> StudentMemory:
-    """Build the compact, prompt-safe memory snapshot for the teaching graph.
+    """Build the compact memory snapshot for the ACTIVE lesson only.
 
-    Bounded on purpose: at most ``mastery_limit`` concepts, ``observation_limit``
-    observations and short strings only. Never returns raw rows, emails, tokens
-    or full transcripts.
+    Student-wide profile, mastery, lesson history and observations from other
+    lessons are deliberately excluded so a new topic always starts fresh. Only
+    evidence recorded with this ``lesson_id`` may influence the current lesson.
+    ``subject`` and ``mastery_limit`` stay in the signature for compatibility
+    but are intentionally ignored.
     """
     memory = StudentMemory()
+    memory["profile"] = {}
+    memory["mastery"] = []
+    memory["prior_difficulty"] = []
+    memory["subjects_studied"] = []
+    memory["lesson_history"] = []
+    if not lesson_id:
+        memory["observations"] = []
+        return memory
 
-    # --- profile ---------------------------------------------------------
-    profile_row = (
-        await db.execute(
-            select(StudentLearningProfile).where(StudentLearningProfile.student_id == student_id)
-        )
-    ).scalar_one_or_none()
-    user = await db.get(User, student_id)
-    profile: dict[str, Any] = {}
-    if user is not None:
-        profile["level"] = user.default_level
-        profile["preferred_duration_minutes"] = user.default_duration_minutes
-    if profile_row is not None:
-        profile["level"] = profile_row.level or profile.get("level")
-        profile["preferred_duration_minutes"] = (
-            profile_row.preferred_duration_minutes or profile.get("preferred_duration_minutes")
-        )
-        profile["strengths"] = [str(item)[:80] for item in (profile_row.strengths or [])][:MAX_STRENGTH_WEAKNESS]
-        profile["weaknesses"] = [str(item)[:80] for item in (profile_row.weaknesses or [])][:MAX_STRENGTH_WEAKNESS]
-        profile["subjects_studied"] = [
-            str(item)[:60] for item in (profile_row.subjects_studied or [])
-        ][:MAX_STRENGTH_WEAKNESS]
-    memory["profile"] = profile
-    memory["subjects_studied"] = list(profile.get("subjects_studied") or [])
-
-    # --- concept mastery -------------------------------------------------
-    mastery_stmt = select(StudentConceptMastery).where(
-        StudentConceptMastery.student_id == student_id
-    )
-    if subject:
-        mastery_stmt = mastery_stmt.where(StudentConceptMastery.subject == subject)
-    mastery_stmt = mastery_stmt.order_by(
-        StudentConceptMastery.last_reviewed_at.desc().nullslast(),
-        StudentConceptMastery.updated_at.desc(),
-    ).limit(max(1, min(int(mastery_limit), 100)))
-    mastery_rows = (await db.execute(mastery_stmt)).scalars().all()
-    mastery: list[dict[str, Any]] = []
-    for row in mastery_rows:
-        mastery.append(
-            {
-                "concept": str(row.concept)[:120],
-                "subject": str(row.subject)[:60],
-                "mastery_level": clamp_mastery(row.mastery_level),
-                "status": row.status if row.status in {
-                    STATUS_NOT_STARTED,
-                    "learning",
-                    STATUS_NEEDS_PRACTICE,
-                    STATUS_MASTERED,
-                } else status_for_mastery(row.mastery_level),
-                "attempts": int(row.attempts or 0),
-                "correct_answers": int(row.correct_answers or 0),
-                "misconceptions": [str(item)[:120] for item in (row.misconceptions or [])][:MAX_MISCONCEPTIONS],
-            }
-        )
-    memory["mastery"] = mastery
-
-    # --- prior difficulty (explicit hint for the planner/teacher) ---------
-    difficulty: list[str] = []
-    for item in mastery:
-        if item["status"] in {STATUS_NEEDS_PRACTICE, STATUS_NOT_STARTED} and item["attempts"] > 0:
-            difficulty.append(item["concept"])
-    memory["prior_difficulty"] = difficulty[:5]
-
-    # --- observations ----------------------------------------------------
     obs_stmt = (
         select(StudentLearningObservation)
-        .where(StudentLearningObservation.student_id == student_id)
+        .where(
+            StudentLearningObservation.student_id == student_id,
+            StudentLearningObservation.lesson_id == lesson_id,
+        )
         .order_by(StudentLearningObservation.created_at.desc())
         .limit(max(1, min(int(observation_limit), 50)))
     )
@@ -187,24 +127,6 @@ async def retrieve_memory(
             }
         )
     memory["observations"] = observations
-
-    # --- lesson history (bounded, no transcripts) ------------------------
-    history_stmt = (
-        select(Lesson)
-        .where(Lesson.student_id == student_id, Lesson.status == "completed")
-        .order_by(Lesson.ended_at.desc().nullslast())
-        .limit(MAX_RECENT_LESSONS)
-    )
-    history_rows = (await db.execute(history_stmt)).scalars().all()
-    memory["lesson_history"] = [
-        {
-            "topic": str(row.topic)[:160],
-            "subject": str(row.subject or "")[:60],
-            "progress": round(float(row.progress or 0.0), 3),
-            "ended_at": _recent(row.ended_at),
-        }
-        for row in history_rows
-    ]
     return memory
 
 

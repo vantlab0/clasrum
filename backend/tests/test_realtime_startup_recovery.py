@@ -167,16 +167,21 @@ async def test_startup_recovers_when_first_response_has_no_board_tool_call(monke
 
     assert len(qwen.prompt_texts) >= 2, f"expected recovery nudge, got {qwen.prompt_texts}"
     recovery_prompt = qwen.prompt_texts[-1].lower()
-    assert "board_intent" in recovery_prompt
+    assert "create_board_visual" in recovery_prompt
 
-    # 2) model emits board_intent
+    # 2) model emits the concept-diagram tool call
     qwen.push({"type": "response.created", "response": {"id": "r2", "status": "in_progress"}})
     qwen.push({
         "type": "response.function_call_arguments.done",
         "response_id": "r2",
         "call_id": "call_1",
-        "name": "board_intent",
-        "arguments": json.dumps({"intent": "Draw lesson heading and first concept visual", "focus": "new_content"}),
+        "name": "create_board_visual",
+        "arguments": json.dumps({
+            "visual_type": "diagram",
+            "instruction": "Draw a diagram explaining the core concept of fractions",
+            "complexity": "simple",
+            "context": {},
+        }),
     })
     qwen.push({"type": "response.done", "response": {"id": "r2", "status": "completed"}})
 
@@ -203,6 +208,7 @@ async def test_startup_recovers_when_first_response_has_no_board_tool_call(monke
         assert any(e.type == "draw_plan" for e in events)
 
     assert socket.startup_has_board_event is True
+    assert socket.startup_has_visual_event is True
 
 
 @pytest.mark.asyncio

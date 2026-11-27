@@ -259,26 +259,13 @@ def _distribute_minutes(
 
 
 def _memory_focus(memory: StudentMemory | dict[str, Any] | None, subject: str) -> str | None:
-    """Pick one concept the student recently struggled with (same subject first)."""
-    if not isinstance(memory, dict):
-        return None
-    candidates: list[str] = []
-    for item in memory.get("mastery") or []:
-        if not isinstance(item, dict):
-            continue
-        item_subject = str(item.get("subject") or "")
-        status = str(item.get("status") or "")
-        concept = str(item.get("concept") or "").strip()
-        if not concept:
-            continue
-        if item_subject and subject and item_subject.lower() != subject.lower():
-            continue
-        if status in {"needs_practice", "learning"}:
-            candidates.append(concept)
-    for difficulty in memory.get("prior_difficulty") or []:
-        if isinstance(difficulty, str) and difficulty.strip():
-            candidates.append(difficulty.strip())
-    return candidates[0] if candidates else None
+    """Never seed a fresh lesson with prior memory.
+
+    The signature is kept for callers, but every lesson plan is generated from
+    its own topic/subject/level only. Long-term mastery or difficulty from an
+    earlier topic must not introduce a warmup concept into a new lesson.
+    """
+    return None
 
 
 def generate_plan(

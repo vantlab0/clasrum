@@ -80,7 +80,10 @@ class AssessmentResult(TypedDict, total=False):
 
 
 class StudentMemory(TypedDict, total=False):
-    """Compact, prompt-safe long-term memory snapshot (see app.graph.memory)."""
+    """Compact lesson-local memory snapshot (see app.graph.memory).
+
+    Cross-lesson topics, profile history and global mastery are never loaded.
+    """
 
     profile: dict[str, Any]
     mastery: list[dict[str, Any]]

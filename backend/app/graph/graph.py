@@ -399,6 +399,7 @@ async def _record_evidence(
 
 
 async def retrieve_memory_node(state: LessonState, config: Any) -> dict[str, Any]:
+    """Load memory for THIS lesson only; never merge student-global state."""
     db = _db(config)
     lesson_id = state.get("lesson_id")
     student_id = state.get("student_id")
@@ -411,15 +412,8 @@ async def retrieve_memory_node(state: LessonState, config: Any) -> dict[str, Any
     memory = await memory_service.retrieve_memory(
         db, student_id, subject=state.get("subject") or None, lesson_id=lesson_id
     )
-    store = _store(config)
-    if store is not None:
-        store_memory = await memory_service.store_retrieve_memory(store, student_id)
-        if not memory.get("mastery") and store_memory.get("mastery"):
-            memory["mastery"] = store_memory["mastery"]
-        if not memory.get("observations") and store_memory.get("observations"):
-            memory["observations"] = store_memory["observations"]
-        if not memory.get("profile") and store_memory.get("profile"):
-            memory["profile"] = store_memory["profile"]
+    # The LangGraph Store mirror is student-global, so it is intentionally not
+    # consulted here. A new topic must never inherit another lesson's memory.
     return {"student_memory": memory, "last_updated": now_iso()}
 
 
