@@ -401,7 +401,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 18),
       decoration: BoxDecoration(
-        color: Colors.black,
+        color: AppColors.surfaceHigh,
         borderRadius: BorderRadius.circular(22),
         boxShadow: <BoxShadow>[
           BoxShadow(
@@ -618,7 +618,7 @@ class _StartButton extends StatelessWidget {
         side: BorderSide(color: AppColors.glassTint.withValues(alpha: 0.22)),
         minimumSize: const Size(132, 52),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
       child: loading
