@@ -367,7 +367,7 @@ state), and typed input is limited to the topic field on Home.
   {"type":"session.update","session":{
     "instructions":"...", "modalities":["audio","text"], "voice":"Cherry",
     "input_audio_format":"pcm", "output_audio_format":"pcm",
-    "turn_detection":{"type":"server_vad","threshold":0.5,"silence_duration_ms":800},
+    "turn_detection":{"type":"semantic_vad_ec","silence_duration_ms":500},
     "input_audio_transcription":{"model":"qwen3-asr-flash-realtime"},
     "tools":[...]}}
   ```
@@ -381,6 +381,13 @@ state), and typed input is limited to the topic field on Home.
   `conversation.item.input_audio_transcription.completed`,
   `response.output_item.added` (function_call name), 
   `response.function_call_arguments.delta/done`, `error`.
+* `semantic_vad_ec` detects end-of-speech by meaning: real user speech (including
+  barge-in while the tutor talks) triggers a turn while backchannels and
+  background noise are filtered. The acoustic `threshold` applies only to
+  `server_vad`.
+* Teaching continues automatically: on a completed, non-tool response the hub
+  sends a bare `response.create`. Only `wait_for_student` pauses the tutor;
+  `user.speech_started` (server→client) tells the UI to flush playback on barge-in.
 * **No `conversation.item.truncate` support** on this API. Barge-in is handled
   by `response.cancel` plus a client-side playback flush; `audio.truncated` is a
   backend→client instruction with the client-measured `played_ms`, not a Qwen
@@ -567,9 +574,8 @@ State: no heavy external state framework; `ChangeNotifier`/`ValueNotifier` +
   reconstruction from snapshot+events.
 * Flutter: `flutter analyze` clean; `flutter test` green for pure logic (document
   reducer, coordinate transform, event ordering/gap handling, audio decode).
-* Integration: no real Qwen key needed — `FakeRealtimeTransport` (backend) and
-  `MockQwenSession` used in tests; Qwen adapter tested for message framing with a
-  local websockets fake server.
+* Integration: tests inject local Qwen/director stand-ins and a websocket test
+  server; production has no offline/fake transport.
 * Contract drift: `backend/tests/test_contract_parity.py` asserts every tool name
   in §4 exists in the registry and every event type in §3 is handled by the
   Flutter document reducer list exported from Dart (kept as a checked-in JSON

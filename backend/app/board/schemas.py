@@ -28,6 +28,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -100,6 +101,33 @@ DataCoord = Annotated[
 ]
 Text2000 = Annotated[str, Field(min_length=1, max_length=MAX_TEXT)]
 ShortText = Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)]
+
+
+# The realtime tutor writes ONE short chalk line per tool call. This is a hard
+# server-side guarantee: even if the model emits a paragraph or several lines,
+# a single board_write_on_board call can only ever put one short line on the
+# board. Additional teaching content must arrive in additional tool calls.
+MAX_BOARD_LINE_WORDS = 8
+MAX_BOARD_LINE_CHARS = 80
+
+
+def _to_single_board_line(value: Any) -> str:
+    """Collapse model text into one short line (first N words, no newlines)."""
+    collapsed = " ".join(str(value).split())
+    if len(collapsed) > MAX_BOARD_LINE_CHARS:
+        head = collapsed[:MAX_BOARD_LINE_CHARS]
+        collapsed = head.rsplit(" ", 1)[0] or head
+    words = collapsed.split(" ")
+    if len(words) > MAX_BOARD_LINE_WORDS:
+        collapsed = " ".join(words[:MAX_BOARD_LINE_WORDS])
+    return collapsed
+
+
+BoardLineText = Annotated[
+    str,
+    BeforeValidator(_to_single_board_line),
+    Field(min_length=1, max_length=MAX_SHORT_TEXT),
+]
 LabelText = Annotated[str, Field(min_length=1, max_length=MAX_LABEL)]
 IdText = Annotated[str, Field(min_length=1, max_length=MAX_ID)]
 
@@ -854,7 +882,14 @@ class WriteOnBoardArgs(StrictModel):
     The ``style`` field maps to the appropriate board event payload.
     """
 
-    text: ShortText = Field(description="Content to write on the board (1..300 chars).")
+    text: BoardLineText = Field(
+        description=(
+            "ONE single short line to write on the board (1-8 words, max 80 chars). "
+            "No newlines, no paragraphs, no lists. Write one line per call and "
+            "make a separate call for each additional line. Even one or two "
+            "words is fine; keep it natural and aligned with what you are saying."
+        )
+    )
     style: Literal[
         "h1", "h2", "h3", "h4", "h5", "h6", "body", "small", "equation", "label"
     ] = Field(description="Text style: heading levels h1..h6, body, small, equation, label.")
@@ -872,79 +907,56 @@ class WriteOnBoardArgs(StrictModel):
     related_concept: IdText | None = Field(
         default=None, description="Optional lesson concept identifier."
     )
+    side_preference: Literal["auto", "left", "right"] = Field(
+        default="auto",
+        description="Preferred horizontal side for layout when space allows. 'auto' lets the layout manager decide.",
+    )
+
+    def _heading_level(self) -> int:
+        """Return the heading level 1-6 for h1-h6 styles, 0 otherwise."""
+        style = self.style.strip().lower()
+        if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            return max(1, min(6, int(style[1:])))
+        return 0
 
     def build_payload(self) -> dict[str, Any]:
-        # Map the visual style to a board event type and payload.
-        # The payload is always compatible with the ``write_text`` event type,
-        # which the Flutter renderer handles via the ``style`` field (heading,
-        # subheading, body, label, etc.). For ``equation`` style we include the
-        # LaTeX source in ``text`` so it appears as readable text on the board.
+        """Build a write_text-compatible payload with semantic layout hints.
+
+        Physical coordinates are assigned by BlackboardLayoutManager in the
+        registry execution path; this payload carries semantic hints only.
+        """
         style = self.style.strip().lower()
         text = self.text
+        heading_level = self._heading_level()
 
-        if style in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            # Heading styles map to write_text with style='heading'/'subheading'.
-            # The Flutter renderer uses the ``style`` field to determine size/position.
-            level = min(int(style[1:]), 2)  # h1->1, h2->2, h3..h6->2
-            position_payload = {"x": 0.08, "y": 0.08}  # default top-left
-            if self.position == "center":
-                position_payload = {"x": 0.5, "y": 0.08}
-            elif self.position == "right":
-                position_payload = {"x": 0.92, "y": 0.08}
-            elif self.position == "next_line":
-                position_payload = {"x": 0.08, "y": 0.22}
+        payload: dict[str, Any] = {
+            "text": text,
+            "color": self.color or "primary",
+            "highlight": self.highlight,
+            "highlight_color": self.highlight_color or "yellow",
+            "writing_style": self.writing_style,
+            "related_concept": self.related_concept,
+            # Semantic layout hints consumed by BlackboardLayoutManager.
+            "position_hint": self.position,
+            "side_preference": self.side_preference,
+        }
 
-            payload = {
-                "text": text,
-                "style": "heading" if level == 1 else "subheading",
-                "position": position_payload,
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+        if heading_level > 0:
+            # Preserve the exact level for Flutter typography (H1-H6).
+            payload["style"] = "heading" if heading_level == 1 else "subheading"
+            payload["heading_level"] = heading_level
         elif style == "equation":
-            # Equation style: include LaTeX in ``text`` so it renders as readable
-            # chalk text on the board. The ``latex`` key is also included for potential
-            # future math rendering. ``write_text`` payload requires a ``text`` field.
-            payload = {
-                "text": text,  # LaTeX expression as plain text for write_text
-                "style": "code",  # code style renders monospace; will contain LaTeX expression
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-                # Also include ``latex`` key for any downstream consumer that expects it.
-                "latex": text,
-            }
+            payload["style"] = "equation"
+            payload["latex"] = text
         elif style == "label":
-            # Label style: short label/text.
-            payload = {
-                "text": text,
-                "style": "label",
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+            payload["style"] = "label"
+        elif style == "small":
+            payload["style"] = "small"
         else:
-            # body, small → write_text
-            payload = {
-                "text": text,
-                "style": style,  # body or small
-                "position": {"x": 0.08, "y": 0.08},
-                "color": self.color or "primary",
-                "highlight": self.highlight,
-                "highlight_color": self.highlight_color,
-                "writing_style": self.writing_style,
-                "related_concept": self.related_concept,
-            }
+            payload["style"] = "body"
 
+        # Provide a conservative default position; layout manager will override.
+        payload.setdefault("position", {"x": 0.08, "y": 0.08})
         return payload
 
 
@@ -1088,6 +1100,15 @@ class LessonCheckAnswerArgs(StrictModel):
     )
     feedback: Annotated[str, Field(min_length=1, max_length=1000)] | None = Field(
         default=None, description="Short, specific feedback for the student."
+    )
+
+
+class WaitForStudentArgs(StrictModel):
+    """``wait_for_student`` — pause automatic teaching and listen for an answer."""
+
+    reason: Annotated[str, Field(min_length=1, max_length=MAX_SHORT_TEXT)] = Field(
+        default="I need the student's answer before continuing.",
+        description="Why the lesson must pause here.",
     )
 
 
@@ -1389,10 +1410,13 @@ _BOARD_SPECS: tuple[tuple[str, str, BoardTargetMode, type[BaseModel], str, tuple
         "write_text",  # maps to write_text event; heading styles map inside build_payload
         "new",
         WriteOnBoardArgs,
-        "Write small, meaningful teaching content directly onto the blackboard. Use for "
-        "headings, subheadings, important words, definitions, labels, equations, and short "
-        "explanations. Prefer this over board_intent for simple text; it avoids Qwen3.7-Flash "
-        "overhead and appears progressively on the board.",
+        "Write ONE single short line of teaching content onto the blackboard per call "
+        "(1-8 words, max 80 chars; one or two words is fine). Never write a paragraph, "
+        "several lines, or a list in one call - make separate calls for each line instead. "
+        "Write the lesson title first with style h1, then add one short line at a time as "
+        "you teach, each line matching what you are saying aloud. Use for headings, "
+        "important words, short definitions, labels, and single-line equations. Prefer "
+        "this over board_intent for simple text; it appears progressively on the board.",
         (),
     ),
     # -----------------------------------------------------------------------
@@ -1464,6 +1488,14 @@ _INTENT_SPECS: tuple[tuple[str, type[BaseModel], str], ...] = (
         "Clear existing board content from the whole board or a specific region when "
         "starting fresh or making space for new material.",
     ),
+    (
+        "wait_for_student",
+        WaitForStudentArgs,
+        "Pause automatic teaching and listen ONLY when you have just asked the "
+        "student a direct question and genuinely need their answer before you can "
+        "continue. Do NOT call this for rhetorical questions, prompts you answer "
+        "yourself, or routine checks - in those cases keep teaching automatically.",
+    ),
 )
 
 # Special: realtime intent schema + internal low-level execution under same name.
@@ -1526,7 +1558,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = _INTENT_TOOL_SPECS + _INTERNAL_BOARD_SPECS + 
 TOOL_SPECS_BY_NAME: dict[str, ToolSpec] = {spec.name: spec for spec in TOOL_SPECS}
 
 BOARD_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS if spec.kind == "board")
-INTENT_TOOL_NAMES: tuple[str, ...] = ("board_intent", "board_highlight", "board_clear_region")
+INTENT_TOOL_NAMES: tuple[str, ...] = (
+    "board_intent",
+    "board_highlight",
+    "board_clear_region",
+    "wait_for_student",
+)
 LESSON_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS if spec.kind == "lesson")
 ALL_TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOL_SPECS)
 INTERNAL_BOARD_TOOL_NAMES: tuple[str, ...] = tuple(
@@ -1680,6 +1717,7 @@ __all__ = [
     "LessonNextConceptArgs",
     "LessonUpdateProgressArgs",
     "LessonAskQuestionArgs",
+    "WaitForStudentArgs",
     "LessonCheckAnswerArgs",
     "LessonRevisitConceptArgs",
     "LessonFinishArgs",

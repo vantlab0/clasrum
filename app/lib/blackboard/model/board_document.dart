@@ -1,5 +1,6 @@
 import 'dart:collection';
 
+import 'board_collision.dart';
 import 'board_element.dart';
 import 'board_event.dart';
 import 'board_geometry.dart';
@@ -162,6 +163,15 @@ class BoardDocument {
   bool get isEmpty => _elements.isEmpty;
 
   bool get hasVisibleElements => _elements.values.any((e) => e.isVisible);
+
+  /// All overlaps in the current document, including intentional ones.
+  List<BoardCollision> get collisions =>
+      BoardCollisionDetector.detect(_elements.values);
+
+  /// Only genuine layout defects: same-group, parent/child, annotation-target
+  /// and same-event overlaps are excluded.
+  List<BoardCollision> get unrelatedCollisions =>
+      BoardCollisionDetector.unrelated(_elements.values);
 
   BoardElement? operator [](String elementId) => _elements[elementId];
 
@@ -758,7 +768,31 @@ class _DocumentBuilder {
 
   BoardDocument commit(BoardEvent event) {
     var warnings = document.warnings;
-    for (final warning in <String>[...event.warnings, ..._warnings]) {
+    final localWarnings = <String>[..._warnings];
+
+    // Validate the positions supplied by the authoritative backend layout
+    // manager. We never move an element here: a genuine overlap is reported as
+    // a warning while group/parent/annotation overlaps are accepted silently.
+    final touched = <String>{
+      if (event.elementId != null) event.elementId!,
+    };
+    for (final element in elements.values) {
+      if (element.createdSequence == event.sequence ||
+          element.updatedSequence == event.sequence ||
+          element.removedAtSequence == event.sequence) {
+        touched.add(element.elementId);
+      }
+    }
+    final overlaps =
+        BoardCollisionDetector.unrelated(elements.values, focusIds: touched);
+    for (final overlap in overlaps.take(3)) {
+      localWarnings.add(
+        'layout overlap: ${overlap.first.elementId} intersects '
+        '${overlap.second.elementId} (${overlap.reason})',
+      );
+    }
+
+    for (final warning in <String>[...event.warnings, ...localWarnings]) {
       warnings = BoardDocument._appendWarning(warnings, warning);
     }
     final applied = Set<String>.of(document.appliedEventIds)

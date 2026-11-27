@@ -122,6 +122,10 @@ class WriteTextPayload extends BoardPayload {
         align = _str(raw['align']),
         fontScale = asDouble(raw['font_scale']),
         maxWidth = asDouble(raw['max_width']),
+        headingLevel = _headingLevelValue(
+          raw['heading_level'] ?? raw['level'] ?? raw['style'],
+        ),
+        latex = _str(raw['latex']),
         _warnings = <String>[
           if (_str(raw['text']) == null) 'write_text.text is required',
         ];
@@ -138,6 +142,8 @@ class WriteTextPayload extends BoardPayload {
   final String? align;
   final double? fontScale;
   final double? maxWidth;
+  final int headingLevel;
+  final String? latex;
 
   final List<String> _warnings;
 
@@ -153,7 +159,7 @@ class WriteHeadingPayload extends BoardPayload {
   WriteHeadingPayload(super.raw)
       : text = _str(raw['text']),
         position = BoardPoint.tryParse(raw['position']),
-        level = (asDouble(raw['level']) ?? 1).round().clamp(1, 2),
+        level = _headingLevelValue(raw['level']),
         color = _str(raw['color']),
         underline = raw['underline'] == true,
         _warnings = <String>[
@@ -942,6 +948,8 @@ class BoardEvent {
     required this.animate,
     required this.createdAt,
     this.source,
+    this.groupId,
+    this.parentId,
     BoardEventType? kind,
     BoardPayload? parsedPayload,
     List<String> warnings = const <String>[],
@@ -980,6 +988,10 @@ class BoardEvent {
       animate: json['animate'] is bool ? json['animate'] as bool : true,
       createdAt: createdAt,
       source: _str(json['source']),
+      groupId: _str(json['group_id'] ??
+          json['groupId'] ?? rawPayload['group_id'] ?? rawPayload['groupId']),
+      parentId: _str(json['parent_id'] ??
+          json['parentId'] ?? rawPayload['parent_id'] ?? rawPayload['parentId']),
       kind: kind,
       parsedPayload: _parsePayload(kind, payload),
       warnings: warnings,
@@ -999,6 +1011,11 @@ class BoardEvent {
   final bool animate;
   final DateTime createdAt;
   final String? source;
+
+  /// Optional layout relationship; same-group and parent/child overlaps are
+  /// intentional and must not be treated as unrelated collisions.
+  final String? groupId;
+  final String? parentId;
 
   /// Parsed enum form of [type].
   final BoardEventType kind;
@@ -1046,6 +1063,17 @@ class BoardEvent {
 
   String? get style => payloadParsed.style;
   String? get color => payloadParsed.color;
+
+  /// Semantic H1-H6 level carried by direct board writes and headings.
+  int get headingLevel {
+    final data = payloadParsed;
+    if (data is WriteTextPayload) return data.headingLevel;
+    if (data is WriteHeadingPayload) return data.level;
+    return _headingLevelValue(
+      payload['heading_level'] ?? payload['level'] ?? payload['style'],
+    );
+  }
+
   double get fontScale {
     final data = payloadParsed;
     if (data is WriteTextPayload) return data.fontScale ?? 1;
@@ -1058,6 +1086,7 @@ class BoardEvent {
     final data = payloadParsed;
     if (data is EquationPayload) return data.latex;
     if (data is UpdateEquationPayload) return data.latex;
+    if (data is WriteTextPayload) return data.latex;
     return null;
   }
 
@@ -1165,6 +1194,17 @@ String? _str(Object? value) {
   if (value == null) return null;
   if (value is String) return value;
   return value.toString();
+}
+
+/// Reads a semantic heading level (h1..h6 or numeric field), clamped to 1..6.
+int _headingLevelValue(Object? raw, {int fallback = 1}) {
+  if (raw is String) {
+    final value = raw.toLowerCase();
+    if (value.length == 2 && value[0] == 'h') {
+      return (int.tryParse(value[1]) ?? fallback).clamp(1, 6);
+    }
+  }
+  return (asDouble(raw)?.round() ?? fallback).clamp(1, 6);
 }
 
 Map<String, dynamic>? _map(Object? value) {

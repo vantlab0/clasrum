@@ -5,6 +5,7 @@
 library;
 
 export 'blackboard_view.dart';
+export 'model/board_collision.dart';
 export 'model/board_document.dart';
 export 'model/board_element.dart';
 export 'model/board_event.dart';

@@ -81,7 +81,7 @@ def _validate_color(value: str) -> str:
 
 ColorStr = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=4, max_length=7),
+    StringConstraints(strip_whitespace=True, min_length=4, max_length=9),
     AfterValidator(_validate_color),
 ]
 

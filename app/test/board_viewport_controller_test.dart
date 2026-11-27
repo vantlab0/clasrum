@@ -1,14 +1,13 @@
 import 'dart:async';
 
+import 'dart:ui' show Offset, Size;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/ui.dart' show Offset, Size;
+import 'package:flutter_test/flutter_test.dart';
 
-import '../../lib/blackboard/model/board_document.dart';
-import '../../lib/blackboard/model/board_element.dart';
-import '../../lib/blackboard/model/board_event.dart';
-import '../../lib/blackboard/model/board_geometry.dart';
-import '../../lib/blackboard/runtime/board_viewport_controller.dart';
+import 'package:pwony/blackboard/model/board_geometry.dart';
+import 'package:pwony/blackboard/runtime/board_viewport_controller.dart';
 
 /// Minimal [TickerProvider] for tests without a Flutter binding.
 class _FakeTickerProvider extends ChangeNotifier implements TickerProvider {
@@ -18,10 +17,12 @@ class _FakeTickerProvider extends ChangeNotifier implements TickerProvider {
   }
 }
 
-class _FakeTicker extends ChangeNotifier implements Ticker {
-  _FakeTicker(this._onTick, {String? debugLabel}) : _debugLabel = debugLabel;
+class _FakeTicker extends Ticker {
+  _FakeTicker(TickerCallback onTick, {String? debugLabel})
+      : _onTick = onTick,
+        super(onTick, debugLabel: debugLabel);
+
   final TickerCallback _onTick;
-  final String? _debugLabel;
   bool _isTicking = false;
   Timer? _timer;
 
@@ -29,11 +30,18 @@ class _FakeTicker extends ChangeNotifier implements Ticker {
   bool get isTicking => _isTicking;
 
   @override
-  void start() {
+  TickerFuture start() {
     _isTicking = true;
+    _timer?.cancel();
     _timer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (_isTicking) _onTick(const Duration(milliseconds: 16));
+      if (_isTicking) {
+        // Ticker callbacks receive elapsed time since start. A deterministic
+        // fixed step is enough for the viewport cancellation tests.
+        // ignore: invalid_use_of_visible_for_testing_member
+        _onTick(const Duration(milliseconds: 16));
+      }
     });
+    return TickerFuture.complete();
   }
 
   @override
@@ -51,6 +59,8 @@ class _FakeTicker extends ChangeNotifier implements Ticker {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('BoardViewportController defaults', () {
     test('starts at zero offset and unit scale', () {
       final c = BoardViewportController();
@@ -116,14 +126,15 @@ void main() {
       c.onViewportSizeChanged(const Size(400, 800));
 
       // Start an animation.
+      // Extend past the comfortable margin so the controller has to move.
       c.focusOnRect(
-        const BoardRect(0.8, 0.8, 0.2, 0.2),
+        const BoardRect(0.8, 0.8, 0.4, 0.4),
         animate: true,
       );
       expect(c.isAnimating, isTrue);
 
       // Immediately override with setViewport.
-      c.setViewport(const Offset(0.1, 0.1), 1.0);
+      c.setViewport(const Offset(0.1, 0.1), 2.0);
       expect(c.offset, const Offset(0.1, 0.1));
       expect(c.isAnimating, isFalse);
     });
@@ -133,13 +144,14 @@ void main() {
     test('clamps to content bounds when set', () {
       final c = BoardViewportController();
       c.onViewportSizeChanged(const Size(400, 400));
-      // Content occupies right half of board.
+      // Content occupies right half of board. At 2x zoom the visible window
+      // fits inside it, so panning left must clamp to the content's left edge
+      // (minus the viewport's 10% comfort margin).
       c.onContentBoundsChanged(
-        const BoardRect(0.6, 0.0, 0.4, 1.0),
+        const BoardRect(0.5, 0.0, 0.5, 1.0),
       );
-      // Pan left past content — should clamp.
-      c.setViewport(const Offset(-1.0, 0.0), 1.0);
-      expect(c.offset.dx, greaterThanOrEqualTo(0.5));
+      c.setViewport(const Offset(-1.0, 0.0), 2.0);
+      expect(c.offset.dx, greaterThanOrEqualTo(0.45));
     });
   });
 
@@ -158,7 +170,7 @@ void main() {
       final c = BoardViewportController();
       c.onViewportSizeChanged(const Size(400, 400));
       expect(
-        c.isComfortablyVisible(const BoardRect(0.8, 0.8, 0.3, 0.3)),
+        c.isComfortablyVisible(const BoardRect(0.85, 0.85, 0.3, 0.3)),
         isFalse,
       );
     });

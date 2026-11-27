@@ -1,31 +1,90 @@
-"""Deterministic, lightweight region-based layout engine for board intents.
+"""Deterministic blackboard layout engine.
 
-The text model describes *what* to place; this module decides *where* in the
-normalized board coordinate space (``[0, 1]`` for both axes, origin top-left).
+The text/visual model describes *what* to place; this module decides *where*.
+It is the single backend authority for physical placement on the board.
 
-Algorithm (by design, no force-directed / heavy dependencies):
-* divide the board into named logical regions with preferred rects;
-* resolve a target region from explicit hints, ``relative_to`` anchors, or by
-  picking the least-occupied region;
-* place each action's element inside the region on a simple grid cursor, nudging
-  it to the first non-colliding slot when an overlap is detected;
-* never move or mutate existing elements – only positions assigned to the new
-  actions are adjusted.
+Coordinate system
+-----------------
+There is exactly one convention, shared with Flutter: normalized coordinates,
+origin at the top-left, ``x/y/w/h`` in ``[0, 1]``.  No pixel conversions happen
+here - the client applies its own viewport transform.
 
-All public helpers are pure (no I/O, no DB).
+Design rules
+------------
+* Existing elements are immutable obstacles; only new elements get positions.
+* A new unrelated element is never placed over existing content.  If nothing
+  fits (even after a bounded shrink inside readability limits) the placement
+  fails explicitly with :class:`LayoutNoSpaceError` instead of silently
+  overlapping or going off-board.
+* Elements of the same layout group may overlap by design (table cells inside
+  table bounds, labels on shapes, connected diagram parts).  A group is
+  positioned and moved as one unit.
+* Placement is deterministic for a given document + request sequence, and all
+  state mutation is guarded by a re-entrant lock so concurrent tool calls
+  cannot claim the same free region.
 """
 from __future__ import annotations
 
+import asyncio
 import math
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
-# Normalized board bounds.
-BOARD_W = 1.0
-BOARD_H = 1.0
 EPS = 1e-6
 
-# Preferred rects for named regions: (x, y, w, h).
+# One lock per lesson serializes "reconstruct document -> allocate region ->
+# append event", so concurrent tool calls cannot claim the same free space.
+_layout_locks: dict[str, asyncio.Lock] = {}
+
+
+def board_layout_lock(lesson_id: str) -> asyncio.Lock:
+    """Return the async layout/commit lock for a lesson."""
+    lock = _layout_locks.get(lesson_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _layout_locks[lesson_id] = lock
+    return lock
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LayoutConfig:
+    """Tunable geometry for the normalized board canvas."""
+
+    width: float = 1.0
+    height: float = 1.0
+    margin_x: float = 0.04
+    margin_y: float = 0.045
+    section_gap: float = 0.032
+    element_gap: float = 0.014
+    max_content_width: float = 0.72
+    min_width: float = 0.06
+    min_height: float = 0.028
+    step_x: float = 0.01
+    step_y: float = 0.01
+
+    @property
+    def safe(self) -> "Rect":
+        return Rect(
+            self.margin_x,
+            self.margin_y,
+            max(0.1, self.width - 2 * self.margin_x),
+            max(0.1, self.height - 2 * self.margin_y),
+        )
+
+    @property
+    def column_width(self) -> float:
+        """Width of the natural lecture-writing column."""
+        return min(self.max_content_width, self.safe.w)
+
+
+DEFAULT_CONFIG = LayoutConfig()
+
+# Named regions are expressed once, in the same normalized space as elements.
 REGION_RECTS: dict[str, tuple[float, float, float, float]] = {
     "left": (0.04, 0.10, 0.44, 0.82),
     "right": (0.52, 0.10, 0.44, 0.82),
@@ -36,42 +95,66 @@ REGION_RECTS: dict[str, tuple[float, float, float, float]] = {
     "bottom_right": (0.52, 0.60, 0.44, 0.34),
     "top_left": (0.04, 0.06, 0.44, 0.34),
     "top_right": (0.52, 0.06, 0.44, 0.34),
-    "full": (0.04, 0.08, 0.92, 0.86),
+    "full": (0.04, 0.045, 0.92, 0.91),
 }
 
-DEFAULT_REGION = "right"
+DEFAULT_REGION = "full"
 FALLBACK_ORDER = (
-    "right",
+    "full",
     "left",
+    "right",
     "bottom",
     "top",
     "center",
-    "bottom_right",
     "bottom_left",
-    "top_right",
+    "bottom_right",
     "top_left",
+    "top_right",
 )
 
-# Default element footprint (w, h) by logical action kind.
+# Conservative footprints by logical action kind (used when no text is given).
 DEFAULT_SIZES: dict[str, tuple[float, float]] = {
-    "heading": (0.40, 0.08),
-    "text": (0.38, 0.10),
-    "definition": (0.40, 0.12),
-    "bullet_list": (0.36, 0.18),
-    "equation": (0.30, 0.08),
+    "heading": (0.42, 0.075),
+    "text": (0.40, 0.065),
+    "definition": (0.42, 0.10),
+    "bullet_list": (0.38, 0.18),
+    "equation": (0.32, 0.09),
     "diagram": (0.36, 0.28),
     "coordinate_system": (0.34, 0.28),
-    "graph": (0.34, 0.28),
-    "plot": (0.34, 0.28),
+    "graph": (0.36, 0.30),
+    "plot": (0.36, 0.30),
+    "table": (0.46, 0.26),
+    "illustration": (0.40, 0.32),
     "label": (0.18, 0.05),
     "shape": (0.20, 0.14),
     "arrow": (0.20, 0.10),
     "node": (0.18, 0.08),
     "annotation": (0.18, 0.06),
 }
-GRID_STEP_X = 0.04
-GRID_STEP_Y = 0.05
-MAX_PLACEMENT_TRIES = 80
+
+HEADING_SCALE: dict[int, float] = {1: 2.0, 2: 1.65, 3: 1.4, 4: 1.2, 5: 1.05, 6: 0.95}
+BODY_FONT_NORM_H = 0.032  # matches Flutter BoardTextMetrics
+
+
+class LayoutNoSpaceError(RuntimeError):
+    """Raised when an element cannot be placed without overlapping/off-board."""
+
+    code = "no_board_space"
+
+    def __init__(self, message: str = "no free board region for element", *, kind: str = "element"):
+        super().__init__(message)
+        self.kind = kind
+        self.retryable = True
+
+
+# ---------------------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------------------
+
+
+def _r(value: float) -> float:
+    rounded = round(float(value), 4)
+    return 0.0 if rounded == 0 else rounded
 
 
 @dataclass
@@ -89,12 +172,24 @@ class Rect:
     def y2(self) -> float:
         return self.y + self.h
 
-    def clamp_to_board(self) -> "Rect":
-        w = min(max(self.w, 0.02), BOARD_W)
-        h = min(max(self.h, 0.02), BOARD_H)
-        x = max(0.0, min(self.x, BOARD_W - w))
-        y = max(0.0, min(self.y, BOARD_H - h))
-        return Rect(x=_r(x), y=_r(y), w=_r(w), h=_r(h))
+    @property
+    def cx(self) -> float:
+        return self.x + self.w / 2
+
+    @property
+    def cy(self) -> float:
+        return self.y + self.h / 2
+
+    @property
+    def area(self) -> float:
+        return max(0.0, self.w) * max(0.0, self.h)
+
+    def clamp_to_board(self, config: LayoutConfig = DEFAULT_CONFIG) -> "Rect":
+        w = min(max(self.w, config.min_width), config.safe.w)
+        h = min(max(self.h, config.min_height), config.safe.h)
+        x = max(config.safe.x, min(self.x, config.safe.x2 - w))
+        y = max(config.safe.y, min(self.y, config.safe.y2 - h))
+        return Rect(_r(x), _r(y), _r(w), _r(h))
 
     def intersects(self, other: "Rect") -> bool:
         return not (
@@ -104,121 +199,181 @@ class Rect:
             or other.y2 <= self.y + EPS
         )
 
+    def contains(self, other: "Rect") -> bool:
+        return (
+            other.x >= self.x - EPS
+            and other.y >= self.y - EPS
+            and other.x2 <= self.x2 + EPS
+            and other.y2 <= self.y2 + EPS
+        )
+
+    def scaled(self, factor: float, config: LayoutConfig = DEFAULT_CONFIG) -> "Rect":
+        w = max(config.min_width, self.w * factor)
+        h = max(config.min_height, self.h * factor)
+        return Rect(self.x, self.y, min(w, config.safe.w), min(h, config.safe.h)).clamp_to_board(config)
+
     def as_payload(self) -> dict[str, float]:
         return {"x": _r(self.x), "y": _r(self.y), "w": _r(self.w), "h": _r(self.h)}
 
 
 @dataclass
-class LayoutState:
-    """Mutable placement state for one planning pass."""
+class Occupied:
+    rect: Rect
+    element_id: str | None = None
+    group_id: str | None = None
+    parent_id: str | None = None
+    kind: str = "element"
 
-    occupied: list[Rect] = field(default_factory=list)
+    def related_to(self, group_id: str | None, parent_id: str | None) -> bool:
+        """True when a candidate belongs to the same intentional layout group."""
+        if group_id and self.group_id == group_id:
+            return True
+        if parent_id and (self.element_id == parent_id or self.group_id == parent_id):
+            return True
+        return bool(group_id and self.parent_id == group_id)
+
+
+@dataclass
+class LayoutState:
+    """Occupied regions for one planning pass."""
+
+    entries: list[Occupied] = field(default_factory=list)
+    config: LayoutConfig = DEFAULT_CONFIG
     region_cursors: dict[str, tuple[float, float]] = field(default_factory=dict)
 
-    def add(self, rect: Rect) -> None:
-        self.occupied.append(rect)
+    @property
+    def occupied(self) -> list[Rect]:
+        return [entry.rect for entry in self.entries]
 
-    def collides(self, rect: Rect) -> bool:
-        return any(rect.intersects(existing) for existing in self.occupied)
+    def add(self, rect: Rect, *, element_id: str | None = None, group_id: str | None = None,
+            parent_id: str | None = None, kind: str = "element") -> None:
+        self.entries.append(Occupied(rect, element_id, group_id, parent_id, kind))
+
+    def collides(self, rect: Rect, *, group_id: str | None = None, parent_id: str | None = None) -> bool:
+        return any(
+            rect.intersects(entry.rect)
+            for entry in self.entries
+            if not entry.related_to(group_id, parent_id)
+        )
 
 
-def _r(value: float) -> float:
-    rounded = round(float(value), 4)
-    return 0.0 if rounded == 0 else rounded
+@dataclass
+class PlacementResult:
+    ok: bool
+    kind: str
+    rect: Rect | None = None
+    region: str | None = None
+    reason: str | None = None
+
+    @property
+    def payload(self) -> dict[str, float]:
+        if self.rect is None:
+            return {}
+        return self.rect.as_payload()
 
 
-def rect_from_element(element: Mapping[str, Any]) -> Rect | None:
-    """Best-effort bounds for an existing board element."""
+# ---------------------------------------------------------------------------
+# Existing-document geometry
+# ---------------------------------------------------------------------------
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def rect_from_element(element: Mapping[str, Any], config: LayoutConfig = DEFAULT_CONFIG) -> Rect | None:
+    """Best-effort bounds for an existing board element (never raises)."""
     if element.get("removed_at_sequence") is not None:
         return None
-    position = element.get("position") or (element.get("payload") or {}).get("position") or {}
-    size = element.get("size") or (element.get("payload") or {}).get("size") or {}
-    if isinstance(position, dict) and "x" in position and "y" in position:
-        try:
-            x = float(position["x"])
-            y = float(position["y"])
-        except (TypeError, ValueError):
-            return None
-        w = 0.18
-        h = 0.08
-        if isinstance(size, dict):
-            try:
-                if "w" in size:
-                    w = float(size["w"])
-                if "h" in size:
-                    h = float(size["h"])
-            except (TypeError, ValueError):
-                pass
-        else:
-            # Heuristic by element type.
-            etype = str(element.get("type") or "")
-            if "equation" in etype:
-                w, h = 0.30, 0.08
-            elif "heading" in etype:
-                w, h = 0.40, 0.08
-            elif "bullet" in etype:
-                w, h = 0.36, 0.18
-            elif "coordinate" in etype or "graph" in etype or "plot" in etype:
-                w, h = 0.34, 0.28
-            elif "diagram" in etype:
-                w, h = 0.36, 0.28
-            elif "definition" in etype:
-                w, h = 0.40, 0.12
-        return Rect(x, y, max(w, 0.02), max(h, 0.02)).clamp_to_board()
-
-    # Fall back to point clouds (lines/paths/arrows).
-    payload = element.get("payload") or {}
-    points = payload.get("points") or []
-    if not points and isinstance(payload.get("start"), dict) and isinstance(payload.get("end"), dict):
-        points = [payload["start"], payload["end"]]
-    xs: list[float] = []
-    ys: list[float] = []
-    for point in points:
-        if not isinstance(point, dict):
-            continue
-        try:
-            xs.append(float(point["x"]))
-            ys.append(float(point["y"]))
-        except (TypeError, ValueError, KeyError):
-            continue
-    if xs and ys:
-        pad = 0.01
-        return Rect(
-            min(xs) - pad,
-            min(ys) - pad,
-            max(xs) - min(xs) + pad * 2,
-            max(ys) - min(ys) + pad * 2,
-        ).clamp_to_board()
-    return None
+    payload = element.get("payload") if isinstance(element.get("payload"), Mapping) else {}
+    position = element.get("position") or payload.get("position") or {}
+    size = element.get("size") or payload.get("size")
+    rect: Rect | None = None
+    if isinstance(position, Mapping):
+        x, y = _as_float(position.get("x")), _as_float(position.get("y"))
+        if x is not None and y is not None:
+            w, h = 0.18, 0.08
+            if isinstance(size, Mapping):
+                w = _as_float(size.get("w")) or w
+                h = _as_float(size.get("h")) or h
+            else:
+                etype = str(element.get("type") or "")
+                if "equation" in etype:
+                    w, h = 0.32, 0.09
+                elif "heading" in etype:
+                    w, h = 0.42, 0.08
+                elif "bullet" in etype:
+                    w, h = 0.38, 0.18
+                elif any(t in etype for t in ("coordinate", "graph", "plot")):
+                    w, h = 0.36, 0.30
+                elif "diagram" in etype or "plan" in etype:
+                    w, h = 0.36, 0.28
+                elif "definition" in etype:
+                    w, h = 0.42, 0.10
+            rect = Rect(x, y, max(w, 0.02), max(h, 0.02))
+    if rect is None:
+        points = payload.get("points") or []
+        if not points and isinstance(payload.get("start"), Mapping) and isinstance(payload.get("end"), Mapping):
+            points = [payload["start"], payload["end"]]
+        xs, ys = [], []
+        for point in points:
+            if not isinstance(point, Mapping):
+                continue
+            px, py = _as_float(point.get("x")), _as_float(point.get("y"))
+            if px is not None and py is not None:
+                xs.append(px)
+                ys.append(py)
+        if xs and ys:
+            pad = 0.01
+            rect = Rect(
+                min(xs) - pad, min(ys) - pad,
+                max(xs) - min(xs) + 2 * pad, max(ys) - min(ys) + 2 * pad,
+            )
+    return rect.clamp_to_board(config) if rect is not None else None
 
 
-def build_layout_state(document: Mapping[str, Any] | None) -> LayoutState:
-    state = LayoutState()
+def build_layout_state(document: Mapping[str, Any] | None, config: LayoutConfig = DEFAULT_CONFIG) -> LayoutState:
+    state = LayoutState(config=config)
     if not document:
         return state
     for element in document.get("elements", []) or []:
-        rect = rect_from_element(element)
-        if rect is not None:
-            state.add(rect)
+        if not isinstance(element, Mapping):
+            continue
+        rect = rect_from_element(element, config)
+        if rect is None:
+            continue
+        group_id = str(element.get("group_id") or (element.get("payload") or {}).get("group_id") or "") or None
+        parent_id = element.get("element_id")
+        state.add(
+            rect,
+            element_id=str(element.get("element_id") or "") or None,
+            group_id=group_id,
+            parent_id=str(parent_id) if parent_id else None,
+            kind=str(element.get("type") or "element"),
+        )
     return state
 
 
-def region_rect(name: str | None) -> Rect:
-    rect = REGION_RECTS.get(str(name or DEFAULT_REGION)) or REGION_RECTS[DEFAULT_REGION]
-    return Rect(*rect)
+def region_rect(name: str | None, config: LayoutConfig = DEFAULT_CONFIG) -> Rect:
+    raw = REGION_RECTS.get(str(name or DEFAULT_REGION))
+    if raw is None:
+        raw = REGION_RECTS[DEFAULT_REGION]
+    return Rect(*raw).clamp_to_board(config)
 
 
 def region_occupancy(state: LayoutState, name: str) -> float:
-    target = region_rect(name)
-    if target.w <= 0 or target.h <= 0:
+    target = region_rect(name, state.config)
+    if target.area <= 0:
         return 0.0
-    area = target.w * target.h
     overlap = 0.0
-    for occ in state.occupied:
-        ix = max(0.0, min(target.x2, occ.x2) - max(target.x, occ.x))
-        iy = max(0.0, min(target.y2, occ.y2) - max(target.y, occ.y))
-        overlap += ix * iy
-    return overlap / area
+    for entry in state.entries:
+        dx = max(0.0, min(target.x2, entry.rect.x2) - max(target.x, entry.rect.x))
+        dy = max(0.0, min(target.y2, entry.rect.y2) - max(target.y, entry.rect.y))
+        overlap += dx * dy
+    return min(1.0, overlap / target.area)
 
 
 def choose_region(
@@ -228,46 +383,121 @@ def choose_region(
     relative_to: str | None = None,
     document: Mapping[str, Any] | None = None,
 ) -> str:
+    normalized = _normalize_region_hint(hint)
+    if normalized:
+        return normalized
     if relative_to and document:
-        # Place near the referenced element's region.
         for element in document.get("elements", []) or []:
-            if element.get("element_id") == relative_to and element.get("removed_at_sequence") is None:
-                rect = rect_from_element(element)
-                if rect is not None:
-                    cx = rect.x + rect.w / 2
-                    cy = rect.y + rect.h / 2
-                    # Prefer to the right of the anchor, else below, else least occupied.
-                    if cx < 0.55:
-                        return "right"
-                    if cy < 0.55:
-                        return "bottom"
-                    return "left"
-    if hint and hint in REGION_RECTS:
-        return hint
-    # Pick the least occupied region from the fallback order.
-    best = DEFAULT_REGION
-    best_score = math.inf
+            if element.get("element_id") != relative_to or element.get("removed_at_sequence") is not None:
+                continue
+            rect = rect_from_element(element, state.config)
+            if rect is None:
+                continue
+            if rect.cx < 0.5 and rect.cy + rect.h < 0.72:
+                return "right"
+            if rect.y2 < 0.65:
+                return "bottom"
+            return "top"
+    best, best_score = DEFAULT_REGION, math.inf
     for name in FALLBACK_ORDER:
-        score = region_occupancy(state, name)
-        if score < best_score - 1e-9:
-            best = name
-            best_score = score
-            if best_score <= 0.0:
-                break
+        score = region_occupancy(state, name) + 0.001 * FALLBACK_ORDER.index(name)
+        if score < best_score:
+            best, best_score = name, score
     return best
 
 
-def _default_size(action: Mapping[str, Any]) -> tuple[float, float]:
-    kind = str(action.get("kind") or action.get("type") or "text").lower()
-    # Map common action types to footprint kinds.
+# ---------------------------------------------------------------------------
+# Size estimation
+# ---------------------------------------------------------------------------
+
+
+def estimate_text_size(
+    text: str,
+    *,
+    style: str = "body",
+    heading_level: int | None = None,
+    font_scale: float = 1.0,
+    max_width: float | None = None,
+    config: LayoutConfig | None = None,
+) -> tuple[float, float]:
+    """Estimate normalized ``(w, h)`` for a chalk text element."""
+    safe_text = " ".join(str(text or "").split())
+    if not safe_text:
+        return (0.12, 0.04)
+    style_key = (style or "body").strip().lower()
+    level = int(heading_level or 0)
+    if level <= 0 and style_key in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        level = int(style_key[1:])
+    scale = HEADING_SCALE.get(level, 1.0) if level > 0 else 1.0
+    if style_key in {"small", "caption", "note"}:
+        scale *= 0.85
+    if style_key == "label":
+        scale *= 0.8
+    if style_key == "code":
+        scale *= 0.95
+    font_h = BODY_FONT_NORM_H * scale * max(0.5, min(2.5, float(font_scale or 1.0)))
+    glyph_w = font_h * 0.52
+    usable_w = max(0.12, min(
+        config.max_content_width if config else DEFAULT_CONFIG.max_content_width,
+        float(max_width or (config.max_content_width if config else DEFAULT_CONFIG.max_content_width)),
+    ))
+    if style_key == "label":
+        usable_w = min(usable_w, 0.36)
+    natural_w = max(glyph_w * 2, len(safe_text) * glyph_w)
+    width = min(natural_w, usable_w)
+    lines = min(12, max(1, int(math.ceil(natural_w / max(usable_w, EPS)))))
+    height = lines * font_h * 1.35 + font_h * 0.35
+    return (_r(max(0.08, min(0.92, width))), _r(max(0.035, min(0.60, height))))
+
+
+def estimate_equation_size(latex: str, *, font_scale: float = 1.0) -> tuple[float, float]:
+    text = str(latex or "").strip()
+    scale = max(0.5, min(2.5, float(font_scale or 1.0)))
+    width = max(0.16, min(0.82, len(text) * 0.018 * scale + 0.04))
+    height = max(0.07, min(0.26, 0.075 * scale))
+    if any(token in text for token in ("\\frac", "\\sum", "\\int", "\\sqrt")):
+        height = min(0.30, height * 1.5)
+    return (_r(width), _r(height))
+
+
+def estimate_table_size(rows: int, columns: int, *, cell_chars: int = 12) -> tuple[float, float]:
+    """Conservative footprint for a table generated as part of a visual."""
+    cols = max(1, min(12, int(columns or 1)))
+    count = max(1, min(30, int(rows or 1)))
+    width = min(DEFAULT_CONFIG.max_content_width, max(0.20, cols * 0.09 + max(0, cell_chars - 8) * 0.004 * cols))
+    height = min(0.55, max(0.10, count * 0.045 + 0.04))
+    return (_r(width), _r(height))
+
+
+def _default_size(action: Mapping[str, Any], config: LayoutConfig = DEFAULT_CONFIG) -> tuple[float, float]:
+    payload = action.get("payload") if isinstance(action.get("payload"), Mapping) else action
+    kind = str(action.get("kind") or action.get("type") or (payload or {}).get("style") or "text").lower()
+    style = str((payload or {}).get("style") or "").lower()
+    text = str((payload or {}).get("text") or (payload or {}).get("latex") or "")
+    font_scale = _as_float((payload or {}).get("font_scale")) or 1.0
+
+    if kind in {"write_equation", "equation"} or style == "equation":
+        return estimate_equation_size(text or str((payload or {}).get("latex") or ""), font_scale=font_scale)
+    if kind in {"write_text", "write_heading", "add_text", "text"} or style in {
+        "heading", "subheading", "body", "small", "label", "definition", "caption", "note", "code",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+    }:
+        return estimate_text_size(
+            text,
+            style=style,
+            heading_level=(payload or {}).get("heading_level"),
+            font_scale=font_scale,
+            max_width=(payload or {}).get("max_width"),
+            config=config,
+        )
+    if kind in {"table", "comparison_table", "data_table"}:
+        return estimate_table_size(
+            int((payload or {}).get("rows") or 4), int((payload or {}).get("columns") or 3)
+        )
     mapping = {
         "add_node": "node",
-        "add_text": "text",
-        "write_text": "text",
-        "write_heading": "heading",
-        "write_definition": "definition",
         "write_bullet_list": "bullet_list",
-        "write_equation": "equation",
+        "write_definition": "definition",
         "draw_diagram": "diagram",
         "create_coordinate_system": "coordinate_system",
         "plot_function": "plot",
@@ -281,38 +511,368 @@ def _default_size(action: Mapping[str, Any]) -> tuple[float, float]:
     return DEFAULT_SIZES.get(key, (0.30, 0.10))
 
 
-def _next_position(region: str, state: LayoutState, w: float, h: float) -> Rect:
-    area = region_rect(region)
-    cursor = state.region_cursors.get(region)
-    if cursor is None:
-        cursor = (area.x, area.y)
-    x, y = cursor
+def _normalize_region_hint(hint: str | None) -> str | None:
+    if not hint:
+        return None
+    value = str(hint).strip().lower()
+    aliases = {"next_line": None, "auto": None, "left": "left", "right": "right", "center": "center"}
+    return value if value in REGION_RECTS else aliases.get(value)
 
-    for _ in range(MAX_PLACEMENT_TRIES):
-        candidate = Rect(x, y, w, h).clamp_to_board()
-        # Keep inside region when possible.
-        if candidate.x + candidate.w > area.x2 + EPS or candidate.y + candidate.h > area.y2 + EPS:
-            # Wrap to next column / reset.
-            x = area.x
-            y += GRID_STEP_Y
-            if y + h > area.y2 + EPS:
-                # Region full: scan from region origin.
-                y = area.y
-                x = area.x
-            candidate = Rect(x, y, w, h).clamp_to_board()
-        if not state.collides(candidate):
-            state.region_cursors[region] = (x, y + candidate.h + 0.02)
-            return candidate
-        # Advance cursor.
-        x += GRID_STEP_X
-        if x + w > area.x2 + EPS:
-            x = area.x
-            y += GRID_STEP_Y
-        if y + h > area.y2 + EPS:
-            y = area.y
-            x = area.x
-    # Fallback: place at region origin clamped (even if overlapping, better than failing).
-    return Rect(area.x, area.y, w, h).clamp_to_board()
+
+def _side_to_region(side: str | None) -> str | None:
+    value = str(side or "auto").strip().lower()
+    if value == "left":
+        return "left"
+    if value == "right":
+        return "right"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Layout manager
+# ---------------------------------------------------------------------------
+
+
+class BlackboardLayoutManager:
+    """The single backend authority for blackboard element placement.
+
+    One instance represents one planning pass over a document snapshot.  It is
+    safe to share an instance across concurrent callers: reservations are
+    serialized with a re-entrant lock.
+    """
+
+    def __init__(self, document: Mapping[str, Any] | None = None, config: LayoutConfig | None = None):
+        self.config = config or DEFAULT_CONFIG
+        self._lock = threading.RLock()
+        self.refresh(document)
+
+    def refresh(self, document: Mapping[str, Any] | None) -> None:
+        with self._lock:
+            self.document = document or {"elements": []}
+            self.state = build_layout_state(self.document, self.config)
+            self.state.region_cursors.clear()
+
+    # -- public placement API ------------------------------------------------
+
+    def place_element(
+        self,
+        kind: str,
+        *,
+        width: float | None = None,
+        height: float | None = None,
+        payload: Mapping[str, Any] | None = None,
+        position_hint: str | None = None,
+        side_preference: str | None = None,
+        region: str | None = None,
+        related_to: str | None = None,
+        group_id: str | None = None,
+        parent_id: str | None = None,
+        element_id: str | None = None,
+        section_break: bool = False,
+        prefer_horizontal: bool = False,
+    ) -> PlacementResult:
+        """Place one element and reserve its region.
+
+        Returns a controlled failure result (never an overlapping rect) when
+        the board cannot accommodate the element.
+        """
+        data = dict(payload or {})
+        default_w, default_h = _default_size({"kind": kind, "payload": data}, self.config)
+        w = _as_float(width) if width is not None else None
+        h = _as_float(height) if height is not None else None
+        w = max(self.config.min_width, min(self.config.safe.w, w if w and w > 0 else default_w))
+        h = max(self.config.min_height, min(self.config.safe.h, h if h and h > 0 else default_h))
+        size = Rect(0, 0, _r(w), _r(h))
+
+        with self._lock:
+            hint = _normalize_region_hint(position_hint) or _normalize_region_hint(region)
+            side = _side_to_region(side_preference)
+            anchor = self._element_rect(related_to) or self._element_rect(data.get("related_to"))
+
+            candidates: list[tuple[str, Rect]] = []
+            # 1. Side-by-side when requested and there is room next to the anchor.
+            if anchor is not None and (prefer_horizontal or side in {"left", "right"}):
+                beside = self._beside_anchor(anchor, size, side)
+                if beside is not None:
+                    candidates.append((self._region_of(beside), beside))
+                # Fallback: directly below the anchor (vertical layout).
+                below = Rect(anchor.x, anchor.y2 + self.config.element_gap, size.w, size.h)
+                candidates.append((self._region_of(below), below.clamp_to_board(self.config)))
+            # 2. Explicit side preference without an anchor.
+            if side and anchor is None:
+                candidates.append((side, region_rect(side, self.config)))
+            # 3. Explicit region hint.
+            if hint:
+                candidates.append((hint, region_rect(hint, self.config)))
+            # 4. Natural vertical reading flow (the default for teaching content).
+            candidates.append(self._flow_position(size, section_break=section_break, prefer_left=(side == "left")))
+            # 5. Any remaining region, in priority order.
+            for name in FALLBACK_ORDER:
+                candidates.append((name, region_rect(name, self.config)))
+
+            for scale in (1.0, 0.9, 0.8, 0.7):
+                target = size.scaled(scale, self.config)
+                if target.w < self.config.min_width - EPS or target.h < self.config.min_height - EPS:
+                    continue
+                for name, area in candidates:
+                    rect = self._scan_area(area, target, group_id=group_id, parent_id=parent_id)
+                    if rect is None:
+                        continue
+                    self.state.add(
+                        rect, element_id=element_id, group_id=group_id,
+                        parent_id=parent_id, kind=kind,
+                    )
+                    self._advance_flow(name, rect, section_break=section_break)
+                    return PlacementResult(True, kind, rect, name)
+            return PlacementResult(False, kind, None, None, "no_space")
+
+    def place_text(self, payload: Mapping[str, Any], *, default_region: str | None = None) -> dict[str, Any]:
+        """Position a ``write_text`` payload.  Raises on layout failure."""
+        data = dict(payload)
+        style = str(data.get("style") or "body").lower()
+        kind = "equation" if style == "equation" else "text"
+        level = int(data.get("heading_level") or 0)
+        result = self.place_element(
+            kind,
+            payload=data,
+            position_hint=data.get("position_hint") or default_region,
+            side_preference=data.get("side_preference"),
+            region=default_region,
+            related_to=data.get("related_concept"),
+            element_id=data.get("element_id"),
+            section_break=level in {1, 2},
+        )
+        if not result.ok or result.rect is None:
+            raise LayoutNoSpaceError(kind=kind)
+        data["position"] = {"x": result.rect.x, "y": result.rect.y}
+        data["size"] = {"w": result.rect.w, "h": result.rect.h}
+        data["region"] = result.region
+        return data
+
+    def place_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        kind: str = "text",
+        default_region: str | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility wrapper around :meth:`place_element` for arbitrary payloads."""
+        data = dict(payload)
+        result = self.place_element(
+            kind, payload=data, region=default_region,
+            position_hint=data.get("position_hint"),
+            side_preference=data.get("side_preference"),
+            group_id=data.get("group_id"),
+            parent_id=data.get("parent_id"),
+            element_id=data.get("element_id"),
+        )
+        if not result.ok or result.rect is None:
+            raise LayoutNoSpaceError(kind=kind)
+        data["position"] = {"x": result.rect.x, "y": result.rect.y}
+        data["size"] = {"w": result.rect.w, "h": result.rect.h}
+        data["region"] = result.region
+        return data
+
+    def place_group(
+        self,
+        items: Iterable[Mapping[str, Any]],
+        *,
+        preferred_region: str | None = None,
+        side_preference: str | None = None,
+        group_id: str | None = None,
+        related_to: str | None = None,
+        kind: str = "diagram",
+    ) -> PlacementResult:
+        """Place a complete visual (table/diagram/graph) as one rigid group.
+
+        Each item needs ``dx``/``dy`` (relative to the group origin) and
+        ``width``/``height``.  Internal relationships are preserved exactly:
+        either every item is placed or the whole group fails.
+        """
+        entries = [dict(item) for item in items]
+        if not entries:
+            return PlacementResult(False, kind, None, None, "empty_group")
+        bounds = self._group_bounds(entries)
+        result = self.place_element(
+            kind,
+            width=bounds.w, height=bounds.h,
+            region=preferred_region,
+            position_hint=preferred_region,
+            side_preference=side_preference,
+            related_to=related_to,
+            group_id=group_id or "group",
+            element_id=group_id,
+        )
+        if not result.ok or result.rect is None:
+            return result
+        origin_x, origin_y = result.rect.x - bounds.x, result.rect.y - bounds.y
+        for item in entries:
+            rect = Rect(
+                origin_x + float(item.get("dx", 0.0)),
+                origin_y + float(item.get("dy", 0.0)),
+                max(self.config.min_width, float(item.get("width", 0.1))),
+                max(self.config.min_height, float(item.get("height", 0.05))),
+            ).clamp_to_board(self.config)
+            self.state.add(
+                rect, element_id=str(item.get("id") or "") or None,
+                group_id=group_id or "group", parent_id=group_id, kind=str(item.get("kind") or kind),
+            )
+            item["position"] = {"x": rect.x, "y": rect.y}
+            item["size"] = {"w": rect.w, "h": rect.h}
+        result.payload_items = entries  # type: ignore[attr-defined]
+        return result
+
+    def find_region_for_visual(
+        self,
+        *,
+        width: float,
+        height: float,
+        preferred: str | None = None,
+    ) -> tuple[str, Rect]:
+        """Return a free region big enough for a visual (legacy adapter)."""
+        with self._lock:
+            result = self.place_element(
+                "visual", width=width, height=height,
+                region=preferred, position_hint=preferred,
+                group_id="visual", element_id="visual",
+            )
+        if result.ok and result.rect is not None:
+            return result.region or DEFAULT_REGION, result.rect
+        raise LayoutNoSpaceError(kind="visual")
+
+    def reserve(self, rect: Rect, *, element_id: str | None = None, group_id: str | None = None,
+                parent_id: str | None = None, kind: str = "element") -> None:
+        """Explicitly reserve a region (used by callers committing a plan)."""
+        with self._lock:
+            self.state.add(rect.clamp_to_board(self.config), element_id=element_id,
+                           group_id=group_id, parent_id=parent_id, kind=kind)
+
+    def available_area(self, region: str | None = None) -> Rect:
+        """Largest free axis-aligned band inside a region (approximate)."""
+        area = region_rect(region or DEFAULT_REGION, self.config)
+        with self._lock:
+            overlapping = [e.rect for e in self.state.entries if e.rect.intersects(area)]
+        if not overlapping:
+            return area
+        bottom = max((r.y2 for r in overlapping), default=area.y)
+        if bottom + self.config.min_height <= area.y2:
+            return Rect(area.x, bottom + self.config.element_gap, area.w,
+                        area.y2 - bottom - self.config.element_gap)
+        return Rect(area.x, area.y, 0.0, 0.0)
+
+    # -- internals -----------------------------------------------------------
+
+    def _element_rect(self, element_id: Any) -> Rect | None:
+        if not element_id:
+            return None
+        for element in self.document.get("elements", []) or []:
+            if element.get("element_id") == element_id and element.get("removed_at_sequence") is None:
+                return rect_from_element(element, self.config)
+        return None
+
+    def _region_of(self, rect: Rect) -> str:
+        for name, raw in REGION_RECTS.items():
+            if Rect(*raw).contains(rect):
+                return name
+        return DEFAULT_REGION
+
+    def _beside_anchor(self, anchor: Rect, size: Rect, side: str | None) -> Rect | None:
+        gap = self.config.element_gap
+        safe = self.config.safe
+        if side == "left":
+            x = max(safe.x, anchor.x - size.w - gap)
+        else:
+            x = anchor.x2 + gap
+        rect = Rect(x, anchor.y, size.w, size.h)
+        if rect.x2 > safe.x2 + EPS or rect.y2 > safe.y2 + EPS:
+            return None
+        return rect.clamp_to_board(self.config)
+
+    def _scan_area(
+        self,
+        area: Rect,
+        target: Rect,
+        *,
+        group_id: str | None,
+        parent_id: str | None,
+    ) -> Rect | None:
+        """First non-colliding slot inside *area*, scanned top-to-bottom."""
+        safe = self.config.safe
+        x_start = max(safe.x, area.x)
+        y_start = max(safe.y, area.y)
+        x_end = min(safe.x2, area.x2)
+        y_end = min(safe.y2, area.y2)
+        if x_end - x_start < target.w - EPS or y_end - y_start < target.h - EPS:
+            return None
+        y = y_start
+        while y + target.h <= y_end + EPS:
+            x = x_start
+            while x + target.w <= x_end + EPS:
+                rect = Rect(x, y, target.w, target.h).clamp_to_board(self.config)
+                if not self.state.collides(rect, group_id=group_id, parent_id=parent_id):
+                    return rect
+                x += self.config.step_x
+            y += self.config.step_y
+        return None
+
+    def _flow_position(self, size: Rect, *, section_break: bool, prefer_left: bool) -> tuple[str, Rect]:
+        """Sequential lecture-writing cursor: top-to-bottom, then next column."""
+        key = "left_column" if prefer_left else "main_column"
+        cursor = self.state.region_cursors.get(key)
+        safe = self.config.safe
+        if cursor is None or section_break:
+            x = safe.x
+            y = safe.y if cursor is None else max(safe.y, cursor[1] + self.config.section_gap)
+            if y + size.h > safe.y2:
+                y = safe.y
+        else:
+            x, y = cursor
+        x = min(x, max(safe.x, safe.x2 - self.config.column_width))
+        return key, Rect(x, y, min(self.config.column_width, safe.x2 - x), max(0.0, safe.y2 - y))
+
+    def _advance_flow(self, region: str, rect: Rect, *, section_break: bool) -> None:
+        if region not in {"main_column", "left_column"}:
+            return
+        y = rect.y2 + self.config.element_gap
+        if y + self.config.min_height > self.config.safe.y2:
+            y = self.config.safe.y
+        self.state.region_cursors[region] = (rect.x, y)
+
+    def _group_bounds(self, items: list[dict[str, Any]]) -> Rect:
+        xs = [float(item.get("dx", 0.0)) for item in items]
+        ys = [float(item.get("dy", 0.0)) for item in items]
+        x2 = [float(item.get("dx", 0.0)) + float(item.get("width", 0.1)) for item in items]
+        y2 = [float(item.get("dy", 0.0)) + float(item.get("height", 0.05)) for item in items]
+        return Rect(min(xs), min(ys), max(x2) - min(xs), max(y2) - min(ys))
+
+
+# ---------------------------------------------------------------------------
+# Legacy functional API (kept for existing callers and tests)
+# ---------------------------------------------------------------------------
+
+
+def _next_position(region: str, state: LayoutState, w: float, h: float) -> Rect:
+    area = region_rect(region, state.config)
+    manager = BlackboardLayoutManager.__new__(BlackboardLayoutManager)
+    manager.config = state.config
+    manager.state = state
+    manager.document = {"elements": []}
+    result = manager.place_element("element", width=w, height=h, region=region)
+    if result.ok and result.rect is not None:
+        return result.rect
+    # Full-board scan as a last resort; never return an overlapping rectangle.
+    safe = state.config.safe
+    y = safe.y
+    while y + h <= safe.y2 + EPS:
+        x = safe.x
+        while x + w <= safe.x2 + EPS:
+            rect = Rect(x, y, w, h).clamp_to_board(state.config)
+            if not state.collides(rect):
+                state.add(rect)
+                return rect
+            x += state.config.step_x
+        y += state.config.step_y
+    raise LayoutNoSpaceError()
 
 
 def place_action(
@@ -322,48 +882,41 @@ def place_action(
     document: Mapping[str, Any] | None = None,
     default_region: str | None = None,
 ) -> dict[str, Any]:
-    """Return a copy of *action* with a normalized ``position`` (and ``size``).
-
-    Actions that do not need placement (e.g. annotate/highlight targeting existing
-    elements) are returned unchanged except for a normalized region tag.
-    """
+    """Return a copy of *action* with validated ``position`` and ``size``."""
     result = dict(action)
     action_type = str(action.get("type") or "")
     if action_type in {"annotate", "highlight", "focus", "erase", "clear"}:
         return result
-    if isinstance(result.get("position"), dict):
-        # Trust explicit normalized positions after clamping.
-        pos = result["position"]
-        try:
-            w, h = _default_size(action)
-            size = result.get("size") if isinstance(result.get("size"), dict) else {}
-            if isinstance(size, dict):
-                w = float(size.get("w", w))
-                h = float(size.get("h", h))
-            rect = Rect(float(pos.get("x", 0)), float(pos.get("y", 0)), w, h).clamp_to_board()
-            result["position"] = {"x": rect.x, "y": rect.y}
-            result.setdefault("size", {"w": rect.w, "h": rect.h})
-            state.add(rect)
-            return result
-        except (TypeError, ValueError):
-            pass
+    payload = result.get("payload") if isinstance(result.get("payload"), Mapping) else result
+    data = dict(payload or {})
+    w, h = _default_size({"kind": action.get("kind") or action_type, "payload": data}, state.config)
+    size = result.get("size") if isinstance(result.get("size"), Mapping) else data.get("size")
+    if isinstance(size, Mapping):
+        w = _as_float(size.get("w")) or w
+        h = _as_float(size.get("h")) or h
 
-    hint = result.get("region") or default_region
-    relative_to = result.get("relative_to")
-    region = choose_region(str(hint) if hint else None, state, relative_to=relative_to, document=document)
-    w, h = _default_size(action)
-    size = result.get("size") if isinstance(result.get("size"), dict) else None
-    if isinstance(size, dict):
-        try:
-            w = max(0.02, min(1.0, float(size.get("w", w))))
-            h = max(0.02, min(1.0, float(size.get("h", h))))
-        except (TypeError, ValueError):
-            pass
-    rect = _next_position(region, state, w, h)
-    result["region"] = region
+    manager = BlackboardLayoutManager.__new__(BlackboardLayoutManager)
+    manager.config = state.config
+    manager.state = state
+    manager.document = document or {"elements": []}
+    # A numeric explicit position is a preference, not an unbreakable command:
+    # collisions still relocate it, while semantic hints drive region choice.
+    explicit = result.get("position") if isinstance(result.get("position"), Mapping) else data.get("position")
+    placement = manager.place_element(
+        action.get("kind") or action_type, width=w, height=h, payload=data,
+        position_hint=data.get("position_hint") or result.get("region") or default_region,
+        side_preference=data.get("side_preference"),
+        region=default_region,
+        group_id=data.get("group_id"), parent_id=data.get("parent_id"),
+    )
+    if not placement.ok or placement.rect is None:
+        raise LayoutNoSpaceError()
+    rect = placement.rect
+    result["region"] = placement.region
     result["position"] = {"x": rect.x, "y": rect.y}
     result["size"] = {"w": rect.w, "h": rect.h}
-    state.add(rect)
+    if explicit is not None and isinstance(result.get("payload"), Mapping):
+        result["payload"] = {**data, "position": result["position"], "size": result["size"]}
     return result
 
 
@@ -373,30 +926,42 @@ def layout_plan(
     *,
     default_region: str | None = None,
 ) -> dict[str, Any]:
-    """Assign positions to all placeable actions in a structured plan.
-
-    Existing elements in *document* are treated as fixed obstacles. Returns a new
-    plan dict with positioned actions (original plan is not mutated).
-    """
-    state = build_layout_state(document)
-    actions = list(plan.get("actions") or [])
-    placed: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, Mapping):
-            continue
-        placed.append(place_action(action, state, document=document, default_region=default_region))
+    """Assign collision-free positions to all placeable actions in a plan."""
+    manager = BlackboardLayoutManager(document)
+    actions = [place_action(a, manager.state, document=document, default_region=default_region)
+               if isinstance(a, Mapping) else a
+               for a in (plan.get("actions") or [])]
     out = dict(plan)
-    out["actions"] = placed
+    out["actions"] = actions
     return out
 
 
 __all__ = [
+    "BODY_FONT_NORM_H",
+    "BOARD_REGIONS",
+    "BlackboardLayoutManager",
+    "DEFAULT_CONFIG",
+    "DEFAULT_REGION",
+    "DEFAULT_SIZES",
+    "HEADING_SCALE",
+    "LayoutConfig",
+    "LayoutNoSpaceError",
     "LayoutState",
+    "Occupied",
+    "PlacementResult",
     "Rect",
+    "REGION_RECTS",
+    "board_layout_lock",
     "build_layout_state",
     "choose_region",
+    "estimate_equation_size",
+    "estimate_table_size",
+    "estimate_text_size",
     "layout_plan",
     "place_action",
     "region_occupancy",
     "region_rect",
 ]
+
+# Alias kept explicit so consumers can discover the single coordinate space.
+BOARD_REGIONS = REGION_RECTS

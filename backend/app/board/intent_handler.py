@@ -102,7 +102,8 @@ _SYSTEM_PROMPT = (
     "irregular outlines for biological/organic structures; use hatching as "
     "several short parallel path strokes for shading; keep fills subtle "
     "(opacity <= 0.35); chalk palette colors: primary/secondary/blue/yellow/red/green "
-    "or #RRGGBB. Labels use kind=text with short text.\n"
+    "or #RRGGBB. Every kind=text label must be ONE short line (1-8 words, no "
+    "newlines, no full sentences); never put a paragraph in a text element.\n"
     "Rules: draw something original that matches the requested concept; do not "
     "copy generic placeholder diagrams; every stage must build on the previous "
     "one; elements must be listed in drawing order; no executable code, no SVG, "
@@ -295,30 +296,6 @@ def _extract_json(text: str) -> dict[str, Any]:
     return payload
 
 
-def _fake_board_plan(context: IntentContext) -> dict[str, Any]:
-    topic = str(context.lesson_state.get("topic") or context.intent or "Lesson").strip()[:60]
-    concept = str(context.lesson_state.get("current_concept") or context.lesson_state.get("current_concept_title") or "Key concept").strip()[:60]
-    return {
-        "protocol": "clasrum.drawing",
-        "version": 1,
-        "title": topic or "Lesson",
-        "elements": [
-            {"id": "heading", "kind": "text", "geometry": {"text": topic or "Lesson", "position": {"x": 0.08, "y": 0.08}, "align": "left", "font_scale": 1.2}, "style": {"stroke_color": "primary", "stroke_width": 1.0, "stroke_opacity": 1.0}, "layer": 1, "stage": 1, "duration_ms": 500, "delay_ms": 0},
-            {"id": "intro", "kind": "text", "geometry": {"text": f"Introduction to {topic}", "position": {"x": 0.08, "y": 0.14}, "align": "left", "font_scale": 0.8}, "style": {"stroke_color": "secondary", "stroke_width": 0.8, "stroke_opacity": 0.9}, "layer": 1, "stage": 1, "duration_ms": 450, "delay_ms": 80},
-            {"id": "concept_heading", "kind": "text", "geometry": {"text": concept, "position": {"x": 0.08, "y": 0.24}, "align": "left", "font_scale": 1.0}, "style": {"stroke_color": "yellow", "stroke_width": 1.0, "stroke_opacity": 1.0}, "layer": 1, "stage": 2, "duration_ms": 450, "delay_ms": 0},
-            {"id": "definition", "kind": "text", "geometry": {"text": f"{concept} is a core idea we will explore step by step.", "position": {"x": 0.08, "y": 0.31}, "align": "left", "font_scale": 0.75}, "style": {"stroke_color": "primary", "stroke_width": 0.8, "stroke_opacity": 0.95}, "layer": 1, "stage": 2, "duration_ms": 700, "delay_ms": 60},
-            {"id": "diagram_box", "kind": "rectangle", "geometry": {"position": {"x": 0.58, "y": 0.28}, "size": {"w": 0.28, "h": 0.2}, "corner_radius": 0.01}, "style": {"stroke_color": "blue", "stroke_width": 1.4, "stroke_opacity": 0.95, "fill_color": "#4A90D9", "fill_opacity": 0.08}, "layer": 2, "stage": 3, "duration_ms": 700, "delay_ms": 0},
-            {"id": "diagram_arrow", "kind": "arrow", "geometry": {"start": {"x": 0.62, "y": 0.38}, "end": {"x": 0.82, "y": 0.38}, "curve": 0.0}, "style": {"stroke_color": "green", "stroke_width": 1.4, "stroke_opacity": 0.95}, "layer": 2, "stage": 3, "duration_ms": 500, "delay_ms": 120},
-            {"id": "diagram_label", "kind": "text", "geometry": {"text": concept[:24], "position": {"x": 0.64, "y": 0.34}, "align": "left", "font_scale": 0.7}, "style": {"stroke_color": "primary", "stroke_width": 0.8, "stroke_opacity": 0.95}, "layer": 3, "stage": 3, "duration_ms": 350, "delay_ms": 180},
-        ],
-        "stages": [
-            {"stage": 1, "description": "Lesson heading and introduction", "element_ids": ["heading", "intro"], "pause_ms": 150},
-            {"stage": 2, "description": "First concept and definition", "element_ids": ["concept_heading", "definition"], "pause_ms": 150},
-            {"stage": 3, "description": "Simple concept diagram", "element_ids": ["diagram_box", "diagram_arrow", "diagram_label"], "pause_ms": 0},
-        ],
-    }
-
-
 async def call_board_director(context: IntentContext) -> dict[str, Any]:
     """Call Qwen3.7-Flash (OpenAI-compatible) and return the raw plan dict.
 
@@ -328,9 +305,6 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     settings = get_settings()
     api_key = settings.effective_board_director_api_key
     if not api_key:
-        if settings.qwen_fake_mode:
-            logger.info("board_director fake fallback used (qwen_fake_mode=true)")
-            return _fake_board_plan(context)
         raise IntentHandlingError(
             "Board director model is not configured", code="qwen_unavailable", retryable=False
         )
@@ -705,7 +679,9 @@ def _repair_drawing_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
 
     by_stage: dict[int, list[str]] = {}
     for element in elements:
-        by_stage.setdefault(int(element["stage"]), []).append(str(element["id"]))
+        stage_num = int(_clamp(element.get("stage"), 1, 12, 1) or 1)
+        element["stage"] = stage_num
+        by_stage.setdefault(stage_num, []).append(str(element.get("id", "")))
 
     stages: list[dict[str, Any]] = []
     for stage_num in sorted(by_stage):
@@ -932,30 +908,55 @@ class BoardIntentHandler:
             assert model_error is not None
             raise model_error
 
-        region = layout.REGION_RECTS.get(
-            str(region_hint or "full"), layout.REGION_RECTS["full"]
-        )
-        plan_payload = fit_plan_to_region(plan_payload, region)
+        # Place the visual in an available region, not over existing content.
+        boxes = plan_element_bounds(plan_payload)
+        if boxes:
+            min_x = min(b[0] for b in boxes)
+            min_y = min(b[1] for b in boxes)
+            max_x = max(b[0] + b[2] for b in boxes)
+            max_y = max(b[1] + b[3] for b in boxes)
+            plan_w = max(0.1, max_x - min_x)
+            plan_h = max(0.1, max_y - min_y)
+        else:
+            plan_w, plan_h = 0.52, 0.36
 
-        payload = {
-            **plan_payload,
-            "context": {
-                "topic": lesson_state.get("topic"),
-                "subject": lesson_state.get("subject"),
-                "current_concept": lesson_state.get("current_concept")
-                or lesson_state.get("current_concept_title"),
-                "region": region_hint or "full",
-                "intent": intent,
-            },
-        }
-        record = await self._board.append_event(
-            db,
-            lesson_id,
-            "draw_plan",
-            payload,
-            source="qwen_tool",
-            animate=True,
-        )
+        # Re-read state under the lesson lock: the director may have taken
+        # seconds, during which other tools could have written to the board.
+        async with layout.board_layout_lock(lesson_id):
+            try:
+                document = await self._board.reconstruct_document(db, lesson_id)
+            except Exception:
+                document = {"elements": [], "last_sequence": 0}
+            manager = layout.BlackboardLayoutManager(document)
+            preferred_region = str(region_hint) if region_hint else None
+            try:
+                _, region_rect = manager.find_region_for_visual(
+                    width=plan_w, height=plan_h, preferred=preferred_region
+                )
+            except layout.LayoutNoSpaceError as exc:
+                raise IntentHandlingError(str(exc), code=exc.code, retryable=True) from None
+            region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
+            plan_payload = fit_plan_to_region(plan_payload, region)
+
+            payload = {
+                **plan_payload,
+                "context": {
+                    "topic": lesson_state.get("topic"),
+                    "subject": lesson_state.get("subject"),
+                    "current_concept": lesson_state.get("current_concept")
+                    or lesson_state.get("current_concept_title"),
+                    "region": region_hint or "full",
+                    "intent": intent,
+                },
+            }
+            record = await self._board.append_event(
+                db,
+                lesson_id,
+                "draw_plan",
+                payload,
+                source="qwen_tool",
+                animate=True,
+            )
 
         id_map = {element["id"]: record.element_id for element in plan_payload.get("elements", [])
                   if isinstance(element, dict) and element.get("id")}

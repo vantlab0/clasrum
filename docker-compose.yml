@@ -29,7 +29,6 @@ services:
       ENVIRONMENT: production
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please-0123456789abcdef}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
-      QWEN_FAKE_MODE: ${QWEN_FAKE_MODE:-false}
       NOTES_API_KEY: ${NOTES_API_KEY:-}
     ports:
       - "8000:8000"

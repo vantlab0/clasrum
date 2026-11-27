@@ -51,6 +51,10 @@ class _LiveScreenState extends State<LiveScreen>
   StreamSubscription<Uint8List>? _audioStreamSub;
   StreamSubscription<Amplitude>? _amplitudeSub;
   bool _speechDetected = false;
+  // Dynamic mic: stays open after session.ready so semantic VAD can hear the
+  // student at any time, including while the tutor is speaking (barge-in).
+  bool _micContinuous = false;
+  double _noiseFloorDb = -70.0;
   bool _submittingTurn = false;
   DateTime? _speechStartedAt;
   DateTime? _lastVoiceAt;
@@ -122,6 +126,7 @@ class _LiveScreenState extends State<LiveScreen>
         switch (state) {
           case ConnectionState.connected:
             _error = null;
+            unawaited(_startContinuousMic());
           case ConnectionState.connecting:
             break;
           case ConnectionState.interrupted:
@@ -163,6 +168,7 @@ class _LiveScreenState extends State<LiveScreen>
     unawaited(_connSub?.cancel());
     unawaited(_errSub?.cancel());
     unawaited(_msgSub?.cancel());
+    _micContinuous = false;
     unawaited(_stopMic(discard: true, silent: true));
     unawaited(_disposeCamera());
     unawaited(_audioPlayback.reset(endState: AiPlaybackState.idle));
@@ -180,6 +186,7 @@ class _LiveScreenState extends State<LiveScreen>
         state == AppLifecycleState.detached) {
       // Keep session/board intact; stop mic capture to avoid leaving it active.
       if (_micPhase == _MicPhase.listening) {
+        _micContinuous = false;
         unawaited(_stopMic(discard: true, silent: true));
       }
       // Avoid background playback surprises; preserve board/session/realtime state.
@@ -318,6 +325,7 @@ class _LiveScreenState extends State<LiveScreen>
       case RealtimeMessageType.sessionReady:
         _applySessionReady(message.payload);
         _startTutorWaitTimer();
+        unawaited(_startContinuousMic());
         break;
       case RealtimeMessageType.boardSnapshot:
         _applyBoardSnapshot(message.payload);
@@ -355,6 +363,14 @@ class _LiveScreenState extends State<LiveScreen>
           keepNewer: true,
         ));
         break;
+      case RealtimeMessageType.userSpeechStarted:
+        // Semantic VAD heard real user speech: flush tutor playback so the
+        // student can be heard clearly while the tutor is talking.
+        unawaited(_audioPlayback.interrupt(keepNewer: true));
+        if (mounted) {
+          setState(() => _speechDetected = true);
+        }
+        break;
       case RealtimeMessageType.sessionEnded:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.completed));
         setState(() {
@@ -382,6 +398,7 @@ class _LiveScreenState extends State<LiveScreen>
         break;
       case RealtimeMessageType.sessionInterrupted:
         unawaited(_audioPlayback.reset(endState: AiPlaybackState.interrupted));
+        _micContinuous = false;
         unawaited(_stopMic(discard: true, silent: true));
         break;
       default:
@@ -511,8 +528,10 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   void _handleAudioDelta(RealtimeMessage message) {
-    // During student mic turn, ignore incoming tutor audio for the interrupted turn.
-    if (_micPhase != _MicPhase.idle) return;
+    // Ignore new tutor audio during a push-to-talk turn. The always-on mic must
+    // still hear the tutor while it listens for barge-in.
+    if (_micPhase == _MicPhase.submitting) return;
+    if (_micPhase == _MicPhase.listening && !_micContinuous) return;
     unawaited(_enqueueAudioDelta(message));
   }
 
@@ -595,6 +614,7 @@ class _LiveScreenState extends State<LiveScreen>
       ),
     );
     if (shouldLeave == true && mounted) {
+      _micContinuous = false;
       await _stopMic(discard: true, silent: true);
       await _audioPlayback.reset(endState: AiPlaybackState.completed);
       await widget.client.disconnect();
@@ -603,7 +623,10 @@ class _LiveScreenState extends State<LiveScreen>
   }
 
   Future<void> _togglePause() async {
-    if (_micPhase == _MicPhase.listening || _submittingTurn) return;
+    // The always-on mic must not disable playback controls.
+    if ((_micPhase == _MicPhase.listening && !_micContinuous) || _submittingTurn) {
+      return;
+    }
     final nextPaused = !_paused;
     setState(() {
       _paused = nextPaused;
@@ -617,15 +640,26 @@ class _LiveScreenState extends State<LiveScreen>
 
   Future<void> _onMicPressed() async {
     if (_connecting || _submittingTurn) return;
+    if (_micContinuous && _micPhase == _MicPhase.listening) {
+      // Dynamic mic is live: tapping mutes it instead of pushing a turn.
+      _micContinuous = false;
+      await _stopMic(discard: true, silent: true);
+      return;
+    }
     if (_micPhase == _MicPhase.listening) {
       await _finishListening(manualStop: true);
       return;
     }
-    await _startListening();
+    await _startListening(continuous: true);
   }
 
   Future<void> _cancelListening() async {
     if (_micPhase != _MicPhase.listening) return;
+    if (_micContinuous) {
+      _micContinuous = false;
+      await _stopMic(discard: true, silent: true);
+      return;
+    }
     await _stopMic(discard: true, silent: false);
     if (!mounted) return;
     setState(() {
@@ -633,7 +667,7 @@ class _LiveScreenState extends State<LiveScreen>
     });
   }
 
-  Future<void> _startListening() async {
+  Future<void> _startListening({bool continuous = false}) async {
     if (_lessonId == null || _micPhase != _MicPhase.idle || _submittingTurn) {
       return;
     }
@@ -647,16 +681,22 @@ class _LiveScreenState extends State<LiveScreen>
         return;
       }
 
-      await widget.client.interrupt();
-      await _audioPlayback.interrupt(keepNewer: true);
+      // Push-to-talk interrupts the tutor; the always-on mic must not, because
+      // semantic VAD decides barge-in from what the student actually says.
+      if (!continuous) {
+        await widget.client.interrupt();
+        await _audioPlayback.interrupt(keepNewer: true);
+        _paused = false;
+      }
       setState(() {
         _micPhase = _MicPhase.listening;
+        _micContinuous = continuous;
+        _noiseFloorDb = -70.0;
         _speechDetected = false;
         _capturedBytes = 0;
         _speechStartedAt = DateTime.now();
         _lastVoiceAt = null;
         _error = null;
-        _paused = false;
         for (var i = 0; i < _waveLevels.length; i++) {
           _waveLevels[i] = 0.08;
         }
@@ -681,6 +721,7 @@ class _LiveScreenState extends State<LiveScreen>
           _updateWaveformFromPcm(chunk);
         },
         onError: (_) {
+          _micContinuous = false;
           if (!mounted) return;
           unawaited(_stopMic(discard: true, silent: false));
           setState(() => _error = 'Microphone capture failed.');
@@ -693,21 +734,37 @@ class _LiveScreenState extends State<LiveScreen>
           .listen((amp) {
         if (!mounted || _micPhase != _MicPhase.listening) return;
         final now = DateTime.now();
-        final speaking = amp.current > _speechDbThreshold;
+        // Track the quietest recent level as a noise floor so a noisy room
+        // does not look like speech. The server's semantic VAD makes the
+        // actual turn decision; this only drives local UI / push-to-talk.
+        final db = amp.current;
+        if (db < _noiseFloorDb) {
+          _noiseFloorDb = db;
+        } else {
+          _noiseFloorDb =
+              math.min(_noiseFloorDb + 0.12, _speechDbThreshold - 5);
+        }
+        final speaking = db > math.max(_speechDbThreshold, _noiseFloorDb + 10);
         if (speaking) {
           _speechDetected = true;
           _lastVoiceAt = now;
         }
-        _evaluateVad(now);
+        if (!continuous) _evaluateVad(now);
       });
 
+      // Local silence timer is only needed for push-to-talk turns. Dynamic mode
+      // lets the server's semantic VAD decide when the student finished.
       _vadTimer?.cancel();
-      _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-        if (!mounted || _micPhase != _MicPhase.listening) return;
-        _evaluateVad(DateTime.now());
-      });
+      _vadTimer = null;
+      if (!continuous) {
+        _vadTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+          if (!mounted || _micPhase != _MicPhase.listening) return;
+          _evaluateVad(DateTime.now());
+        });
+      }
     } catch (e, st) {
       debugPrint('[LiveScreen] Microphone start failed: $e\n$st');
+      _micContinuous = false;
       await _stopMic(discard: true, silent: true);
       if (!mounted) return;
       setState(() {
@@ -715,6 +772,13 @@ class _LiveScreenState extends State<LiveScreen>
         _error = 'Microphone access failed: $e';
       });
     }
+  }
+
+  /// Open the always-on mic as soon as the realtime session is ready.
+  Future<void> _startContinuousMic() async {
+    if (_lessonId == null || _connecting || _submittingTurn) return;
+    if (_micPhase != _MicPhase.idle || _micContinuous) return;
+    await _startListening(continuous: true);
   }
 
   void _updateWaveformFromPcm(Uint8List chunk) {
@@ -731,7 +795,8 @@ class _LiveScreenState extends State<LiveScreen>
     }
     if (count == 0) return;
     final rms = math.sqrt(sumSq / count);
-    final level = (rms * 6).clamp(0.08, 1.0);
+    final noiseRms = math.pow(10.0, _noiseFloorDb / 20.0).toDouble();
+    final level = ((rms - noiseRms) * 6).clamp(0.08, 1.0);
     if (!mounted || _micPhase != _MicPhase.listening) return;
     setState(() {
       _waveLevels.removeAt(0);
@@ -826,7 +891,12 @@ class _LiveScreenState extends State<LiveScreen>
 
   Future<void> _openCamera() async {
     if (_cameraOpening || _cameraActive || _imageSubmitting) return;
-    if (_micPhase == _MicPhase.listening) return;
+    if (_micPhase == _MicPhase.listening) {
+      if (!_micContinuous) return;
+      // Camera capture and the always-on mic must not fight over the device.
+      _micContinuous = false;
+      await _stopMic(discard: true, silent: true);
+    }
     setState(() {
       _cameraOpening = true;
       _cameraError = null;
@@ -1075,6 +1145,7 @@ class _LiveScreenState extends State<LiveScreen>
                 child: _BottomControls(
                   paused: _paused,
                   micPhase: _micPhase,
+                  micContinuous: _micContinuous,
                   connecting: _connecting,
                   onPauseToggle: _togglePause,
                   onMicPressed: _onMicPressed,
@@ -1215,6 +1286,7 @@ class _BottomControls extends StatelessWidget {
   const _BottomControls({
     required this.paused,
     required this.micPhase,
+    required this.micContinuous,
     required this.connecting,
     required this.onPauseToggle,
     required this.onMicPressed,
@@ -1226,6 +1298,7 @@ class _BottomControls extends StatelessWidget {
 
   final bool paused;
   final _MicPhase micPhase;
+  final bool micContinuous;
   final bool connecting;
   final VoidCallback onPauseToggle;
   final VoidCallback onMicPressed;
@@ -1241,7 +1314,9 @@ class _BottomControls extends StatelessWidget {
       children: <Widget>[
         _CircleControl(
           tooltip: paused ? 'Resume' : 'Pause',
-          onPressed: micPhase == _MicPhase.listening ? null : onPauseToggle,
+          onPressed: micPhase == _MicPhase.listening && !micContinuous
+              ? null
+              : onPauseToggle,
           background: paused
               ? AppColors.red.withValues(alpha: 0.92)
               : AppColors.surface.withValues(alpha: 0.45),
@@ -1257,6 +1332,7 @@ class _BottomControls extends StatelessWidget {
         const SizedBox(width: 12),
         _MicControl(
           phase: micPhase,
+          continuous: micContinuous,
           enabled: !connecting,
           onPressed: onMicPressed,
           onCancel: onMicCancel,
@@ -1266,7 +1342,9 @@ class _BottomControls extends StatelessWidget {
         const SizedBox(width: 12),
         _CircleControl(
           tooltip: 'Camera',
-          onPressed: micPhase == _MicPhase.listening ? null : onCameraPressed,
+          onPressed: micPhase == _MicPhase.listening && !micContinuous
+              ? null
+              : onCameraPressed,
           background: AppColors.surface.withValues(alpha: 0.45),
           borderColor: AppColors.border.withValues(alpha: 0.55),
           child: const PwonyIcon(
@@ -1337,6 +1415,7 @@ class _CircleControl extends StatelessWidget {
 class _MicControl extends StatelessWidget {
   const _MicControl({
     required this.phase,
+    required this.continuous,
     required this.enabled,
     required this.onPressed,
     required this.onCancel,
@@ -1345,6 +1424,7 @@ class _MicControl extends StatelessWidget {
   });
 
   final _MicPhase phase;
+  final bool continuous;
   final bool enabled;
   final VoidCallback onPressed;
   final VoidCallback onCancel;
@@ -1363,9 +1443,15 @@ class _MicControl extends StatelessWidget {
 
     return Semantics(
       button: true,
-      label: listening ? 'Listening' : 'Speak',
+      label: listening
+          ? (continuous ? 'Microphone live, tap to mute' : 'Listening')
+          : 'Speak',
       child: Tooltip(
-        message: listening ? 'Listening… tap to send, long press to cancel' : 'Tap to speak',
+        message: listening
+            ? (continuous
+                ? 'Always listening (semantic VAD)… tap to mute'
+                : 'Listening… tap to send, long press to cancel')
+            : 'Tap to speak',
         child: ClipRRect(
           borderRadius: BorderRadius.circular(999),
           child: BackdropFilter(

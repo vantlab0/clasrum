@@ -120,8 +120,9 @@ async def test_initial_teaching_starts_for_fresh_lesson() -> None:
     prompt = qwen.prompt_texts[0]
     assert "Start the live lesson now" in prompt
     assert "Photosynthesis" in prompt
-    assert "write the lesson heading on the board" in prompt
-    assert "board_intent" in prompt
+    assert "lesson title as ONE short line" in prompt
+    assert "board_write_on_board" in prompt
+    assert "ONE short line per board_write_on_board call" in prompt
     assert socket.initial_teaching_started is True
 
 

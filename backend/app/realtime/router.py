@@ -19,7 +19,7 @@ from app.realtime.hub import (
     CLOSE_FORBIDDEN,
     LessonRealtimeHub,
 )
-from app.realtime.qwen_adapter import FakeQwenSession, QwenRealtimeSession
+from app.realtime.qwen_adapter import QwenRealtimeSession
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +94,14 @@ async def lessons_ws(
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
 
-    # Choose Qwen transport: real when an API key is configured, fake otherwise.
+    # Lessons require a configured DashScope API key; there is no offline fallback.
     settings = __import__("app.config", fromlist=["get_settings"]).get_settings()
-    if settings.qwen_api_key and not settings.qwen_fake_mode:
-        qwen_factory = lambda: QwenRealtimeSession(settings.qwen_api_key)  # noqa: E731
-    else:
-        qwen_factory = FakeQwenSession
+    if not settings.qwen_api_key:
+        logger.error("Qwen Realtime API key is not configured; refusing lesson socket")
+        await websocket.close(code=1011, reason="AI tutor is not configured")
+        return
 
+    qwen_factory = lambda: QwenRealtimeSession(settings.qwen_api_key)  # noqa: E731
     hub = configure_hub(qwen_factory=qwen_factory)
 
     await hub.connect(websocket, lesson_id, token)

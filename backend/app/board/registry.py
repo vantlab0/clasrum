@@ -245,6 +245,15 @@ class ToolRegistry:
             logger.warning("tool rejected lesson=%s tool=%s code=invalid_json", lesson_id, name)
             return _invalid_arguments("arguments must be a JSON object")
 
+        # Realtime flow control: the hub handles the pause locally; the registry
+        # only needs to acknowledge it so non-realtime callers stay valid too.
+        if name == "wait_for_student":
+            return {
+                "ok": True,
+                "waiting_for_student": True,
+                "message": "Paused; listening for the student's answer.",
+            }
+
         # Intent tools and dual-use board_highlight (intent vs internal args).
         if spec.kind == "intent" or name == "board_highlight":
             # board_highlight (kind board) may be called with internal args.
@@ -269,15 +278,12 @@ class ToolRegistry:
             )
             return _invalid_arguments(message)
 
-        if spec.kind == "board":
-            return await self._execute_board(
+        if spec.name == "create_board_visual":
+            return await self._execute_create_board_visual(
                 db, lesson_id, spec, args, source=source, animate=animate
             )
-        # -----------------------------------------------------------------------
-        # new: create_board_visual — intent kind but executed via the board director
-        # -----------------------------------------------------------------------
-        if name == "create_board_visual":
-            return await self._execute_create_board_visual(
+        if spec.kind == "board":
+            return await self._execute_board(
                 db, lesson_id, spec, args, source=source, animate=animate
             )
         return await self._execute_lesson(db, lesson_id, spec, args)
@@ -296,21 +302,30 @@ class ToolRegistry:
         source: str,
         animate: bool,
     ) -> dict[str, Any]:
+        from app.board import layout
         from app.board.intent_handler import (
             BoardIntentHandler,
-            call_board_director,
+            IntentContext,
             IntentHandlingError,
+            call_board_director,
+            fetch_lesson_context,
+            fetch_recent_transcript,
+            fit_plan_to_region,
+            plan_total_duration_ms,
+            summarize_board,
+            validate_drawing_plan,
         )
-        from app.config import get_settings
+        from app.board.layout import LayoutNoSpaceError
 
         name = spec.name
-        intent = _clean_text(args.instruction, 1000)
+        intent = str(getattr(args, "instruction", "") or "").strip()[:1000]
         if not intent:
             return {"ok": False, "error": "invalid_arguments", "message": "intent is required", "retryable": True}
         focus = "new_content"
-        region_hint = args.related_concept
-        if region_hint is not None and str(region_hint) not in {"left", "right", "top", "bottom", "center", "bottom_left", "bottom_right"}:
-            region_hint = None
+        # ``related_concept`` is a concept id, not a screen region.  Region hints
+        # come from the caller's explicit context when present.
+        context_hint = args.context.get("region_hint") if isinstance(args.context, dict) else None
+        region_hint = context_hint if str(context_hint) in layout.REGION_RECTS else None
 
         logger.info(
             "create_board_visual received lesson=%s visual_type=%s complexity=%s intent=%s",
@@ -357,32 +372,67 @@ class ToolRegistry:
             )
             return exc.to_tool_result()
 
-        # Fit the plan to the full board region.
-        region = get_settings().board_default_region or (0.0, 0.0, 1.0, 1.0)
-        plan_payload = fit_plan_to_region(validated, region)
+        # Fit the plan into an available board region (no full-board overwrite).
+        # The board may have changed while the director was generating, so the
+        # document is re-read under the layout lock immediately before placement.
+        from app.board.drawing_protocol import plan_element_bounds
+        from app.board.layout import BlackboardLayoutManager, board_layout_lock
 
-        payload = {
-            **plan_payload,
-            "context": {
-                "topic": lesson_state.get("topic"),
-                "subject": lesson_state.get("subject"),
-                "current_concept": lesson_state.get("current_concept")
-                or lesson_state.get("current_concept_title"),
-                "region": region_hint or "full",
-                "intent": intent,
-                "visual_type": args.visual_type,
-                "complexity": args.complexity,
-            },
-        }
+        boxes = plan_element_bounds(validated)
+        if boxes:
+            min_x = min(b[0] for b in boxes)
+            min_y = min(b[1] for b in boxes)
+            max_x = max(b[0] + b[2] for b in boxes)
+            max_y = max(b[1] + b[3] for b in boxes)
+            plan_w = max(0.1, max_x - min_x)
+            plan_h = max(0.1, max_y - min_y)
+        else:
+            plan_w, plan_h = 0.52, 0.36
 
-        record = await self._board.append_event(
-            db,
-            lesson_id,
-            "draw_plan",
-            payload,
-            source=source,
-            animate=animate,
-        )
+        async with board_layout_lock(lesson_id):
+            try:
+                document = await self._board.reconstruct_document(db, lesson_id)
+            except Exception:
+                document = {"elements": [], "last_sequence": 0}
+            manager = BlackboardLayoutManager(document)
+            preferred_region = str(region_hint) if region_hint else None
+            try:
+                _, region_rect = manager.find_region_for_visual(
+                    width=plan_w, height=plan_h, preferred=preferred_region
+                )
+            except LayoutNoSpaceError as exc:
+                logger.warning("create_board_visual no space lesson=%s", lesson_id)
+                return {
+                    "ok": False,
+                    "error": exc.code,
+                    "message": str(exc),
+                    "retryable": True,
+                }
+            region = (region_rect.x, region_rect.y, region_rect.w, region_rect.h)
+            plan_payload = fit_plan_to_region(validated, region)
+
+            payload = {
+                **plan_payload,
+                "context": {
+                    "topic": lesson_state.get("topic"),
+                    "subject": lesson_state.get("subject"),
+                    "current_concept": lesson_state.get("current_concept")
+                    or lesson_state.get("current_concept_title"),
+                    "region": region_hint or "full",
+                    "intent": intent,
+                    "visual_type": args.visual_type,
+                    "complexity": args.complexity,
+                },
+            }
+
+            record = await self._board.append_event(
+                db,
+                lesson_id,
+                "draw_plan",
+                payload,
+                source=source,
+                animate=animate,
+            )
 
         id_map = {
             element["id"]: record.element_id
@@ -661,19 +711,41 @@ class ToolRegistry:
         payload = args.build_payload()
         element_id = getattr(args, "element_id", None)
 
-        if event_type == EVENT_PLOT_FUNCTION:
-            payload = await self._prepare_plot_function(db, lesson_id, args, payload)
-
-        record = await self._board.append_event(
-            db,
-            lesson_id,
-            event_type,
-            payload,
-            element_id=element_id,
-            source=source,
-            animate=animate,
-            allowed_element_types=spec.allowed_element_types or None,
+        from app.board.layout import (
+            LayoutNoSpaceError,
+            board_layout_lock,
         )
+
+        # Allocation and commit are one transaction per lesson: two concurrent
+        # tool calls can never be given the same free region.
+        async with board_layout_lock(lesson_id):
+            # Direct board writing: deterministic layout, no AI coordinates.
+            if spec.name == "board_write_on_board" or payload.get("position_hint"):
+                try:
+                    document = await self._board.reconstruct_document(db, lesson_id)
+                except Exception:
+                    document = {"elements": []}
+                from app.board.layout import BlackboardLayoutManager
+
+                manager = BlackboardLayoutManager(document)
+                try:
+                    payload = manager.place_text(payload)
+                except LayoutNoSpaceError as exc:
+                    raise BoardValidationError(exc.code, str(exc), retryable=True) from None
+
+            if event_type == EVENT_PLOT_FUNCTION:
+                payload = await self._prepare_plot_function(db, lesson_id, args, payload)
+
+            record = await self._board.append_event(
+                db,
+                lesson_id,
+                event_type,
+                payload,
+                element_id=element_id,
+                source=source,
+                animate=animate,
+                allowed_element_types=spec.allowed_element_types or None,
+            )
         return record.to_tool_result()
 
     async def _prepare_plot_function(

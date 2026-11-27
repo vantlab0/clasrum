@@ -16,8 +16,16 @@ class BoardTextMetrics {
 
   /// Font size as a fraction of board content height, per CONTRACTS §3.1 style.
   static const Map<String, double> heightFraction = <String, double>{
-    'heading': 0.056,
-    'subheading': 0.043,
+    // H1-H6 are deliberately distinct: direct board writing preserves the
+    // semantic level, so the renderer must not collapse h3..h6 into h2.
+    'h1': 0.076,
+    'h2': 0.062,
+    'h3': 0.054,
+    'h4': 0.047,
+    'h5': 0.041,
+    'h6': 0.036,
+    'heading': 0.076,
+    'subheading': 0.062,
     'body': 0.032,
     'definition': 0.032,
     'label': 0.024,
@@ -33,13 +41,18 @@ class BoardTextMetrics {
   /// Line height multiplier used by both the estimate and the TextPainter.
   static const double lineHeight = 1.28;
 
-  /// Height of a heading of `level` (1 = heading, 2 = subheading).
-  static double headingFraction(int level) =>
-      level <= 1 ? heightFraction['heading']! : heightFraction['subheading']!;
+  /// Height of a heading of `level` (1..6; levels outside that range clamp).
+  static double headingFraction(int level) {
+    final safe = level.clamp(1, 6);
+    return heightFraction['h$safe'] ?? heightFraction['heading']!;
+  }
 
   static double fractionForStyle(String? style, {int headingLevel = 1}) {
-    if (style == 'heading') return headingFraction(headingLevel);
-    return heightFraction[style] ?? heightFraction['body']!;
+    final normalized = (style ?? '').toLowerCase();
+    if (normalized == 'heading' || normalized == 'subheading') {
+      return headingFraction(headingLevel);
+    }
+    return heightFraction[normalized] ?? heightFraction['body']!;
   }
 
   /// Estimated normalized line height for [style] at 100% font scale.
@@ -111,8 +124,13 @@ class BoardBoundsEstimator {
     final text = (data['text']?.toString() ?? '').trim();
     if (position == null || text.isEmpty) return null;
     final style = (data['style']?.toString()) ?? 'body';
+    final headingLevel = _headingLevel(data);
     final fontScale = _num(data['font_scale']) ?? 1.0;
-    final font = BoardTextMetrics.fractionForStyle(style) * fontScale;
+    final font = BoardTextMetrics.fractionForStyle(
+          style,
+          headingLevel: headingLevel,
+        ) *
+        fontScale;
     final maxWidth = _num(data['max_width']);
     final available = maxWidth != null
         ? maxWidth.clamp(0.05, 1.0 - position.x)
@@ -130,15 +148,24 @@ class BoardBoundsEstimator {
     if (position == null) return null;
     final data = element.payloadParsedOrRaw();
     final text = data['text']?.toString() ?? '';
-    final level = (_num(data['level']) ?? 1).round().clamp(1, 2);
+    final level = _headingLevel(data);
     final font = BoardTextMetrics.headingFraction(level);
     final width = math.min(
       (1.0 - position.x - 0.04).clamp(0.05, 1.0),
       math.max(1, text.length) * font * BoardTextMetrics.glyphWidthFactor,
     );
     final height =
-        font * BoardTextMetrics.lineHeight + (level == 1 ? 0.012 : 0);
+        font * BoardTextMetrics.lineHeight + (level <= 2 ? 0.012 : 0);
     return BoardRect(position.x, position.y, width, height).clamp01();
+  }
+
+  /// Reads the semantic heading level emitted by the backend layout engine.
+  static int _headingLevel(Map<String, dynamic> data) {
+    final raw = data['heading_level'] ?? data['level'] ?? data['style'];
+    if (raw is String && raw.length == 2 && raw[0] == 'h') {
+      return (int.tryParse(raw[1]) ?? 1).clamp(1, 6);
+    }
+    return (_num(raw) ?? 1).round().clamp(1, 6);
   }
 
   static BoardRect? _estimateDefinition(

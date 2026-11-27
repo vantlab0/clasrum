@@ -56,9 +56,8 @@ cd backend
 * `http://127.0.0.1:8000/healthz` → `{ "status": "ok", ... }`
 * Interactive docs: `http://127.0.0.1:8000/docs`
 * Default development database is SQLite (`./dev.db`) so no Postgres is needed.
-* No Qwen key? Set `QWEN_FAKE_MODE=true` and the backend serves a deterministic
-  offline tutor that still speaks through the same pipeline and writes on the
-  board — useful for demos, UI work and CI.
+* Realtime lessons require a DashScope API key (`QWEN_API_KEY`); there is no
+  offline tutor fallback.
 
 Production: `docker compose up --build` (PostgreSQL 16 + backend with
 `AsyncPostgresSaver`/`AsyncPostgresStore` durable LangGraph persistence).

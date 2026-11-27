@@ -21,6 +21,7 @@ enum RealtimeMessageType {
   audioDelta,
   audioDone,
   audioTruncated,
+  userSpeechStarted,
   teacherState,
   transcriptEntry,
   lessonState,
@@ -474,6 +475,8 @@ class RealtimeClient extends ChangeNotifier {
         return RealtimeMessageType.audioDone;
       case 'audio.truncated':
         return RealtimeMessageType.audioTruncated;
+      case 'user.speech_started':
+        return RealtimeMessageType.userSpeechStarted;
       case 'teacher.state':
         return RealtimeMessageType.teacherState;
       case 'transcript.entry':

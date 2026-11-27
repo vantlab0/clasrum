@@ -13,6 +13,11 @@ void main() {
           RealtimeMessageType.sessionReady);
     });
 
+    test('recognizes user.speech_started from semantic VAD', () {
+      expect(RealtimeClient.parseType('user.speech_started'),
+          RealtimeMessageType.userSpeechStarted);
+    });
+
     test('recognizes session.error as error', () {
       expect(
           RealtimeClient.parseType('session.error'), RealtimeMessageType.error);

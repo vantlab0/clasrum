@@ -1,2 +1,12 @@
 .env
 _tmp_deploy2.py
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local runtime databases / state (never commit real data)
+*.db
+*.db-shm
+*.db-wal
+data/

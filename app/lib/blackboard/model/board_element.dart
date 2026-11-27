@@ -17,6 +17,8 @@ class BoardElement {
     this.size,
     this.style,
     this.color,
+    this.groupId,
+    this.parentId,
     required this.createdSequence,
     this.updatedSequence,
     this.removedAtSequence,
@@ -41,6 +43,14 @@ class BoardElement {
       size: size,
       style: _str(json['style']),
       color: _str(json['color']),
+      groupId: _str(json['group_id'] ??
+          json['groupId'] ??
+          rawPayload['group_id'] ??
+          rawPayload['groupId']),
+      parentId: _str(json['parent_id'] ??
+          json['parentId'] ??
+          rawPayload['parent_id'] ??
+          rawPayload['parentId']),
       createdSequence: asDouble(json['created_sequence'])?.round() ?? 0,
       updatedSequence: asDouble(json['updated_sequence'])?.round(),
       removedAtSequence: asDouble(json['removed_at_sequence'])?.round(),
@@ -58,6 +68,13 @@ class BoardElement {
   final BoardSize? size;
   final String? style;
   final String? color;
+
+  /// Optional layout relationship from the authoritative backend layout engine.
+  /// Same-group and parent/child overlaps are intentional; unrelated overlaps
+  /// are validation failures, never silently accepted.
+  final String? groupId;
+  final String? parentId;
+
   final int createdSequence;
   final int? updatedSequence;
   final int? removedAtSequence;
@@ -74,6 +91,21 @@ class BoardElement {
   bool get isEquation =>
       type == BoardEventType.writeEquation.wireName ||
       type == BoardEventType.updateEquation.wireName;
+
+  /// True for anything that must be rendered by the LaTeX engine: equation
+  /// events, direct `write_text` with `style: "equation"`, and forward-compatible
+  /// `math` payloads carrying a `latex` field.
+  bool get isLatex {
+    if (isEquation) return true;
+    final styleName = _str(payload['style'])?.toLowerCase();
+    if (styleName == 'equation') return true;
+    if (styleName == 'math' && _str(payload['latex'])?.trim().isNotEmpty == true) {
+      return true;
+    }
+    return false;
+  }
+
+  String? get latex => _str(payload['latex']);
 
   bool get isDrawing => level == 4;
 
@@ -127,6 +159,10 @@ class BoardElement {
     bool clearStyle = false,
     String? color,
     bool clearColor = false,
+    String? groupId,
+    bool clearGroupId = false,
+    String? parentId,
+    bool clearParentId = false,
     int? createdSequence,
     int? updatedSequence,
     bool clearUpdatedSequence = false,
@@ -143,6 +179,8 @@ class BoardElement {
       size: clearSize ? null : (size ?? this.size),
       style: clearStyle ? null : (style ?? this.style),
       color: clearColor ? null : (color ?? this.color),
+      groupId: clearGroupId ? null : (groupId ?? this.groupId),
+      parentId: clearParentId ? null : (parentId ?? this.parentId),
       createdSequence: createdSequence ?? this.createdSequence,
       updatedSequence: clearUpdatedSequence
           ? null
@@ -172,6 +210,13 @@ class BoardElement {
       size: size,
       style: event.style,
       color: event.color,
+      groupId: event.groupId ??
+          _str(payload['group_id'] ?? payload['groupId']) ??
+          // Every element of one generated drawing plan is intentionally one
+          // composite group, even when the plan expands into several records.
+          (event.kind == BoardEventType.drawPlan ? 'plan:$id' : null),
+      parentId: event.parentId ??
+          _str(payload['parent_id'] ?? payload['parentId']),
       createdSequence: sequence,
     );
   }
@@ -185,6 +230,8 @@ class BoardElement {
         if (size != null) 'size': size!.toJson(),
         if (style != null) 'style': style,
         if (color != null) 'color': color,
+        if (groupId != null) 'group_id': groupId,
+        if (parentId != null) 'parent_id': parentId,
         'created_sequence': createdSequence,
         if (updatedSequence != null) 'updated_sequence': updatedSequence,
         if (removedAtSequence != null) 'removed_at_sequence': removedAtSequence,

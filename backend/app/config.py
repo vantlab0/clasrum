@@ -54,10 +54,10 @@ class Settings(BaseSettings):
     qwen_voice: str = "Katerina"
     qwen_input_sample_rate: int = 16000
     qwen_output_sample_rate: int = 24000
-    qwen_turn_detection: str = "server_vad"
-    # When no API key is configured (or fake mode is on) the backend serves a
-    # deterministic offline tutor. Useful for local dev, CI and demos.
-    qwen_fake_mode: bool = False
+    # semantic_vad_ec understands semantics, so it listens for real user speech
+    # (including barge-in while the tutor talks) while filtering background noise.
+    qwen_turn_detection: str = "semantic_vad_ec"
+    qwen_vad_silence_ms: int = 500
     # Backend-side timeout wrapping the full Qwen connect + session readiness.
     qwen_connect_timeout_seconds: float = 25.0
     # Qwen adapter handshake/session.updated readiness timeout.
@@ -96,7 +96,7 @@ class Settings(BaseSettings):
 
     @property
     def qwen_configured(self) -> bool:
-        return bool(self.qwen_api_key) and not self.qwen_fake_mode
+        return bool(self.qwen_api_key)
 
 
 @lru_cache(maxsize=1)

@@ -8,7 +8,6 @@ os.environ.update(
         "ENVIRONMENT": "development",
         "DEBUG": "false",
         "CORS_ORIGINS": '["*"]',
-        "QWEN_FAKE_MODE": "true",
         "JWT_SECRET": "local-debug-secret-0123456789abcdef0123456789abcdef",
     }
 )

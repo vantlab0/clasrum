@@ -134,6 +134,7 @@ class BoardAnimationScheduler {
   int _frameEpoch = 0;
   Completer<void>? _idleCompleter;
   bool _disposed = false;
+  bool _paused = false;
 
   /// Fired after every animation frame (after [repaint] notifies).
   VoidCallback? onFrame;
@@ -150,6 +151,32 @@ class BoardAnimationScheduler {
   bool get isAnimating => _reveals.isNotEmpty || _moves.isNotEmpty;
 
   bool get isIdle => !isAnimating;
+
+  /// True while the reveal clock is frozen (e.g. app backgrounded). Existing
+  /// animation progress is preserved; new reveals wait at progress 0 until
+  /// [resume] is called.
+  bool get isPaused => _paused;
+
+  /// Bumps the repaint epoch without advancing the clock. Document-only changes
+  /// (instant events, snapshot restores, erases) must invalidate the painter.
+  void notifyFrame() {
+    if (_disposed) return;
+    _notifyFrame();
+  }
+
+  /// Freezes the reveal clock without discarding animation state.
+  void pause() {
+    if (_disposed || _paused) return;
+    _paused = true;
+    _driver?.stop();
+  }
+
+  /// Thaws the reveal clock and resumes any in-flight animations.
+  void resume() {
+    if (_disposed || !_paused) return;
+    _paused = false;
+    if (isAnimating) _ensureDriver();
+  }
 
   /// Levels (render layers 1..6) with an active animation right now.
   Set<int> get activeLevels => Set<int>.unmodifiable(_activeLevels);
@@ -236,7 +263,9 @@ class BoardAnimationScheduler {
     final effective = _scale(duration ?? const Duration(milliseconds: 420));
     if (effective.inMicroseconds <= 0 || from == to) {
       _moves.remove(elementId);
+      _reveals.remove(elementId);
       _refreshActiveLevels();
+      _notifyFrame();
       onComplete?.call();
       return;
     }
@@ -249,6 +278,9 @@ class BoardAnimationScheduler {
       to: to,
       onComplete: onComplete,
     );
+    // A position animation supersedes any reveal of the same element; stale
+    // completion callbacks must never clear the current teaching beat.
+    _reveals.remove(elementId);
     _activeLevels.add(level);
     _ensureDriver();
     _notifyFrame();
@@ -259,14 +291,18 @@ class BoardAnimationScheduler {
     final moved = _moves.remove(elementId) != null;
     if (removed || moved) {
       _refreshActiveLevels();
+      _notifyFrame();
       _maybeGoIdle();
     }
   }
 
   void cancelLevel(int level) {
+    final before = _reveals.length + _moves.length;
     _reveals.removeWhere((_, reveal) => reveal.level == level);
     _moves.removeWhere((_, move) => move.level == level);
+    if (before == _reveals.length + _moves.length) return;
     _refreshActiveLevels();
+    _notifyFrame();
     _maybeGoIdle();
   }
 
@@ -371,6 +407,7 @@ class BoardAnimationScheduler {
   }
 
   void _ensureDriver() {
+    if (_paused || _disposed) return;
     if (_driver == null) {
       final factory =
           _driverFactory ?? (onTick) => TickerBoardFrameDriver(onTick);
@@ -384,7 +421,7 @@ class BoardAnimationScheduler {
   }
 
   void _handleTick(Duration driverElapsed) {
-    if (_disposed) return;
+    if (_disposed || _paused) return;
     var delta = driverElapsed - _lastDriverElapsed;
     if (delta.isNegative) delta = Duration.zero;
     _lastDriverElapsed = driverElapsed;

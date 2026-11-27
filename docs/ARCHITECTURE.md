@@ -110,7 +110,7 @@ retrieve_memory → (plan_lesson | load_plan) → teach_step
 | duplicate event | unique `event_id`/`(lesson, sequence)` constraints; client reducer ignores `sequence <= applied` |
 | out-of-order event | client buffers gaps and requests backfill; server always emits strictly increasing sequence |
 | invalid tool call | rejected with `{ok:false, ...}`; zero DB mutations; Qwen retries or continues |
-| Qwen outage | `qwen_unavailable` error with `retryable`; offline fake transport available for dev |
+| Qwen outage | `qwen_unavailable` error with `retryable`; client shows a retryable error, no offline fallback |
 | audio glitch | playback queue independent of board/transcript; UI shows teacher state, never blocks |
 | two clients same lesson | newest socket takes the lease; old socket is closed `4001` after `session.interrupted` |
 

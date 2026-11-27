@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
+import '../model/board_collision.dart';
 import '../model/board_document.dart';
 import '../model/board_event.dart';
 import '../model/board_geometry.dart';
@@ -28,6 +31,9 @@ class BlackboardController extends ChangeNotifier {
         _animationsEnabled = animationsEnabled,
         _document = initialDocument ?? BoardDocument.empty() {
     _queue.onBackfillRequest = _handleBackfillRequest;
+    _queue.onGapDetected = (expected, received) {
+      onGapDetected?.call(expected, received);
+    };
     _scheduler.onIdle = _handleSchedulerIdle;
     if (initialDocument != null) {
       _queue.reset(initialDocument.lastSequence);
@@ -89,6 +95,9 @@ class BlackboardController extends ChangeNotifier {
     _animationsEnabled = value;
     if (!value) {
       _scheduler.cancelAll();
+      // cancelAll drops completion callbacks, so a mid-reveal event would
+      // otherwise leave _currentEvent set and stall the queue forever.
+      _currentEvent = null;
       _pump();
     }
   }
@@ -99,9 +108,15 @@ class BlackboardController extends ChangeNotifier {
   /// Pauses the reveal clock without losing animation state (used while the
   /// app is backgrounded). Animations never block audio.
   void pauseAnimations() {
-    // The scheduler ticker naturally pauses with the app lifecycle; explicit
-    // pause is represented by disabling the queue pacing only.
-    _queue.paused = false;
+    if (_disposed) return;
+    _scheduler.pause();
+  }
+
+  /// Resumes a clock frozen by [pauseAnimations] and drains any queued events.
+  void resumeAnimations() {
+    if (_disposed) return;
+    _scheduler.resume();
+    _pump();
   }
 
   /// Replaces the document with a snapshot (e.g. `session.ready` / REST resume).
@@ -113,6 +128,10 @@ class BlackboardController extends ChangeNotifier {
     _document = base;
     _queue.reset(base.lastSequence);
     _instantEventIds.clear();
+    // Snapshot replacement must invalidate the painter even when the sequence
+    // is unchanged (e.g. a full restore at the same revision).
+    _scheduler.notifyFrame();
+    _warnForUnrelatedOverlaps(base);
     notifyListeners();
   }
 
@@ -127,8 +146,7 @@ class BlackboardController extends ChangeNotifier {
 
   /// Enqueues a live event: ordered, deduplicated, gap-buffered.
   void enqueue(BoardEvent event) {
-    if (_disposed) return;
-    if (event.sequence <= appliedSequence) return;
+    if (_disposed || !_acceptsEvent(event)) return;
     final accepted = _queue.enqueue(event);
     if (accepted) _pump();
   }
@@ -137,10 +155,20 @@ class BlackboardController extends ChangeNotifier {
   void enqueueAll(List<BoardEvent> events) {
     if (_disposed) return;
     for (final event in events) {
-      if (event.sequence <= appliedSequence) continue;
+      if (!_acceptsEvent(event)) continue;
       _queue.enqueue(event);
     }
     _pump();
+  }
+
+  /// A foreign-session event is a reducer no-op. Filtering it before the queue
+  /// keeps `queue.appliedSequence` in lockstep with the document: otherwise a
+  /// valid event sharing its sequence would be rejected forever.
+  bool _acceptsEvent(BoardEvent event) {
+    if (event.sequence <= appliedSequence) return false;
+    return _document.sessionId.isEmpty ||
+        event.sessionId.isEmpty ||
+        event.sessionId == _document.sessionId;
   }
 
   /// Applies reconnect backfill events instantly (no reveal animation), as they
@@ -148,26 +176,35 @@ class BlackboardController extends ChangeNotifier {
   void backfill(List<BoardEvent> events) {
     if (_disposed) return;
     if (_currentEvent != null) {
-      final current = _currentEvent!;
-      _scheduler.cancelElement(_elementIdFor(current, _document) ?? '');
-      _instantEventIds.add(current.eventId);
+      // Backfill supersedes every live teaching beat, not just the current one.
+      _scheduler.cancelAll();
       _currentEvent = null;
     }
     final sorted = events.toList(growable: false)
       ..sort((a, b) => a.sequence.compareTo(b.sequence));
     for (final event in sorted) {
-      if (event.sequence <= appliedSequence) continue;
+      if (!_acceptsEvent(event)) continue;
       _instantEventIds.add(event.eventId);
       _queue.enqueue(event);
     }
     _pump();
   }
 
-  /// Completes when the queue is drained and every reveal has finished.
+  /// Completes when every buffered event has been reduced and all reveals are
+  /// finished. An unresolved sequence gap is treated as drained: the transport
+  /// has already been asked to backfill it via [onBackfillRequested].
   Future<void> waitForIdle() async {
     while (!_disposed) {
       _pump();
-      if (!isAnimating) return;
+      if (!isAnimating) {
+        if (!hasPendingEvents || hasGap || _queue.paused || _scheduler.isPaused) {
+          return;
+        }
+        // Dependency holds are released by the queue's grace timer; yield so
+        // that timer can make progress without spinning the caller's isolate.
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+        continue;
+      }
       await _scheduler.waitForIdle();
     }
   }
@@ -212,6 +249,10 @@ class BlackboardController extends ChangeNotifier {
         documentChanged = true;
         _collectEventWarnings(event);
         _currentEvent = event;
+        // Consume the instant marker only when the event is actually applied.
+        // A backfilled event blocked behind a gap must keep its marker until
+        // the missing sequence arrives.
+        final instant = _instantEventIds.remove(event.eventId);
         final kind = event.kind;
 
         if (kind == BoardEventType.clear) {
@@ -236,7 +277,7 @@ class BlackboardController extends ChangeNotifier {
             targetElementId == null ? null : updated[targetElementId];
         final shouldAnimate = _animationsEnabled &&
             event.animate &&
-            !_instantEventIds.contains(event.eventId) &&
+            !instant &&
             element != null &&
             element.isVisible &&
             event.layer > 0;
@@ -261,7 +302,7 @@ class BlackboardController extends ChangeNotifier {
             from: from,
             to: to,
             duration: duration,
-            onComplete: _handleRevealCompleted,
+            onComplete: () => _handleRevealCompleted(event),
           );
         } else {
           _scheduler.reveal(
@@ -269,20 +310,26 @@ class BlackboardController extends ChangeNotifier {
             elementId: element.elementId,
             level: element.level,
             duration: duration,
-            onComplete: _handleRevealCompleted,
+            onComplete: () => _handleRevealCompleted(event),
           );
         }
-        break;
+        // A zero-duration reveal completes synchronously inside the call above;
+        // the nested pump is suppressed by _pumping, so continue here instead
+        // of leaving the loop waiting for a ticker that will never start.
+        if (_currentEvent != null) break;
       }
     } finally {
       _pumping = false;
-      _instantEventIds.clear();
-      if (documentChanged && !_disposed) notifyListeners();
+      if (documentChanged && !_disposed) {
+        _scheduler.notifyFrame();
+        notifyListeners();
+      }
     }
   }
 
-  void _handleRevealCompleted() {
+  void _handleRevealCompleted([BoardEvent? completed]) {
     if (_disposed) return;
+    if (completed != null && !identical(completed, _currentEvent)) return;
     _currentEvent = null;
     _pump();
   }
@@ -320,6 +367,21 @@ class BlackboardController extends ChangeNotifier {
       final latest = queueWarnings.last;
       if (!_warnings.contains(latest)) _warn(latest);
     }
+  }
+
+  /// Snapshot restore bypasses the reducer, so collision validation is done
+  /// explicitly here. Grouped/parented overlaps are intentionally ignored.
+  void _warnForUnrelatedOverlaps(BoardDocument document) {
+    final overlaps = BoardCollisionDetector.unrelated(document.elements.values);
+    if (overlaps.isEmpty) return;
+    final sample = overlaps.take(2).map(
+          (collision) =>
+              '${collision.first.elementId}/${collision.second.elementId}',
+        );
+    _warn(
+      'restored board has ${overlaps.length} unrelated overlap(s): '
+      '${sample.join(', ')}',
+    );
   }
 
   void _warn(String message) {

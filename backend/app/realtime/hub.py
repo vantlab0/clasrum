@@ -50,7 +50,6 @@ from app.graph import service as graph_service
 from app.lessons import service as lessons_service
 from app.lessons.board_reads import get_board_snapshot, get_transcript_cursor
 from app.lessons.transcripts import append_transcript_entry
-from app.realtime.qwen_adapter import FakeQwenSession
 from app.realtime.transcript_triggers import TranscriptTriggerSystem
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,11 @@ CLOSE_SUPERSEDED = 4001  # newer socket took the lease
 CLOSE_FORBIDDEN = 4003  # not the lesson owner
 CLOSE_LESSON_ENDED = 4004
 CLOSE_QWEN_UNAVAILABLE = 4010
+
+# Guard rails for automatic teaching continuation. Student speech resets the
+# counter; a silent/empty model turn cannot spin forever.
+MAX_AUTO_CONTINUES_PER_TURN = 60
+AUTO_CONTINUE_COOLDOWN_SECONDS = 1.0
 
 # WS message types (docs/CONTRACTS.md §6).
 MSG_SESSION_READY = "session.ready"
@@ -73,6 +77,7 @@ MSG_TEACHER_STATE = "teacher.state"
 MSG_TRANSCRIPT_ENTRY = "transcript.entry"
 MSG_LESSON_STATE = "lesson.state"
 MSG_SESSION_INTERRUPTED = "session.interrupted"
+MSG_USER_SPEECH_STARTED = "user.speech_started"  # semantic VAD heard the student
 MSG_SESSION_ENDED = "session.ended"
 MSG_ERROR = "error"
 MSG_PONG = "pong"
@@ -88,7 +93,7 @@ CLIENT_PING = "ping"
 
 @runtime_checkable
 class QwenSession(Protocol):
-    """A Qwen Realtime transport (real DashScope WS or fake dev transport)."""
+    """A Qwen Realtime transport over the real DashScope WebSocket."""
 
     async def connect(self, instructions: str, tools: list[dict[str, Any]]) -> None:
         ...
@@ -106,7 +111,7 @@ class QwenSession(Protocol):
         ...
 
     async def function_call_output(
-        self, call_id: str, output: str
+        self, call_id: str, output: str, *, continue_response: bool = True
     ) -> None:
         ...
 
@@ -181,6 +186,12 @@ class LessonSocket:
     startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     response_lifecycles: dict[str, ResponseLifecycle] = field(default_factory=dict)
     active_response_id: str | None = None
+    # Teaching continues automatically after each response unless the tutor
+    # explicitly asks for the student's answer via wait_for_student (or finishes).
+    waiting_for_student: bool = False
+    lesson_finished: bool = False
+    auto_continue_count: int = 0
+    last_auto_continue_at: float = 0.0
 
 
 class LessonRealtimeHub:
@@ -363,9 +374,11 @@ class LessonRealtimeHub:
                 board_envelope = await get_board_snapshot(db, lesson, include_events=False)
                 cursor = await get_transcript_cursor(db, lesson.id)
 
-            # Open Qwen Realtime (real or fake).
+            # Open the real Qwen Realtime transport. No offline fallback exists.
             settings = get_settings()
-            qwen = self._qwen_factory() if self._qwen_factory else FakeQwenSession()
+            if self._qwen_factory is None:
+                raise RuntimeError("Qwen Realtime transport is not configured")
+            qwen = self._qwen_factory()
             socket.qwen = qwen
             try:
                 await asyncio.wait_for(
@@ -421,6 +434,7 @@ class LessonRealtimeHub:
                         "output_sample_rate": settings.qwen_output_sample_rate,
                         "format": "pcm16",
                         "channels": 1,
+                        "turn_detection": settings.qwen_turn_detection,
                     },
                 }
             )
@@ -503,8 +517,9 @@ class LessonRealtimeHub:
                     continue
 
         # End of client stream: signal Qwen we're done sending audio for this turn.
+        # Do not restart a finished lesson or override an explicit wait-for-student.
         try:
-            if socket.qwen is not None:
+            if socket.qwen is not None and not socket.lesson_finished and not socket.waiting_for_student:
                 await socket.qwen.create_response()
         except Exception:  # pragma: no cover
             logger.warning("qwen create_response on end failed lesson=%s", lesson_id, exc_info=True)
@@ -527,12 +542,16 @@ class LessonRealtimeHub:
             return
 
         if msg_type == CLIENT_AUDIO_START:
-            # Client signals mic is open; no server action needed beyond logging.
+            # Student is engaging: resume automatic teaching after their turn.
+            socket.waiting_for_student = False
+            socket.auto_continue_count = 0
             logger.debug("audio.start lesson=%s", lesson_id)
             return
 
         if msg_type == CLIENT_AUDIO_STOP:
             # Client finished speaking; commit audio buffer and ask Qwen to produce a response.
+            socket.waiting_for_student = False
+            socket.auto_continue_count = 0
             try:
                 if socket.qwen is not None:
                     try:
@@ -546,7 +565,11 @@ class LessonRealtimeHub:
             return
 
         if msg_type == CLIENT_SESSION_INTERRUPT:
-            # Barge-in: cancel Qwen response, truncate playback.
+            # Barge-in: cancel Qwen response, truncate playback, and unblock
+            # prompts that were gated on the cancelled response id.
+            socket.active_response_id = None
+            socket.waiting_for_student = False
+            socket.auto_continue_count = 0
             try:
                 if socket.qwen is not None:
                     await socket.qwen.cancel_response()
@@ -629,6 +652,14 @@ class LessonRealtimeHub:
                 await _send_error(socket, "qwen_unavailable", str(msg), retryable=True)
                 continue
 
+            if etype == "input_audio_buffer.speech_started":
+                # Semantic VAD heard real user speech (background noise filtered).
+                # Let the client flush tutor playback for clean barge-in.
+                socket.waiting_for_student = False
+                socket.auto_continue_count = 0
+                await socket.websocket.send_json({MSG_TYPE: MSG_USER_SPEECH_STARTED})
+                continue
+
             if etype == "response.created":
                 response = event.get("response") if isinstance(event.get("response"), dict) else {}
                 response_id = str(response.get("id") or event.get("response_id") or "")
@@ -692,6 +723,9 @@ class LessonRealtimeHub:
                     socket.response_lifecycles[response_id].has_text = True
                 entry = self._transcript_entry_from_qwen(lesson_id, event)
                 if entry is not None:
+                    if str(entry.get("speaker")) == "student":
+                        socket.waiting_for_student = False
+                        socket.auto_continue_count = 0
                     logger.info(
                         "qwen transcript lesson=%s speaker=%s final=%s chars=%s response_id=%s",
                         lesson_id,
@@ -779,7 +813,9 @@ class LessonRealtimeHub:
                     and socket.startup_nudge_count < 3
                     and (now_mono - socket.startup_last_nudge_at) >= 3.0
                 )
+                recovery_nudged = False
                 if can_nudge and not has_board_call_in_response:
+                    recovery_nudged = True
                     socket.startup_nudge_count += 1
                     socket.startup_last_nudge_at = now_mono
                     socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED if (socket.last_qwen_audio_at or socket.last_qwen_transcript_at) else LessonStartupPhase.PROMPT_SENT
@@ -798,6 +834,7 @@ class LessonRealtimeHub:
                         logger.warning("startup recovery nudge failed lesson=%s", lesson_id, exc_info=True)
                 elif can_nudge and has_board_call_in_response and not board_satisfied:
                     # board_intent was attempted in this response but did not result in a board event.
+                    recovery_nudged = True
                     socket.startup_nudge_count += 1
                     socket.startup_last_nudge_at = now_mono
                     logger.warning(
@@ -814,6 +851,11 @@ class LessonRealtimeHub:
                         )
                     except Exception:  # pragma: no cover
                         logger.warning("startup recovery nudge after failed board_intent failed lesson=%s", lesson_id, exc_info=True)
+
+                if not recovery_nudged:
+                    await self._maybe_auto_continue(
+                        socket, lesson_id, response_id, status, lifecycle
+                    )
                 continue
 
             if etype == "teacher.state":
@@ -846,6 +888,26 @@ class LessonRealtimeHub:
         if response_id and response_id in socket.response_lifecycles:
             socket.response_lifecycles[response_id].has_function_call = True
         logger.info("qwen function_call lesson=%s name=%s call_id=%s response_id=%s", lesson_id, name, call_id, response_id)
+
+        if name == "wait_for_student":
+            # Explicit signal: only now does the tutor stop and listen. Rhetorical
+            # questions and routine checks must not pause automatic teaching.
+            socket.waiting_for_student = True
+            socket.auto_continue_count = 0
+            logger.info("wait_for_student accepted lesson=%s response_id=%s", lesson_id, response_id)
+            if socket.qwen is not None:
+                try:
+                    await socket.qwen.function_call_output(
+                        call_id,
+                        json.dumps({"ok": True, "waiting_for_student": True}),
+                        continue_response=False,
+                    )
+                except Exception:  # pragma: no cover
+                    logger.warning("wait_for_student output failed lesson=%s", lesson_id, exc_info=True)
+            return
+
+        if name == "lesson_finish":
+            socket.lesson_finished = True
 
         if name == "board_intent":
             socket.startup_has_board_tool_call = True
@@ -1024,11 +1086,16 @@ class LessonRealtimeHub:
                     f"Topic: {topic}. Subject: {subject}. Learning level: {level}. "
                     f"Lesson plan/context: {json.dumps(plan, ensure_ascii=False)[:2000]}. "
                     "Begin teaching immediately without waiting for the student to speak first. "
-                    "Your first response must include a board_intent tool call that creates the lesson heading and first visual teaching content. "
-                    "write the lesson heading on the board, give a short introduction, write the first concept heading, "
-                    "explain the first concept with at least one meaningful definition or explanation, and include a relevant diagram when the concept requires one. "
-                    "Use the board_intent tool for the visual board content. "
-                    "After the visual is on the board, explain it aloud and ask the student a question after explaining the first concept."
+                    "Your first board call must be board_write_on_board writing ONLY the lesson title as ONE short line (style h1). "
+                    "Then give a short spoken introduction. After that, write ONE short line per board_write_on_board call "
+                    "(1-8 words, one or two words is fine, no newlines, no paragraphs, no lists), each line matching what you are "
+                    "explaining at that moment; make a separate call for every additional line. Never dump a block of text or "
+                    "several lines in a single call, and never repeat a line already on the board. "
+                    "never supply x/y coordinates - describe the semantic position and the backend layout manager places it. "
+                    "Use create_board_visual only when the concept genuinely needs a diagram, table or graph, and keep any labels "
+                    "to one short line. Keep teaching automatically through the lesson plan after each spoken turn - the backend "
+                    "starts your next response for you, so never stop just because you asked a rhetorical question or a quick check. "
+                    "Call wait_for_student ONLY when you need the student's actual answer before you can continue, then listen."
                 )
             else:
                 prompt = (
@@ -1037,7 +1104,12 @@ class LessonRealtimeHub:
                     f"Current lesson state: {json.dumps(detail.get('lesson_state') or {}, ensure_ascii=False)[:1500]}. "
                     f"Board last_sequence={last_seq}, transcript_cursor={cursor_val}. "
                     "Briefly reorient the student and continue from the current progress. "
-                    "Do not repeat already completed content; use board_intent only for new or resumed visuals."
+                    "Do not repeat already completed content or any line already on the board; use board_intent only for new or resumed visuals. "
+                    "Write each new heading, definition or equation with board_write_on_board as ONE short line per call "
+                    "(1-8 words, no newlines, no paragraphs, no lists), aligned with what you say aloud; make a separate call per line. "
+                    "Use create_board_visual only for new structured visuals with one-line labels; "
+                    "leave physical placement to the backend layout manager. Keep teaching automatically after each spoken turn; "
+                    "call wait_for_student only when you truly need the student's answer, otherwise continue explaining."
                 )
 
             logger.info(
@@ -1112,6 +1184,60 @@ class LessonRealtimeHub:
             return "tutor_start_delayed", "The tutor started responding, but the first board visual is still being prepared.", False
         return "tutor_start_delayed", "The tutor connection was established, but the lesson did not start. Please retry.", True
 
+    async def _maybe_auto_continue(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        response_id: str,
+        status: str,
+        lifecycle: ResponseLifecycle | None,
+    ) -> None:
+        """Start the next teaching turn unless the tutor asked to wait.
+
+        The model is told (in session instructions) to keep teaching after each
+        response. DashScope does not create that next response by itself, so we
+        drive it with a bare ``response.create`` — no synthetic user message is
+        added to the conversation or transcript.
+        """
+        if socket.closed.is_set() or socket.qwen is None:
+            return
+        if status in {"failed", "cancelled", "incomplete"}:
+            return
+        if socket.waiting_for_student or socket.lesson_finished:
+            return
+        if socket.active_response_id is not None:
+            return
+        if not (socket.startup_has_board_event or socket.last_board_event_at > 0):
+            return  # startup recovery owns the conversation until the board exists
+        if self._director_busy(socket):
+            return
+        # A tool call already triggers response.create via function_call_output;
+        # creating another here would produce two overlapping responses.
+        if lifecycle is not None and lifecycle.has_function_call:
+            return
+        # Do not spin on empty/completion-only responses.
+        if lifecycle is None or not (lifecycle.has_audio or lifecycle.has_text):
+            return
+        now = time.monotonic()
+        if (now - socket.last_auto_continue_at) < AUTO_CONTINUE_COOLDOWN_SECONDS:
+            return
+        if socket.auto_continue_count >= MAX_AUTO_CONTINUES_PER_TURN:
+            logger.warning(
+                "auto-continue cap reached lesson=%s response_id=%s count=%s (student turn will reset)",
+                lesson_id, response_id, socket.auto_continue_count,
+            )
+            return
+        socket.auto_continue_count += 1
+        socket.last_auto_continue_at = now
+        try:
+            await socket.qwen.create_response()
+            logger.info(
+                "auto-continue teaching lesson=%s response_id=%s count=%s",
+                lesson_id, response_id, socket.auto_continue_count,
+            )
+        except Exception:  # pragma: no cover
+            logger.warning("auto-continue failed lesson=%s", lesson_id, exc_info=True)
+
     async def _safe_prompt_text(self, socket: LessonSocket, text: str, *, reason: str) -> bool:
         if socket.closed.is_set() or socket.qwen is None:
             return False
@@ -1175,16 +1301,17 @@ class LessonRealtimeHub:
                         if not has_response_activity:
                             nudge = (
                                 "System instruction: The classroom is connected. Begin teaching now. "
-                                "Start by calling board_intent to write the lesson heading and first concept on the board, then explain it aloud. "
-                                "Do not wait for the student."
+                                "Start by calling board_write_on_board to write ONLY the lesson title as one short line (style h1), then explain it aloud. "
+                                "Write one short line per call (1-8 words, no newlines) as you teach. Keep teaching automatically; "
+                                "only call wait_for_student when you need the student's answer."
                             )
                             reason = "watchdog_nudge_start"
                         else:
                             nudge = (
                                 "System instruction: Continue teaching, but you must create the first visible board content now. "
-                                "Call board_intent with a clear intent for the lesson heading, a short introduction, "
-                                "the first concept heading, one meaningful explanation, and a simple relevant diagram. "
-                                "Then continue explaining aloud. Do not wait for the student."
+                                "Call board_write_on_board with the lesson title as one short line (style h1), then write one short line "
+                                "per call (1-8 words, no newlines) as you teach. Use create_board_visual only if a diagram is genuinely needed. "
+                                "Then continue explaining aloud. Keep teaching after each spoken turn; pause only via wait_for_student."
                             )
                             reason = "watchdog_nudge_board_intent"
                         sent = await self._safe_prompt_text(socket, nudge, reason=reason)
@@ -1393,11 +1520,24 @@ def _teacher_instructions(detail: Mapping[str, Any] | Any) -> str:
         f"You are a patient, encouraging private tutor teaching '{topic}' ({subject}) "
         f"at {level} level. You speak out loud while writing on a shared blackboard. "
         f"Concepts to cover: {concept_list}. "
-        f"Rules: (1) Always write key points, definitions and equations on the board "
-        f"using the board_* tools before explaining them aloud. (2) Ask the student "
-        f"questions and check answers before advancing. (3) Never modify database "
-        f"state directly — only through the exposed tools. (4) Keep explanations "
-        f"concise and check understanding frequently. (5) Use lesson_finish when "
+        f"Rules: (1) Write the lesson title FIRST with board_write_on_board using "
+        f"style h1, as ONE short line. (2) Then teach aloud and write on the board "
+        f"ONE SHORT LINE PER TOOL CALL: each board_write_on_board call must contain "
+        f"only one line of 1-8 words (one or two words is fine), with no newlines, no "
+        f"paragraphs and no lists. Make a separate call for every new line, and let "
+        f"each line say only what you are explaining at that moment so the board "
+        f"grows naturally with your speech. NEVER dump a long text or several lines "
+        f"in a single call, and never repeat a line already on the board. "
+        f"(3) KEEP TEACHING AUTOMATICALLY. The backend starts your next response as "
+        f"soon as yours ends, so continue with the next small teaching step instead of "
+        f"stopping or staying silent. Do not wait for the student after every question: "
+        f"rhetorical questions and quick understanding checks are part of your teaching, "
+        f"so carry on explaining them yourself. (4) Call wait_for_student ONLY when you "
+        f"have asked a direct question and genuinely need the student's answer before "
+        f"you can continue; after that call, stop and listen. (5) Use create_board_visual "
+        f"only when a diagram, table or graph genuinely helps, and keep its text labels "
+        f"to single short lines. (6) Never modify database state directly — only through "
+        f"the exposed tools. (7) Keep explanations concise. (8) Use lesson_finish when "
         f"the student is done or time is up."
     )
 

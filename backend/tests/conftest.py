@@ -38,7 +38,6 @@ os.environ["DEBUG"] = "false"
 os.environ["JWT_SECRET"] = "test-secret-do-not-use-in-production-0123456789"
 os.environ["JWT_EXPIRES_MINUTES"] = "60"
 os.environ["QWEN_API_KEY"] = ""
-os.environ["QWEN_FAKE_MODE"] = "true"
 os.environ["NOTES_API_KEY"] = ""
 os.environ["CORS_ORIGINS"] = '["*"]'
 

@@ -1,11 +1,15 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_math_fork/flutter_math.dart';
+import 'package:flutter_math_fork/tex.dart';
 
 import 'model/board_document.dart';
 import 'model/board_element.dart';
 import 'model/board_event.dart';
 import 'model/board_geometry.dart';
+import 'model/board_metrics.dart';
 import 'model/board_transform.dart';
 import 'model/chalk_palette.dart';
 import 'model/drawing_plan.dart';
@@ -64,15 +68,29 @@ class BlackboardView extends StatelessWidget {
             }
             final document = controller.document;
 
-            return CustomPaint(
-              size: size,
-              painter: _BoardPainter(
-                document: document,
-                transform: transform,
-                animations: controller.animations,
-                bounds: BoardBoundsRegistry(),
-                interactive: interactive,
-              ),
+            return Stack(
+              clipBehavior: Clip.hardEdge,
+              children: <Widget>[
+                CustomPaint(
+                  size: size,
+                  painter: _BoardPainter(
+                    document: document,
+                    transform: transform,
+                    animations: controller.animations,
+                    bounds: BoardBoundsRegistry(),
+                    interactive: interactive,
+                  ),
+                ),
+                // LaTeX elements are real flutter_math_fork widgets layered on
+                // the same normalized transform. The canvas painter still owns
+                // every other layer and owns measured bounds for annotations.
+                Positioned.fill(
+                  child: _LatexOverlay(
+                    controller: controller,
+                    transform: transform,
+                  ),
+                ),
+              ],
             );
           },
         );
@@ -101,6 +119,144 @@ class _CombinedListenable extends Listenable {
       l.removeListener(listener);
     }
   }
+}
+
+/// Renders LaTeX equations with flutter_math_fork on top of the canvas board.
+///
+/// Parsed syntax trees are cached by source string: animation frames only
+/// rebuild clip rectangles, they do not reparse TeX on every repaint.
+class _LatexOverlay extends StatefulWidget {
+  const _LatexOverlay({required this.controller, required this.transform});
+
+  final BlackboardController controller;
+  final BoardTransform transform;
+
+  @override
+  State<_LatexOverlay> createState() => _LatexOverlayState();
+}
+
+class _LatexOverlayState extends State<_LatexOverlay> {
+  static const int _maxCachedExpressions = 128;
+  final Map<String, SyntaxTree?> _parsed = <String, SyntaxTree?>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final document = widget.controller.document;
+    final equations = document.elementsInPaintOrder.where((e) => e.isLatex);
+    return IgnorePointer(
+      child: Stack(
+        clipBehavior: Clip.hardEdge,
+        children: <Widget>[
+          for (final element in equations) _equation(element),
+        ],
+      ),
+    );
+  }
+
+  Widget _equation(BoardElement element) {
+    final expression = (element.latex ?? element.payload['text']?.toString() ?? '')
+        .trim();
+    if (expression.isEmpty) return const SizedBox.shrink();
+
+    final position = widget.controller.animations.resolvedPosition(
+      element.elementId,
+      element.position ?? BoardPoint.zero,
+    );
+    final estimated = BoardBoundsEstimator.estimate(element);
+    final width = element.size?.w ?? estimated?.w ?? 0.34;
+    final height = element.size?.h ?? estimated?.h ?? 0.09;
+    final rect = Rect.fromLTWH(
+      widget.transform.sx(position.x),
+      widget.transform.sy(position.y),
+      math.max(24.0, width * widget.transform.width * widget.transform.viewportScale),
+      math.max(
+        20.0,
+        height * widget.transform.height * widget.transform.viewportScale,
+      ),
+    );
+    final progress = widget.controller.animations
+        .progress(element.elementId)
+        .clamp(0.0, 1.0);
+    final color = ChalkPalette.resolve(element.color);
+    final fontScale = (element.payload['font_scale'] as num?)?.toDouble() ?? 1.0;
+    final fontSize = widget.transform.fontPixels(0.034, fontScale: fontScale);
+
+    return Positioned.fromRect(
+      rect: rect,
+      child: ClipRect(
+        clipper: _ProgressiveRevealClipper(progress),
+        child: SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.topLeft,
+            child: _mathWidget(expression, fontSize, color),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _mathWidget(String expression, double fontSize, Color color) {
+    final textStyle = TextStyle(
+      fontSize: fontSize,
+      color: color,
+      height: 1.15,
+      decoration: TextDecoration.none,
+    );
+    final ast = _parse(expression);
+    if (ast != null) {
+      return Math(
+        ast: ast,
+        mathStyle: MathStyle.text,
+        textStyle: textStyle,
+        textScaleFactor: 1.0,
+      );
+    }
+    // Invalid TeX still renders a readable fallback rather than crashing the
+    // board; Math.tex owns ParseException handling.
+    return Math.tex(
+      expression,
+      mathStyle: MathStyle.text,
+      textStyle: textStyle,
+      textScaleFactor: 1.0,
+      onErrorFallback: (error) => Text(
+        error.messageWithType,
+        style: TextStyle(fontSize: fontSize, color: color),
+      ),
+    );
+  }
+
+  SyntaxTree? _parse(String expression) {
+    if (_parsed.containsKey(expression)) return _parsed[expression];
+    SyntaxTree? tree;
+    try {
+      tree = SyntaxTree(
+        greenRoot: TexParser(
+          expression,
+          const TexParserSettings(),
+        ).parse(),
+      );
+    } catch (_) {
+      tree = null;
+    }
+    if (_parsed.length >= _maxCachedExpressions) _parsed.clear();
+    _parsed[expression] = tree;
+    return tree;
+  }
+}
+
+class _ProgressiveRevealClipper extends CustomClipper<Rect> {
+  const _ProgressiveRevealClipper(this.progress);
+
+  final double progress;
+
+  @override
+  Rect getClip(Size size) =>
+      Rect.fromLTWH(0, 0, size.width * progress, size.height);
+
+  @override
+  bool shouldReclip(_ProgressiveRevealClipper oldClipper) =>
+      oldClipper.progress != progress;
 }
 
 /// The single painter that draws all six layers in order.
@@ -160,7 +316,13 @@ class _BoardPainter extends CustomPainter {
       case BoardEventType.writeDefinition:
       case BoardEventType.writeBulletList:
       case BoardEventType.updateText:
-        _paintTextElement(canvas, element, resolvedPosition, progress, color);
+        // Direct board writes with style=equation travel as write_text. Route
+        // them to the LaTeX painter instead of drawing raw markup as prose.
+        if (element.isLatex) {
+          _paintEquationElement(canvas, element, resolvedPosition, progress, color);
+        } else {
+          _paintTextElement(canvas, element, resolvedPosition, progress, color);
+        }
         break;
       case BoardEventType.writeEquation:
       case BoardEventType.updateEquation:
@@ -291,8 +453,16 @@ class _BoardPainter extends CustomPainter {
   }
 
   int _headingLevel(BoardElement element) {
-    final level = element.payload['level'];
-    return level is int ? level : 1;
+    final raw = element.payload['heading_level'] ??
+        element.payload['level'] ??
+        element.payload['style'];
+    if (raw is String) {
+      final value = raw.toLowerCase();
+      if (value.length == 2 && value[0] == 'h') {
+        return (int.tryParse(value[1]) ?? 1).clamp(1, 6);
+      }
+    }
+    return (asDouble(raw)?.round() ?? 1).clamp(1, 6);
   }
 
   // ------------------------------------------------------------- equation --
@@ -304,41 +474,16 @@ class _BoardPainter extends CustomPainter {
     double progress,
     Color color,
   ) {
-    final latex = element.payload['latex'] as String?;
-    if (latex == null || latex.isEmpty) return;
-    final px = transform.sx(position.x);
-    final py = transform.sy(position.y);
-    final paint = Paint()
-      ..color = ChalkPalette.withOpacity(color, 0.9)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = transform
-          .strokePixels((element.payload['stroke_width'] as num?)?.toDouble());
-    final box =
-        Rect.fromLTWH(px, py, transform.width * 0.4, transform.unit * 0.09);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(box, const Radius.circular(4)),
-      paint,
-    );
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: latex,
-        style: TextStyle(
-          fontSize: transform.fontPixels(0.03),
-          color: color,
-          fontFamily: 'ChalkScript',
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: box.width);
-    textPainter.paint(canvas, Offset(px + 8, py + 4));
+    // LaTeX is painted by [_LatexOverlay] using flutter_math_fork. The canvas
+    // only publishes measured bounds so highlights and collision checks wrap
+    // the real formula rather than a placeholder box.
+    final estimated = BoardBoundsEstimator.estimate(element);
+    final width = element.size?.w ?? estimated?.w ?? 0.34;
+    final height = element.size?.h ?? estimated?.h ?? 0.09;
     bounds.put(
-        element.elementId,
-        BoardRect.fromLTWH(
-          position.x,
-          position.y,
-          0.4,
-          0.09,
-        ));
+      element.elementId,
+      BoardRect.fromLTWH(position.x, position.y, width, height),
+    );
   }
 
   // ------------------------------------------------------------ drawings --

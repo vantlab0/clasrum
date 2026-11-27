@@ -167,8 +167,7 @@ QWEN_MODEL=qwen3.8-omni-flash-realtime
 QWEN_VOICE=Katerina
 QWEN_INPUT_SAMPLE_RATE=16000
 QWEN_OUTPUT_SAMPLE_RATE=24000
-QWEN_TURN_DETECTION=server_vad
-QWEN_FAKE_MODE=false
+QWEN_TURN_DETECTION=semantic_vad_ec
 
 NOTES_MODEL=qwen3.7-flash
 NOTES_BASE_URL=https://ws-o3v6mh0i8y9tqdfx.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1

@@ -56,17 +56,55 @@ class ChalkTextStyleSpec {
 
   static const Map<String, ChalkTextStyleSpec> _specs =
       <String, ChalkTextStyleSpec>{
+    // Distinct H1-H6 specs (CONTRACTS §3.1): a level-4 heading must not be
+    // visually identical to a level-2 one.
+    'h1': ChalkTextStyleSpec(
+      name: 'h1',
+      heightFraction: 0.076,
+      weight: FontWeight.w700,
+      letterSpacingEm: 0.022,
+    ),
+    'h2': ChalkTextStyleSpec(
+      name: 'h2',
+      heightFraction: 0.062,
+      weight: FontWeight.w700,
+      letterSpacingEm: 0.02,
+    ),
+    'h3': ChalkTextStyleSpec(
+      name: 'h3',
+      heightFraction: 0.054,
+      weight: FontWeight.w600,
+      letterSpacingEm: 0.018,
+    ),
+    'h4': ChalkTextStyleSpec(
+      name: 'h4',
+      heightFraction: 0.047,
+      weight: FontWeight.w600,
+      letterSpacingEm: 0.015,
+    ),
+    'h5': ChalkTextStyleSpec(
+      name: 'h5',
+      heightFraction: 0.041,
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.012,
+    ),
+    'h6': ChalkTextStyleSpec(
+      name: 'h6',
+      heightFraction: 0.036,
+      weight: FontWeight.w500,
+      letterSpacingEm: 0.01,
+    ),
     'heading': ChalkTextStyleSpec(
       name: 'heading',
-      heightFraction: 0.056,
-      weight: FontWeight.w600,
-      letterSpacingEm: 0.02,
+      heightFraction: 0.076,
+      weight: FontWeight.w700,
+      letterSpacingEm: 0.022,
     ),
     'subheading': ChalkTextStyleSpec(
       name: 'subheading',
-      heightFraction: 0.043,
-      weight: FontWeight.w500,
-      letterSpacingEm: 0.015,
+      heightFraction: 0.062,
+      weight: FontWeight.w700,
+      letterSpacingEm: 0.02,
     ),
     'body': ChalkTextStyleSpec(name: 'body', heightFraction: 0.032),
     'definition': ChalkTextStyleSpec(
@@ -110,8 +148,9 @@ class ChalkTextStyleSpec {
   }) {
     if (definitionTerm) return _specs['definitionTerm']!;
     final normalized = (style ?? 'body').toLowerCase();
-    if (normalized == 'heading') {
-      return headingLevel <= 1 ? _specs['heading']! : _specs['subheading']!;
+    if (normalized == 'heading' || normalized == 'subheading') {
+      final level = headingLevel.clamp(1, 6);
+      return _specs['h$level'] ?? _specs['heading']!;
     }
     if (normalized == 'numbered') return _specs['numbered']!;
     return _specs[normalized] ?? _specs['body']!;
