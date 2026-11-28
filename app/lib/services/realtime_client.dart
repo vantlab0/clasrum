@@ -254,6 +254,8 @@ class RealtimeClient extends ChangeNotifier {
     required double scale,
     required Offset offset,
     bool narrow = false,
+    double contentExtent = 1.0,
+    String reason = 'scroll_bottom',
   }) async {
     await _send(viewportFullPayload(
       sequence: sequence,
@@ -262,6 +264,8 @@ class RealtimeClient extends ChangeNotifier {
       scale: scale,
       offset: offset,
       narrow: narrow,
+      contentExtent: contentExtent,
+      reason: reason,
     ));
   }
 
@@ -273,6 +277,8 @@ class RealtimeClient extends ChangeNotifier {
     required double scale,
     required Offset offset,
     bool narrow = false,
+    double contentExtent = 1.0,
+    String reason = 'scroll_bottom',
   }) =>
       <String, dynamic>{
         'type': 'board.viewport_full',
@@ -282,6 +288,8 @@ class RealtimeClient extends ChangeNotifier {
         'scale': scale.clamp(0.5, 2.0),
         'offset': {'x': offset.dx, 'y': offset.dy},
         'layout_mode': narrow ? 'mobile' : 'desktop',
+        'content_extent': contentExtent < 1.0 ? 1.0 : contentExtent,
+        'reason': reason,
       };
 
   /// Ask the server to persist a full-board clear for the student.

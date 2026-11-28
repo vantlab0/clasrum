@@ -304,20 +304,27 @@ class BoardDocument {
   BoardRect? boundsOf(
     Iterable<String> elementIds, {
     Map<String, BoardRect>? measuredBounds,
+    double verticalExtent = 1.0,
   }) {
     BoardRect? union;
     for (final id in elementIds) {
-      final bounds = _boundsOfId(id, 0, measuredBounds: measuredBounds);
+      final bounds = _boundsOfId(
+        id,
+        0,
+        measuredBounds: measuredBounds,
+        verticalExtent: verticalExtent,
+      );
       if (bounds == null) continue;
       union = union == null ? bounds : union.union(bounds);
     }
-    return union?.clamp01();
+    return union?.clampToExtent(verticalExtent);
   }
 
   BoardRect? _boundsOfId(
     String id,
     int depth, {
     Map<String, BoardRect>? measuredBounds,
+    double verticalExtent = 1.0,
   }) {
     final element = _elements[id];
     if (element == null || !element.isVisible) return null;
@@ -329,12 +336,14 @@ class BoardDocument {
         (element.kind == BoardEventType.writeText ||
             element.kind == BoardEventType.writeHeading ||
             element.kind == BoardEventType.updateText)) {
-      return measured.clamp01();
+      return measured.clampToExtent(verticalExtent);
     }
     final declared = element.declaredBounds;
-    if (declared != null && !declared.isEmpty) return declared.clamp01();
+    if (declared != null && !declared.isEmpty) {
+      return declared.clampToExtent(verticalExtent);
+    }
     final estimated = BoardBoundsEstimator.estimate(element);
-    if (estimated != null) return estimated;
+    if (estimated != null) return estimated.clampToExtent(verticalExtent);
     if (depth < 2 &&
         (element.kind == BoardEventType.highlight ||
             element.kind == BoardEventType.highlightEquation)) {
@@ -348,7 +357,11 @@ class BoardDocument {
       final single = element.payload['target_id'];
       if (single != null) targets.add(single.toString());
       if (targets.isNotEmpty) {
-        return boundsOf(targets, measuredBounds: measuredBounds);
+        return boundsOf(
+          targets,
+          measuredBounds: measuredBounds,
+          verticalExtent: verticalExtent,
+        );
       }
     }
     return null;
@@ -564,9 +577,13 @@ class BoardDocument {
         for (final b in bounds) {
           union = union == null ? b : union.union(b);
         }
+        // Backend placement is authoritative. Only derive a box from plan-local
+        // geometry for legacy events that did not declare position/size.
         element = element.copyWith(
-          position: union == null ? element.position : BoardPoint(union.x, union.y),
-          size: union == null ? element.size : BoardSize(union.w, union.h),
+          position: event.position ??
+              (union == null ? element.position : BoardPoint(union.x, union.y)),
+          size: event.size ??
+              (union == null ? element.size : BoardSize(union.w, union.h)),
           animation: <String, dynamic>{
             ...element.animation,
             'duration_ms': plan.totalDurationMs,
@@ -884,7 +901,7 @@ class BoardDocument {
     merged['position'] = newPosition.toJson();
     builder.elements[id!] = existing.copyWith(
       payload: Map<String, dynamic>.unmodifiable(merged),
-      position: newPosition.clamp01(),
+      position: newPosition,
       updatedSequence: event.sequence,
     );
   }

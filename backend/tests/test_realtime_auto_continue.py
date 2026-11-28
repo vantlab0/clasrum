@@ -53,7 +53,7 @@ class FakeQwen:
         return None
 
     async def function_call_output(
-        self, call_id: str, output: str, *, continue_response: bool = True
+        self, call_id: str, output: str, *, continue_response: bool = False
     ) -> None:
         self.function_outputs.append((call_id, output, continue_response))
 
@@ -132,7 +132,8 @@ async def test_title_only_startup_requests_diagram_before_auto_continue() -> Non
     await qwen.queue.put(None)
     await asyncio.wait_for(task, timeout=2)
 
-    assert qwen.create_response_count == 0
+    # Startup recovery is a hub-governed response.create, not an auto-continue.
+    assert qwen.create_response_count == 1
     assert qwen.prompt_texts
     assert "create_board_visual" in qwen.prompt_texts[-1]
 

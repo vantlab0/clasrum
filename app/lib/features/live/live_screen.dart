@@ -79,6 +79,7 @@ class _LiveScreenState extends State<LiveScreen>
   late final BoardViewportController _viewportController;
   BoardFullnessSnapshot? _lastBoardFullness;
   int _reportedFullSequence = -1;
+  int _reportedFullExtentMillis = -1;
   late final AnimationController _pulseController;
   late final AiAudioPlaybackController _audioPlayback;
 
@@ -101,11 +102,25 @@ class _LiveScreenState extends State<LiveScreen>
     // Track board content bounds so the viewport can clamp panning.
     _boardController.addListener(() {
       if (!mounted) return;
-      final bounds = _boardController.measuredContentBounds();
+      final extent = _viewportController.contentExtent;
+      final bounds = _boardController.measuredContentBounds(
+        verticalExtent: extent,
+      );
       _viewportController.onContentBoundsChanged(bounds);
       // Measured bounds are written during paint; check after that frame.
-      WidgetsBinding.instance
-          .addPostFrameCallback((_) => _recheckBoardFullness());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _recheckBoardFullness();
+        if (_viewportController.followLatest &&
+            !_viewportController.isManuallyInteracting) {
+          unawaited(
+            _viewportController.followLatestContent(
+              contentBounds: _viewportController.contentBounds,
+              animate: true,
+            ),
+          );
+        }
+      });
     });
     _viewportController.addListener(_recheckBoardFullness);
     _boardController.onBackfillRequested = (afterSequence) {
@@ -325,7 +340,9 @@ class _LiveScreenState extends State<LiveScreen>
   /// visible board screen is full. A report is sent at most once per sequence;
   /// the server owns the actual wipe.
   void _recheckBoardFullness() {
-    if (!mounted || _connecting || _boardController.isAnimating ||
+    if (!mounted ||
+        _connecting ||
+        _boardController.isAnimating ||
         _viewportController.isManuallyInteracting) {
       return;
     }
@@ -336,10 +353,11 @@ class _LiveScreenState extends State<LiveScreen>
     }
     final aliveIds = document.visibleElements.map((e) => e.elementId).toSet();
     _boardController.renderCache.bounds.retainOnly(aliveIds);
+    final extent = _viewportController.contentExtent;
     final boxes = <BoardRect>[];
     for (final id in aliveIds) {
       final measured = _boardController.renderCache.bounds[id] ??
-          document.boundsOf(<String>[id]);
+          document.boundsOf(<String>[id], verticalExtent: extent);
       if (measured != null && !measured.isEmpty) boxes.add(measured);
     }
     if (boxes.isEmpty) return;
@@ -348,10 +366,15 @@ class _LiveScreenState extends State<LiveScreen>
       elementBounds: boxes,
       sequence: _boardController.appliedSequence,
       wasFull: _lastBoardFullness?.isFull ?? false,
+      contentExtent: extent,
     );
     _lastBoardFullness = snapshot;
-    if (!snapshot.isFull || snapshot.sequence <= _reportedFullSequence) return;
+    final extentMillis = (extent * 1000).round();
+    final sameExtentReport = snapshot.sequence <= _reportedFullSequence &&
+        extentMillis <= _reportedFullExtentMillis;
+    if (!snapshot.reachedBottom || sameExtentReport) return;
     _reportedFullSequence = snapshot.sequence;
+    _reportedFullExtentMillis = extentMillis;
     final narrow = BoardVerticalLayout.isNarrow(
       MediaQuery.sizeOf(context),
     );
@@ -362,6 +385,8 @@ class _LiveScreenState extends State<LiveScreen>
       scale: _viewportController.scale,
       offset: _viewportController.offset,
       narrow: narrow,
+      contentExtent: extent,
+      reason: 'scroll_bottom',
     ));
   }
 
@@ -563,6 +588,7 @@ class _LiveScreenState extends State<LiveScreen>
     _boardController.renderCache.bounds.clear();
     _viewportController.onContentBoundsChanged(null);
     _viewportController.setViewport(Offset.zero, 1.0);
+    _viewportController.resumeFollow();
   }
 
   /// Student-initiated clear. The server persists the event and broadcasts it;
@@ -619,7 +645,7 @@ class _LiveScreenState extends State<LiveScreen>
         position.y - 0.02,
         0.04,
         0.04,
-      ).clamp01();
+).clampToExtent(_viewportController.contentExtent);
       unawaited(_viewportController.focusOnRect(
         pointRect,
         animate: animate,

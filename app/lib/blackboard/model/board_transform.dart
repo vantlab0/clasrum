@@ -3,15 +3,48 @@ import 'dart:ui' show Offset, Rect, Size;
 
 import 'board_geometry.dart';
 
-/// Maps normalized board coordinates (0..1, origin top-left) to logical pixels
-/// inside one padded content rect. The single transform used by every renderer
-/// and by hit testing — never duplicate viewport math elsewhere.
+/// Maps normalized board coordinates (0..1 horizontally, 0..logicalExtent
+/// vertically, origin top-left) to logical pixels inside one padded content
+/// rect. The single transform used by every renderer and by hit testing — never
+/// duplicate viewport math elsewhere.
 ///
 /// Supports an optional viewport [offset] (normalized board coords of the
 /// visible area's top-left corner) and [scale] (zoom factor) so the board can
 /// be panned and zoomed without changing the underlying content layout.
+/// [logicalExtent] is the authoritative virtual vertical scroll extent; it
+/// defaults to 1.0 for a single-screen board and grows as content extends below
+/// the first screen.
 class BoardTransform {
-  BoardTransform._(this.size, this.contentRect, {this.offset, this.scale});
+  BoardTransform._(
+    this.size,
+    this.contentRect, {
+    this.offset,
+    this.scale,
+    double logicalExtent = 1.0,
+  }) : logicalExtent = math.max(1.0, logicalExtent);
+
+  /// Builds a transform that paints normalized `0..1` coordinates into
+  /// [region] of [base]. Used by generated drawing plans, whose payload
+  /// coordinates are plan-local while the board element owns the placement.
+  factory BoardTransform.forRegion(BoardTransform base, BoardRect region) {
+    final scale = base.viewportScale;
+    final offset = base.viewportOffset;
+    final left = base.contentRect.left +
+        (region.x - offset.dx) * base.width * scale;
+    final top = base.contentRect.top +
+        (region.y - offset.dy) * base.height * scale;
+    return BoardTransform._(
+      base.size,
+      Rect.fromLTWH(
+        left,
+        top,
+        region.w * base.width * scale,
+        region.h * base.height * scale,
+      ),
+      scale: 1.0,
+      logicalExtent: base.logicalExtent,
+    );
+  }
 
   /// Builds a transform for [size] with a proportional padding (content inset)
   /// so chalk never touches the physical board edge. The board occupies the
@@ -21,6 +54,7 @@ class BoardTransform {
     double insetFactor = 0.03,
     double minInset = 10,
     double topExtraInset = 0,
+    double logicalExtent = 1.0,
   }) {
     final width = size.width.isFinite && size.width > 0 ? size.width : 1.0;
     final height = size.height.isFinite && size.height > 0 ? size.height : 1.0;
@@ -38,7 +72,11 @@ class BoardTransform {
       math.max(inset + 1, width - inset),
       math.max(inset + 1, height - inset),
     );
-    return BoardTransform._(Size(width, height), rect);
+    return BoardTransform._(
+      Size(width, height),
+      rect,
+      logicalExtent: logicalExtent,
+    );
   }
 
   final Size size;
@@ -54,6 +92,10 @@ class BoardTransform {
   /// Zoom scale (1.0 = no zoom). Values > 1 zoom in; < 1 zoom out.
   final double? scale;
 
+  /// Virtual vertical board extent in normalized board units. 1.0 is a single
+  /// screen; larger values mean the board scrolls vertically.
+  final double logicalExtent;
+
   double get width => contentRect.width;
   double get height => contentRect.height;
 
@@ -66,6 +108,36 @@ class BoardTransform {
 
   /// Effective viewport scale, defaulting to 1.0.
   double get viewportScale => scale ?? 1.0;
+
+  /// Visible height in normalized board units at the current scale.
+  double get visibleHeight => (1.0 / viewportScale).clamp(0.0, logicalExtent);
+
+  /// Visible width in normalized board units at the current scale.
+  double get visibleWidth => (1.0 / viewportScale).clamp(0.0, 1.0);
+
+  /// Clamps [offset] so the visible viewport stays within the virtual board.
+  static Offset clampOffset(
+    Offset offset, {
+    required double scale,
+    required double logicalExtent,
+  }) {
+    final extent = math.max(1.0, logicalExtent);
+    final visibleW = (1.0 / scale).clamp(0.0, 1.0);
+    final visibleH = (1.0 / scale).clamp(0.0, extent);
+    final maxX = (1.0 - visibleW).clamp(0.0, 1.0);
+    final maxY = (extent - visibleH).clamp(0.0, extent);
+    return Offset(offset.dx.clamp(0.0, maxX), offset.dy.clamp(0.0, maxY));
+  }
+
+  /// The normalized board rect currently visible through the viewport.
+  BoardRect get visibleLogicalRect {
+    final clamped = clampOffset(
+      viewportOffset,
+      scale: viewportScale,
+      logicalExtent: logicalExtent,
+    );
+    return BoardRect(clamped.dx, clamped.dy, visibleWidth, visibleHeight);
+  }
 
   /// Pixel X for normalized board X, honoring viewport offset/scale.
   double sx(double normalizedX) {
@@ -126,7 +198,10 @@ class BoardTransform {
       normalizedJitter * unit * viewportScale;
 
   bool containsNormalized(BoardPoint point) =>
-      point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
+      point.x >= 0 &&
+      point.x <= 1 &&
+      point.y >= 0 &&
+      point.y <= logicalExtent;
 
   double distanceNormalized(BoardPoint a, BoardPoint b) {
     final dx = (a.x - b.x) * width * viewportScale;
@@ -134,19 +209,32 @@ class BoardTransform {
     return math.sqrt(dx * dx + dy * dy);
   }
 
-  /// Returns a copy with the given [offset] and [scale] applied to the viewport.
-  /// Use this to pan/zoom the board without changing content layout.
-  BoardTransform withViewport({Offset? offset, double? scale}) {
+  /// Returns a copy with the given [offset], [scale], and/or [logicalExtent]
+  /// applied. Use this to pan/zoom the board without changing content layout.
+  BoardTransform withViewport({
+    Offset? offset,
+    double? scale,
+    double? logicalExtent,
+  }) {
     return BoardTransform._(
       size,
       contentRect,
       offset: offset ?? this.offset,
       scale: scale ?? this.scale,
+      logicalExtent: logicalExtent ?? this.logicalExtent,
     );
   }
 
-  BoardTransform copyWithSize(Size newSize, {double insetFactor = 0.03}) =>
-      BoardTransform.fromSize(newSize, insetFactor: insetFactor);
+  BoardTransform copyWithSize(
+    Size newSize, {
+    double insetFactor = 0.03,
+    double? logicalExtent,
+  }) =>
+      BoardTransform.fromSize(
+        newSize,
+        insetFactor: insetFactor,
+        logicalExtent: logicalExtent ?? this.logicalExtent,
+      );
 
   @override
   bool operator ==(Object other) =>
@@ -154,12 +242,15 @@ class BoardTransform {
       other.size == size &&
       other.contentRect == contentRect &&
       other.offset == offset &&
-      other.scale == scale;
+      other.scale == scale &&
+      other.logicalExtent == logicalExtent;
 
   @override
-  int get hashCode => Object.hash(size, contentRect, offset, scale);
+  int get hashCode =>
+      Object.hash(size, contentRect, offset, scale, logicalExtent);
 
   @override
   String toString() =>
-      'BoardTransform(size=$size, content=$contentRect, offset=$offset, scale=$scale)';
+      'BoardTransform(size=$size, content=$contentRect, offset=$offset, '
+      'scale=$scale, logicalExtent=$logicalExtent)';
 }

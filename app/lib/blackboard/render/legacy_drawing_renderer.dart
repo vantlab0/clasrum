@@ -36,7 +36,9 @@ class DrawingRenderer {
     BoardPoint origin,
     BoardSize size, {
     double progress = 1.0,
+    ChalkTextEngine? textEngine,
   }) {
+    final engine = textEngine ?? _textEngine;
     progress = progress.clamp(0.0, 1.0);
     final elementIds = <String>[];
     final bounds = <String, BoardRect>{};
@@ -53,7 +55,8 @@ class DrawingRenderer {
     final targetMs = progress * totalMs;
     var elapsedMs = 0.0;
 
-    for (final step in steps) {
+    for (var stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+      final step = steps[stepIndex];
       final stepStart = elapsedMs;
       final stepEnd = elapsedMs + step.delayMs + step.durationMs;
       elapsedMs = stepEnd;
@@ -78,9 +81,10 @@ class DrawingRenderer {
       final elementId = 'dr_${step.id}';
       elementIds.add(elementId);
 
-      final color = ChalkPalette.resolve(
+      final color = ChalkPalette.resolveIllustration(
         step.color,
-        fallback: ChalkPalette.primary,
+        fallbackRole: ChalkPalette.illustrationRoles[
+            stepIndex % ChalkPalette.illustrationRoles.length],
       );
 
       // Map template-relative geometry to board-relative geometry.
@@ -108,6 +112,7 @@ class DrawingRenderer {
             ty,
             sx,
             sy,
+            transform,
           );
           break;
         case DrawingAction.path:
@@ -128,6 +133,7 @@ class DrawingRenderer {
             ty,
             sx,
             sy,
+            transform,
           );
           break;
         case DrawingAction.rectangle:
@@ -148,6 +154,7 @@ class DrawingRenderer {
             ty,
             sx,
             sy,
+            transform,
           );
           break;
         case DrawingAction.circle:
@@ -168,6 +175,7 @@ class DrawingRenderer {
             ty,
             sx,
             sy,
+            transform,
           );
           break;
         case DrawingAction.text:
@@ -181,6 +189,7 @@ class DrawingRenderer {
             sy,
             color,
             stepProgress,
+            engine,
           );
           bounds[elementId] = _textBounds(
             step.geometry,
@@ -189,6 +198,7 @@ class DrawingRenderer {
             sx,
             sy,
             transform,
+            engine,
           );
           break;
         case DrawingAction.highlight:
@@ -348,7 +358,10 @@ class DrawingRenderer {
     // Fill if specified and progress > 0.5
     if (step.geometry['fillColor'] != null && progress > 0.5) {
       final fillPaint = _paint()
-        ..color = ChalkPalette.resolve(step.geometry['fillColor'])
+        ..color = ChalkPalette.resolveIllustration(
+          step.geometry['fillColor'],
+          fallbackRole: 'teal',
+        )
             .withValues(alpha: 0.15 * progress)
         ..style = ui.PaintingStyle.fill;
       canvas.drawRect(rect, fillPaint);
@@ -388,7 +401,10 @@ class DrawingRenderer {
     // Fill if specified
     if (step.geometry['fillColor'] != null && progress > 0.5) {
       final fillPaint = _paint()
-        ..color = ChalkPalette.resolve(step.geometry['fillColor'])
+        ..color = ChalkPalette.resolveIllustration(
+          step.geometry['fillColor'],
+          fallbackRole: 'teal',
+        )
             .withValues(alpha: 0.15 * progress)
         ..style = ui.PaintingStyle.fill;
       canvas.drawOval(rect, fillPaint);
@@ -405,6 +421,7 @@ class DrawingRenderer {
     double sy,
     Color color,
     double progress,
+    ChalkTextEngine textEngine,
   ) {
     final text = step.geometry['text'] as String?;
     if (text == null || text.isEmpty) return;
@@ -418,15 +435,16 @@ class DrawingRenderer {
 
     final spec = ChalkTextStyleSpec.forName(styleName);
     final fontSizePx = transform.fontPixels(spec.heightFraction);
-    _textEngine.paintText(
+    textEngine.paintText(
       canvas,
       text,
       origin: ui.Offset(x, y),
       spec: spec,
-      color: color.withValues(alpha: color.a * progress),
+      color: color,
       fontSizePx: fontSizePx,
       maxWidthPx: maxWidth.clamp(20.0, double.infinity),
       progress: progress,
+      opacity: progress,
     );
   }
 
@@ -452,6 +470,7 @@ class DrawingRenderer {
     double ty,
     double sx,
     double sy,
+    BoardTransform transform,
   ) {
     final start = geometry['start'] as Map?;
     final end = geometry['end'] as Map?;
@@ -462,8 +481,13 @@ class DrawingRenderer {
     final x2 = tx + (end['x'] as num? ?? 0.0).toDouble() * sx;
     final y2 = ty + (end['y'] as num? ?? 0.0).toDouble() * sy;
 
-    return BoardRect.fromPoints(BoardPoint(x1, y1), BoardPoint(x2, y2))
-        .clamp01();
+    final pixelRect = ui.Rect.fromPoints(
+      ui.Offset(x1, y1),
+      ui.Offset(x2, y2),
+    );
+    return transform
+        .normalizedRect(pixelRect)
+        .clampToExtent(transform.logicalExtent);
   }
 
   static BoardRect _pathBounds(
@@ -472,6 +496,7 @@ class DrawingRenderer {
     double ty,
     double sx,
     double sy,
+    BoardTransform transform,
   ) {
     final pointsRaw = geometry['points'] as List?;
     if (pointsRaw == null || pointsRaw.isEmpty) return BoardRect.zero;
@@ -491,12 +516,15 @@ class DrawingRenderer {
       maxY = math.max(maxY, py);
     }
 
-    return BoardRect(
+    final pixelRect = ui.Rect.fromLTWH(
       minX.isFinite ? minX : 0,
       minY.isFinite ? minY : 0,
       (maxX - minX).clamp(0.0, double.infinity),
       (maxY - minY).clamp(0.0, double.infinity),
-    ).clamp01();
+    );
+    return transform
+        .normalizedRect(pixelRect)
+        .clampToExtent(transform.logicalExtent);
   }
 
   static BoardRect _rectBounds(
@@ -505,15 +533,19 @@ class DrawingRenderer {
     double ty,
     double sx,
     double sy,
+    BoardTransform transform,
   ) {
     final pos = geometry['position'] as Map? ?? {};
     final sz = geometry['size'] as Map? ?? {};
-    return BoardRect(
+    final pixelRect = ui.Rect.fromLTWH(
       tx + (pos['x'] as num? ?? 0.0).toDouble() * sx,
       ty + (pos['y'] as num? ?? 0.0).toDouble() * sy,
       (sz['w'] as num? ?? 0.1).toDouble() * sx,
       (sz['h'] as num? ?? 0.1).toDouble() * sy,
-    ).clamp01();
+    );
+    return transform
+        .normalizedRect(pixelRect)
+        .clampToExtent(transform.logicalExtent);
   }
 
   static BoardRect _circleBounds(
@@ -522,15 +554,19 @@ class DrawingRenderer {
     double ty,
     double sx,
     double sy,
+    BoardTransform transform,
   ) {
     final pos = geometry['position'] as Map? ?? {};
     final sz = geometry['size'] as Map? ?? {};
-    return BoardRect(
+    final pixelRect = ui.Rect.fromLTWH(
       tx + (pos['x'] as num? ?? 0.0).toDouble() * sx,
       ty + (pos['y'] as num? ?? 0.0).toDouble() * sy,
       (sz['w'] as num? ?? 0.1).toDouble() * sx,
       (sz['h'] as num? ?? 0.1).toDouble() * sy,
-    ).clamp01();
+    );
+    return transform
+        .normalizedRect(pixelRect)
+        .clampToExtent(transform.logicalExtent);
   }
 
   static BoardRect _textBounds(
@@ -540,6 +576,7 @@ class DrawingRenderer {
     double sx,
     double sy,
     BoardTransform transform,
+    ChalkTextEngine textEngine,
   ) {
     final text = geometry['text'] as String? ?? '';
     if (text.isEmpty) return BoardRect.zero;
@@ -551,13 +588,17 @@ class DrawingRenderer {
 
     final spec = ChalkTextStyleSpec.forName(styleName);
     final fontSizePx = transform.fontPixels(spec.heightFraction);
-    // Rough estimate: chars * glyph width factor * font size.
-    final estWidth = math.min(
-      maxWidth.clamp(20.0, double.infinity),
-      text.length * spec.heightFraction * 0.54 * fontSizePx,
+    final layout = textEngine.layout(
+      text: text,
+      spec: spec,
+      color: const ui.Color(0xFFFFFFFF),
+      fontSizePx: fontSizePx,
+      maxWidthPx: maxWidth.clamp(20.0, double.infinity),
     );
-    final estHeight = fontSizePx * spec.lineHeight * 1.28;
-    return BoardRect(x, y, estWidth, estHeight).clamp01();
+    final pixelRect = ui.Rect.fromLTWH(x, y, layout.width, layout.height);
+    return transform
+        .normalizedRect(pixelRect)
+        .clampToExtent(transform.logicalExtent);
   }
 
   // ------------------------------------------------------------------

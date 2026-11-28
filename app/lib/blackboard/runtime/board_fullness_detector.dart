@@ -1,9 +1,14 @@
+import 'dart:math' as math;
+
 import '../model/board_geometry.dart';
 
 /// Pure measurement of how much of the student's visible board is covered.
 ///
 /// The backend owns physical placement and snapshots; this detector only
-/// answers "is the visible screen full?" using measured renderer bounds.
+/// answers "is the visible screen full?" using measured renderer bounds. For
+/// virtual scroll boards, coverage is measured against the visible viewport;
+/// reaching the bottom of scrollable content is reported separately and does
+/// not count as a filled board by itself.
 class BoardFullnessSnapshot {
   const BoardFullnessSnapshot({
     required this.visibleRect,
@@ -11,6 +16,8 @@ class BoardFullnessSnapshot {
     required this.intersectingElementCount,
     required this.isFull,
     required this.sequence,
+    required this.contentExtent,
+    required this.reachedBottom,
   });
 
   final BoardRect visibleRect;
@@ -18,12 +25,16 @@ class BoardFullnessSnapshot {
   final int intersectingElementCount;
   final bool isFull;
   final int sequence;
+  final double contentExtent;
+  final bool reachedBottom;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'x': visibleRect.x,
         'y': visibleRect.y,
         'w': visibleRect.w,
         'h': visibleRect.h,
+        'content_extent': contentExtent,
+        'reached_bottom': reachedBottom,
       };
 }
 
@@ -44,8 +55,12 @@ class BoardFullnessDetector {
     required Iterable<BoardRect> elementBounds,
     required int sequence,
     bool wasFull = false,
+    double contentExtent = 1.0,
   }) {
-    final visible = visibleRect.clamp01();
+    final extent = math.max(1.0, contentExtent);
+    final visible = visibleRect.clampToExtent(extent);
+    final reachedBottom =
+        visible.bottom >= extent - 0.001 || extent <= 1.0001;
     if (visible.isEmpty) {
       return BoardFullnessSnapshot(
         visibleRect: visible,
@@ -53,23 +68,29 @@ class BoardFullnessDetector {
         intersectingElementCount: 0,
         isFull: false,
         sequence: sequence,
+        contentExtent: extent,
+        reachedBottom: reachedBottom,
       );
     }
 
     final clipped = <BoardRect>[];
     for (final bounds in elementBounds) {
-      final left = bounds.x > visible.x ? bounds.x : visible.x;
-      final top = bounds.y > visible.y ? bounds.y : visible.y;
-      final right = bounds.right < visible.right ? bounds.right : visible.right;
+      final clamped = bounds.clampToExtent(extent);
+      final left = clamped.x > visible.x ? clamped.x : visible.x;
+      final top = clamped.y > visible.y ? clamped.y : visible.y;
+      final right =
+          clamped.right < visible.right ? clamped.right : visible.right;
       final bottom =
-          bounds.bottom < visible.bottom ? bounds.bottom : visible.bottom;
+          clamped.bottom < visible.bottom ? clamped.bottom : visible.bottom;
       if (right > left && bottom > top) {
         clipped.add(BoardRect(left, top, right - left, bottom - top));
       }
     }
 
     final coveredArea = _coveredArea(visible, clipped);
-    final coverage = (coveredArea / (visible.w * visible.h)).clamp(0.0, 1.0);
+    final denom = (visible.w * visible.h);
+    final coverage =
+        denom <= 0 ? 0.0 : (coveredArea / denom).clamp(0.0, 1.0);
     final enoughElements = clipped.length >= minimumElements;
     final isFull = wasFull
         ? coverage >= releaseThreshold
@@ -80,6 +101,8 @@ class BoardFullnessDetector {
       intersectingElementCount: clipped.length,
       isFull: isFull,
       sequence: sequence,
+      contentExtent: extent,
+      reachedBottom: reachedBottom,
     );
   }
 

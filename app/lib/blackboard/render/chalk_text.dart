@@ -194,6 +194,7 @@ class ChalkTextLayout {
     required this.fontSizePx,
     required this.maxWidthPx,
     required this.grain,
+    required this.grainPaths,
     required this.lines,
     required this.revealSpan,
   });
@@ -205,6 +206,11 @@ class ChalkTextLayout {
   final double fontSizePx;
   final double maxWidthPx;
   final List<ChalkSpeck> grain;
+
+  /// Specks bucketed by alpha into reusable paths. Painting four to eight
+  /// paths per frame replaces one canvas draw call per speck without changing
+  /// the deterministic texture.
+  final List<ui.Path> grainPaths;
 
   /// Painter line boxes, used to reveal wrapped text in reading order.
   final List<ui.LineMetrics> lines;
@@ -280,7 +286,12 @@ class ChalkTextLayout {
     );
   }
 
-  void dispose() => painter.dispose();
+  void dispose() {
+    for (final path in grainPaths) {
+      path.reset();
+    }
+    painter.dispose();
+  }
 }
 
 /// Measures and paints chalk text with a progressive left→right stroke reveal.
@@ -312,8 +323,13 @@ class ChalkTextEngine {
     final safeSize = fontSizePx.clamp(6.0, 200.0);
     final safeWidth =
         maxWidthPx.isFinite && maxWidthPx > 0 ? maxWidthPx : 10000.0;
-    final key = '${_stableHash(text)}|${spec.cacheKey}|${color.toARGB32()}|'
-        '${safeSize.toStringAsFixed(2)}|${safeWidth.round()}|${textAlign.index}';
+    // Alpha is a per-frame paint concern, not a layout concern. Keeping it out
+    // of the key prevents an animated fade from creating a new TextPainter and
+    // grain set on every tick.
+    final opaqueColor = color.withValues(alpha: 1.0);
+    final key = '${text.length}:${_stableHash(text)}|${spec.cacheKey}|'
+        '${opaqueColor.toARGB32()}|${safeSize.toStringAsFixed(2)}|'
+        '${safeWidth.round()}|${textAlign.index}';
     final cached = _cache[key];
     if (cached != null) {
       _touch(key);
@@ -324,7 +340,7 @@ class ChalkTextEngine {
         text: text,
         style: _textStyle(
           spec: spec,
-          color: color,
+          color: opaqueColor,
           fontSizePx: safeSize,
         ),
       ),
@@ -339,15 +355,16 @@ class ChalkTextEngine {
             0,
             (sum, line) => sum + math.max(line.width, safeSize * 0.6),
           );
+    final grain = _generateGrain(text, spec, painter.width, painter.height, safeSize);
     final layout = ChalkTextLayout(
       text: text,
       painter: painter,
       spec: spec,
-      color: color,
+      color: opaqueColor,
       fontSizePx: safeSize,
       maxWidthPx: safeWidth,
-      grain:
-          _generateGrain(text, spec, painter.width, painter.height, safeSize),
+      grain: grain,
+      grainPaths: _bucketGrain(grain),
       lines: lines,
       revealSpan: revealSpan,
     );
@@ -437,12 +454,16 @@ class ChalkTextEngine {
     // glyphs again beneath the base run, which reads as a dark ghost on the
     // black board.  Chalk texture comes from the deterministic grain/dust band
     // below, not from duplicating the silhouette.
-    canvas.saveLayer(
-      Rect.fromLTWH(0, 0, layout.width + 2, layout.height + 2),
-      Paint()..color = Color.fromRGBO(0, 0, 0, alpha),
-    );
-    layout.painter.paint(canvas, Offset.zero);
-    canvas.restore();
+    if (alpha >= 0.999) {
+      layout.painter.paint(canvas, Offset.zero);
+    } else {
+      canvas.saveLayer(
+        Rect.fromLTWH(0, 0, layout.width + 2, layout.height + 2),
+        Paint()..color = Color.fromRGBO(0, 0, 0, alpha),
+      );
+      layout.painter.paint(canvas, Offset.zero);
+      canvas.restore();
+    }
 
     _paintGrain(canvas, layout, clamped, alpha);
 
@@ -462,15 +483,12 @@ class ChalkTextEngine {
     // can be drawn in one pass without a second x-threshold per line.
     final edge = layout.revealEdge(progress);
     final paint = Paint()..style = PaintingStyle.fill;
-    for (final speck in layout.grain) {
+    for (var bucket = 0; bucket < layout.grainPaths.length; bucket++) {
+      final bucketAlpha = (bucket + 1) / layout.grainPaths.length;
       paint.color = layout.color.withValues(
-        alpha: (speck.alpha * alpha).clamp(0.0, 1.0),
+        alpha: (bucketAlpha * alpha).clamp(0.0, 1.0),
       );
-      canvas.drawCircle(
-        Offset(speck.dx, speck.dy),
-        speck.radius,
-        paint,
-      );
+      canvas.drawPath(layout.grainPaths[bucket], paint);
     }
     if (progress < 1) {
       // Chalk dust band right at the drawing edge: a few short dry strokes.
@@ -585,6 +603,21 @@ class ChalkTextEngine {
       );
     }
     return List<ChalkSpeck>.unmodifiable(specks);
+  }
+
+  static List<ui.Path> _bucketGrain(List<ChalkSpeck> specks) {
+    const buckets = 8;
+    final paths = List<ui.Path>.generate(buckets, (_) => ui.Path());
+    for (final speck in specks) {
+      final bucket = (speck.alpha * buckets).round().clamp(1, buckets) - 1;
+      paths[bucket].addOval(
+        Rect.fromCircle(
+          center: Offset(speck.dx, speck.dy),
+          radius: speck.radius,
+        ),
+      );
+    }
+    return paths;
   }
 
   static int _stableHash(String value) {

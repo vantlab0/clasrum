@@ -70,7 +70,7 @@ class _FakeQwen:
         self.outputs: list[dict[str, Any]] = []
 
     async def function_call_output(
-        self, call_id: str, output: str, *, continue_response: bool = True
+        self, call_id: str, output: str, *, continue_response: bool = False
     ) -> None:
         import json
 
@@ -121,4 +121,5 @@ async def test_replayed_function_call_executes_once_and_resends_cached_result(mo
     assert calls == ["call_7"]
     assert len(qwen.outputs) == 2
     assert qwen.outputs[0]["output"] == qwen.outputs[1]["output"]
-    assert qwen.outputs[1]["continue_response"] is True
+    # Replays resend the cached result but never request another response.
+    assert qwen.outputs[1]["continue_response"] is False

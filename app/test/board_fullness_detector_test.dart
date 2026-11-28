@@ -46,6 +46,35 @@ void main() {
       expect(snapshot.isFull, isFalse);
     });
 
+    test('virtual extent does not force a clear before bottom', () {
+      final snapshot = BoardFullnessDetector.snapshot(
+        visibleRect: const BoardRect(0, 0, 1, 1),
+        elementBounds: const <BoardRect>[
+          BoardRect(0, 0, 1, 0.4),
+          BoardRect(0, 0.4, 1, 0.4),
+          BoardRect(0, 1.2, 1, 0.3),
+        ],
+        sequence: 8,
+        contentExtent: 2.0,
+      );
+      expect(snapshot.isFull, isFalse);
+      expect(snapshot.reachedBottom, isFalse);
+    });
+
+    test('reports reached bottom at virtual end', () {
+      final snapshot = BoardFullnessDetector.snapshot(
+        visibleRect: const BoardRect(0, 1.2, 1, 1),
+        elementBounds: const <BoardRect>[
+          BoardRect(0, 1.2, 1, 0.3),
+          BoardRect(0, 1.5, 1, 0.3),
+          BoardRect(0, 1.8, 1, 0.3),
+        ],
+        sequence: 9,
+        contentExtent: 2.2,
+      );
+      expect(snapshot.reachedBottom, isTrue);
+    });
+
     test('once latched, coverage must drop below the release threshold', () {
       final boxes = <BoardRect>[
         const BoardRect(0, 0, 0.4, 1),

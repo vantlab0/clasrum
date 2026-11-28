@@ -642,6 +642,10 @@ class DrawPlanPayload extends BoardPayload {
 
   @override
   BoardPoint? get position {
+    // Backend placement is authoritative; plan-local geometry is only a
+    // fallback for legacy draw_plan payloads without an explicit position.
+    final declared = BoardPoint.tryParse(raw['position']);
+    if (declared != null) return declared;
     final bounds = plan?.elementBounds;
     if (bounds == null || bounds.isEmpty) return null;
     var minX = bounds.first.x;
@@ -655,6 +659,8 @@ class DrawPlanPayload extends BoardPayload {
 
   @override
   BoardSize? get size {
+    final declared = BoardSize.tryParse(raw['size']);
+    if (declared != null) return declared;
     final bounds = plan?.elementBounds;
     if (bounds == null || bounds.isEmpty) return null;
     var minX = bounds.first.x;

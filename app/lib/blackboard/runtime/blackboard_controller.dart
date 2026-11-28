@@ -73,14 +73,18 @@ class BlackboardController extends ChangeNotifier {
   ///
   /// Used by focus and viewport clamping so wrapped/mobile text is never
   /// treated as its older declared (pre-measurement) box.
-  BoardRect? measuredContentBounds() {
+  BoardRect? measuredContentBounds({double verticalExtent = 1.0}) {
     final aliveIds =
         document.visibleElements.map((e) => e.elementId).toSet();
     renderCache.bounds.retainOnly(aliveIds);
     final measured = Map<String, BoardRect>.fromEntries(
       renderCache.bounds.entries,
     );
-    return document.boundsOf(aliveIds, measuredBounds: measured);
+    return document.boundsOf(
+      aliveIds,
+      measuredBounds: measured,
+      verticalExtent: verticalExtent,
+    );
   }
 
   /// Last event sequence reduced into [document].

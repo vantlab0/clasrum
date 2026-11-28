@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.board import layout
+from app.board.palette import sanitize_illustration_color
 from app.board.drawing_protocol import (
     DrawingPlanError,
     MAX_ELEMENTS,
@@ -144,9 +145,15 @@ _SYSTEM_PROMPT = (
     "All coordinates are normalized to the available board region given in the "
     "context (region rect). Use organic paths, quadratic/cubic curves, arcs and "
     "irregular outlines for biological/organic structures; use hatching as "
-    "several short parallel path strokes for shading; keep fills subtle "
-    "(opacity <= 0.35); chalk palette colors: primary/secondary/blue/yellow/red/green "
-    "or #RRGGBB. Every kind=text label must be ONE short line (1-8 words, no "
+    "several short parallel path strokes for shading; keep fills translucent "
+    "(opacity <= 0.35) but visibly colourful. Use BRIGHT illustration colours "
+    "ONLY: cyan #00D9FF, blue #2979FF, violet #B388FF, coral #FF5252, "
+    "yellow #FFD740, lime #76FF03, orange #FF9100, pink #FF80AB, teal #1DE9B6. "
+    "Never use black, near-black, gray, charcoal, dark blue/green or off-white "
+    "for any illustration (the board is black). Use at least two complementary "
+    "roles per illustration and give labels a bright colour distinct from the "
+    "shape they name. Any other colour is sanitized to this palette. "
+    "Every kind=text label must be ONE short line (1-8 words, no "
     "newlines, no full sentences); never put a paragraph in a text element.\n"
     "Rules: draw something original that matches the requested concept; do not "
     "copy generic placeholder diagrams; every stage must build on the previous "
@@ -164,10 +171,10 @@ _PLAN_SCHEMA_HINT = {
             "kind": _KNINDS_LINE,
             "geometry": {"...": "per kind, see system prompt"},
             "style": {
-                "stroke_color": "primary|#RRGGBB",
+                "stroke_color": "cyan|blue|violet|coral|yellow|lime|orange|pink|teal",
                 "stroke_width": 2.0,
                 "stroke_opacity": 0.9,
-                "fill_color": "#RRGGBB",
+                "fill_color": "bright palette role (translucent)",
                 "fill_opacity": 0.2,
                 "line_cap": "round",
                 "line_join": "round",
@@ -503,34 +510,12 @@ async def call_board_director(context: IntentContext) -> dict[str, Any]:
     raise IntentHandlingError("Board director failed", code="qwen_unavailable", retryable=True)
 
 
-_COLOR_ROLES = {"primary", "secondary", "blue", "yellow", "red", "green"}
-_COLOR_ALIASES = {
-    "white": "primary",
-    "black": "primary",
-    "grey": "secondary",
-    "gray": "secondary",
-    "orange": "yellow",
-    "purple": "blue",
-    "brown": "red",
-    "pink": "red",
-}
 _CLOSED_KINDS = {"polygon", "rectangle", "ellipse"}
 
 
-def _repair_color(value: Any, default: str = "primary") -> str:
-    if not isinstance(value, str):
-        return default
-    text = value.strip()
-    lowered = text.lower()
-    if lowered in _COLOR_ROLES:
-        return lowered
-    if (
-        len(text) == 7
-        and text.startswith("#")
-        and all(ch in "0123456789abcdefABCDEF" for ch in text[1:])
-    ):
-        return "#" + text[1:].upper()
-    return _COLOR_ALIASES.get(lowered, default)
+def _repair_color(value: Any, default: str = "cyan") -> str:
+    """Repair a generated illustration colour into the bright palette."""
+    return sanitize_illustration_color(value, default=default)
 
 
 def _clamp(value: Any, low: float, high: float, default: float | None = None) -> float | None:

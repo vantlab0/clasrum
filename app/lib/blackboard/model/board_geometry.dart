@@ -140,11 +140,16 @@ class BoardRect {
   BoardRect inflate(double amount) =>
       BoardRect(x - amount, y - amount, w + amount * 2, h + amount * 2);
 
-  BoardRect clamp01() {
+  BoardRect clamp01() => clampToExtent(1.0);
+
+  /// Clamps this rect into the normalized board space, allowing vertical
+  /// content to extend below y=1 when the board has a virtual scroll extent.
+  BoardRect clampToExtent(double verticalExtent) {
+    final maxY = math.max(1.0, verticalExtent);
     final left = x.clamp(0.0, 1.0);
-    final top = y.clamp(0.0, 1.0);
+    final top = y.clamp(0.0, maxY);
     final r = right.clamp(0.0, 1.0);
-    final b = bottom.clamp(0.0, 1.0);
+    final b = bottom.clamp(0.0, maxY);
     return BoardRect(
         left, top, math.max(0.0, r - left), math.max(0.0, b - top));
   }

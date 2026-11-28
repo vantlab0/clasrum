@@ -98,7 +98,7 @@ List<BoardEvent> _lessonEvents() => <BoardEvent>[
           'text': 'Force equals mass times acceleration.',
           'style': 'body',
           'position': _position(0.06, 0.17),
-          'size': _size(0.52, 0.06),
+          'size': _size(0.44, 0.06),
         },
       ),
       _event(
@@ -167,6 +167,15 @@ void main() {
 
     expect(find.byWidgetPredicate((widget) => widget is Math), findsOneWidget);
     expect(tester.takeException(), isNull);
+
+    // A plan's local coordinates are mapped into its declared placement instead
+    // of filling the whole board, so its bounds cannot overlap the prose.
+    final planBounds = controller.renderCache.bounds['visual'];
+    expect(planBounds, isNotNull);
+    expect(planBounds!.x, greaterThan(0.55));
+    expect(planBounds.x + planBounds.w, lessThan(0.93));
+    expect(planBounds.y, greaterThan(0.18));
+    expect(planBounds.bottom, lessThan(0.48));
   });
 
   test('collision validation warns about unrelated overlaps but not groups',
@@ -233,7 +242,7 @@ void main() {
         .applyAll(_lessonEvents());
     for (final element in document.visibleElements) {
       final bounds = element.declaredBounds ??
-          BoardBoundsEstimator.estimate(element)?.clamp01();
+          BoardBoundsEstimator.estimate(element)?.clampToExtent(1.0);
       if (bounds == null) continue;
       final pixels = transform.rectToPixels(bounds);
       expect(pixels.left, greaterThanOrEqualTo(-1));

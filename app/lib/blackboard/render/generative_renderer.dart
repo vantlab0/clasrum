@@ -7,6 +7,7 @@ import '../model/board_geometry.dart';
 import '../model/board_transform.dart';
 import '../model/chalk_palette.dart';
 import '../model/drawing_plan.dart';
+import 'board_render_cache.dart' show BoardGeometryCache;
 import 'chalk_text.dart';
 
 /// Result of rendering a generative drawing plan.
@@ -15,6 +16,72 @@ class GenerativeRenderResult {
 
   /// Normalized bounds of rendered plan elements, keyed by plan element id.
   final Map<String, BoardRect> elementBounds;
+}
+
+/// Transform-independent plan metadata reused across progressive frames.
+class _PlanGeometry {
+  _PlanGeometry({
+    required this.timelineById,
+    required this.stageWindows,
+    required this.order,
+  });
+
+  final Map<String, DrawingElementTimeline> timelineById;
+  final Map<int, _StageWindow> stageWindows;
+  final List<DrawingElement> order;
+
+  static String keyFor(DrawingPlan plan, bool cueGated) {
+    final signature = plan.elements
+        .map(
+          (element) =>
+              '${element.id}:${element.stage}:${element.durationMs}:'
+              '${element.delayMs}:${element.layer}',
+        )
+        .join(',');
+    return '${plan.elements.length}|${plan.totalDurationMs}|${cueGated ? 1 : 0}|$signature';
+  }
+
+  static _PlanGeometry build(DrawingPlan plan, bool cueGated) {
+    final timelineById = <String, DrawingElementTimeline>{
+      for (final timeline in computeElementTimelines(plan))
+        timeline.elementId: timeline,
+    };
+    final stageWindows = <int, _StageWindow>{};
+    if (cueGated) {
+      final stageNumbers = <int>{
+        for (final element in plan.elements) element.stage,
+      };
+      for (final stageNumber in stageNumbers) {
+        final stageTimelines = plan.elements
+            .where((element) => element.stage == stageNumber)
+            .map((element) => timelineById[element.id])
+            .whereType<DrawingElementTimeline>()
+            .toList(growable: false);
+        if (stageTimelines.isEmpty) continue;
+        var start = stageTimelines.first.startMs;
+        var end = stageTimelines.first.endMs;
+        for (final timeline in stageTimelines.skip(1)) {
+          if (timeline.startMs < start) start = timeline.startMs;
+          if (timeline.endMs > end) end = timeline.endMs;
+        }
+        stageWindows[stageNumber] = _StageWindow(start, end);
+      }
+    }
+    final declarationIndex = <String, int>{
+      for (var i = 0; i < plan.elements.length; i++) plan.elements[i].id: i,
+    };
+    final order = plan.elements.toList(growable: false)
+      ..sort((a, b) {
+        final layerCmp = a.layer.compareTo(b.layer);
+        if (layerCmp != 0) return layerCmp;
+        return (declarationIndex[a.id] ?? 0).compareTo(declarationIndex[b.id] ?? 0);
+      });
+    return _PlanGeometry(
+      timelineById: timelineById,
+      stageWindows: stageWindows,
+      order: order,
+    );
+  }
 }
 
 class _StageWindow {
@@ -43,70 +110,52 @@ class GenerativeDrawingRenderer {
     /// Per-stage reveal progress for cue-gated plans. When supplied, a stage
     /// stays hidden until the matching transcript keyword fires.
     Map<int, double>? stageProgress,
+    ChalkTextEngine? textEngine,
+    BoardGeometryCache? geometryCache,
+    /// Plan-local coordinates are mapped into this board region. When omitted,
+    /// the plan keeps the legacy behavior of filling the whole board.
+    BoardRect? placement,
   }) {
     final clampedProgress = progress.clamp(0.0, 1.0);
+    final engine = textEngine ?? _textEngine;
+    final localTransform =
+        placement == null ? transform : BoardTransform.forRegion(transform, placement);
     final totalMs = plan.totalDurationMs;
     final elapsedMs = (totalMs * clampedProgress).round();
-    final timelines = computeElementTimelines(plan);
-    final timelineById = <String, DrawingElementTimeline>{
-      for (final t in timelines) t.elementId: t,
-    };
-
     final cueGated = stageProgress != null && stageProgress.isNotEmpty;
-    final stageWindows = <int, _StageWindow>{};
-    if (cueGated) {
-      final stageNumbers = <int>{
-        for (final element in plan.elements) element.stage,
-      };
-      for (final stageNumber in stageNumbers) {
-        final stageTimelines = plan.elements
-            .where((element) => element.stage == stageNumber)
-            .map((element) => timelineById[element.id])
-            .whereType<DrawingElementTimeline>()
-            .toList(growable: false);
-        if (stageTimelines.isEmpty) continue;
-        var start = stageTimelines.first.startMs;
-        var end = stageTimelines.first.endMs;
-        for (final timeline in stageTimelines.skip(1)) {
-          if (timeline.startMs < start) start = timeline.startMs;
-          if (timeline.endMs > end) end = timeline.endMs;
-        }
-        stageWindows[stageNumber] = _StageWindow(start, end);
-      }
-    }
+    final cacheKey = _PlanGeometry.keyFor(plan, cueGated);
+    var geometry = geometryCache?.get<_PlanGeometry>(cacheKey);
+    geometry ??= _PlanGeometry.build(plan, cueGated);
+    geometryCache?.put(cacheKey, geometry);
+    final timelineById = geometry.timelineById;
+    final stageWindows = geometry.stageWindows;
+    final order = geometry.order;
 
-    // Build clip paths for closed elements.
-    final clipPaths = <String, ui.Path>{};
-    for (final element in plan.elements) {
-      if (element.isClosed) {
-        final path = _buildClosedPath(element, transform);
-        if (path != null) clipPaths[element.id] = path;
-      }
-    }
+    // Cull plan-local elements outside the visible window before building any
+    // paths or text layouts. Panning a long board must not cost O(all elements)
+    // every frame.
+    final boardVisible = transform.visibleLogicalRect;
+    final localVisible = placement == null
+        ? boardVisible
+        : BoardRect(
+            (boardVisible.x - placement.x) / math.max(placement.w, 0.0001),
+            (boardVisible.y - placement.y) / math.max(placement.h, 0.0001),
+            boardVisible.w / math.max(placement.w, 0.0001),
+            boardVisible.h / math.max(placement.h, 0.0001),
+          ).clamp01();
 
-    // Render in layer order, stable by declaration order.
-    final indexed = <int, DrawingElement>{};
-    for (var i = 0; i < plan.elements.length; i++) {
-      indexed[i] = plan.elements[i];
-    }
-    final order = plan.elements.toList(growable: false)
-      ..sort((a, b) {
-        final layerCmp = a.layer.compareTo(b.layer);
-        if (layerCmp != 0) return layerCmp;
-        // stable declaration order
-        final ai = plan.elements.indexOf(a);
-        final bi = plan.elements.indexOf(b);
-        return ai.compareTo(bi);
-      });
-
-    final bounds = <String, BoardRect>{};
-
+    // Resolve timing and visibility once. Clip paths depend on the live
+    // transform (including pan/zoom), so only paths needed by the visible
+    // elements are rebuilt each frame.
+    final visibleElements =
+        <({DrawingElement element, double progress, BoardRect bounds})>[];
+    final neededClipIds = <String>{};
     for (final element in order) {
       final timeline = timelineById[element.id];
       double elementProgress;
       if (cueGated) {
         final stage = element.stage;
-        final revealed = (stageProgress![stage] ?? (stage <= 1 ? 1.0 : 0.0))
+        final revealed = (stageProgress[stage] ?? (stage <= 1 ? 1.0 : 0.0))
             .clamp(0.0, 1.0);
         if (revealed <= 0.0) continue;
         final window = stageWindows[stage];
@@ -124,18 +173,55 @@ class GenerativeDrawingRenderer {
       }
       if (elementProgress <= 0.0) continue;
 
+      final localBounds = element.bounds();
+      if (!localVisible.intersects(localBounds.inflate(0.02))) continue;
+
+      visibleElements.add((
+        element: element,
+        progress: elementProgress,
+        bounds: localBounds,
+      ));
       final clipId = element.clipId;
-      final clipPath = clipId != null ? clipPaths[clipId] : null;
+      if (clipId != null) neededClipIds.add(clipId);
+    }
+
+    final clipPaths = <String, ui.Path>{};
+    for (final element in order) {
+      if (neededClipIds.contains(element.id) && element.isClosed) {
+        final path = _buildClosedPath(element, localTransform);
+        if (path != null) clipPaths[element.id] = path;
+      }
+    }
+
+    final bounds = <String, BoardRect>{};
+    for (final entry in visibleElements) {
+      final element = entry.element;
+      final clipId = element.clipId;
+      final clipPath = clipId == null ? null : clipPaths[clipId];
       final hasClip = clipPath != null;
 
       if (hasClip) {
         canvas.save();
-        canvas.clipPath(clipPath!);
+        canvas.clipPath(clipPath);
       }
 
       try {
-        _renderElement(canvas, element, transform, elementProgress);
-        bounds[element.id] = element.bounds().clamp01();
+        _renderElement(
+          canvas,
+          element,
+          localTransform,
+          entry.progress,
+          engine,
+        );
+        bounds[element.id] = (placement == null
+                ? entry.bounds
+                : BoardRect(
+                    placement.x + entry.bounds.x * placement.w,
+                    placement.y + entry.bounds.y * placement.h,
+                    entry.bounds.w * placement.w,
+                    entry.bounds.h * placement.h,
+                  ))
+            .clampToExtent(transform.logicalExtent);
       } finally {
         if (hasClip) {
           canvas.restore();
@@ -168,6 +254,7 @@ class GenerativeDrawingRenderer {
     DrawingElement element,
     BoardTransform transform,
     double progress,
+    ChalkTextEngine textEngine,
   ) {
     switch (element.kind) {
       case DrawingElementKind.line:
@@ -196,7 +283,7 @@ class GenerativeDrawingRenderer {
         _renderPath(canvas, element, transform, progress);
         break;
       case DrawingElementKind.text:
-        _renderText(canvas, element, transform, progress);
+        _renderText(canvas, element, transform, progress, textEngine);
         break;
       case DrawingElementKind.arrow:
         _renderArrow(canvas, element, transform, progress);
@@ -213,19 +300,37 @@ class GenerativeDrawingRenderer {
     return transform.strokePixels(w);
   }
 
+  /// Deterministic bright fallback role so unstyled/complex plans still use
+  /// complementary colours instead of a single chalk hue.
+  static String _fallbackRole(DrawingElement element) {
+    if (element.kind == DrawingElementKind.text) return 'yellow';
+    var hash = 0;
+    for (final code in element.id.codeUnits) {
+      hash = (hash * 31 + code) & 0x7fffffff;
+    }
+    return ChalkPalette.illustrationRoles[hash % ChalkPalette.illustrationRoles.length];
+  }
+
   static Color _strokeColor(DrawingElement element) {
     final style = element.style;
-    final color = ChalkPalette.resolve(style?.strokeColor, fallback: ChalkPalette.primary);
+    final color = ChalkPalette.resolveIllustration(
+      style?.strokeColor,
+      fallbackRole: _fallbackRole(element),
+    );
     final opacity = style?.strokeOpacity ?? 1.0;
     return ChalkPalette.withOpacity(color, opacity);
   }
 
   static Color? _fillColor(DrawingElement element) {
     final style = element.style;
-    final fill = style?.fillColor;
+    final fill = style?.fillColor ?? style?.strokeColor;
     if (fill == null) return null;
-    final color = ChalkPalette.resolve(fill, fallback: ChalkPalette.primary);
-    final opacity = (style?.fillOpacity ?? 0.18).clamp(0.0, 0.35);
+    final color = ChalkPalette.resolveIllustration(
+      fill,
+      fallbackRole: _fallbackRole(element),
+    );
+    // Translucent but visibly colourful; never muddy or nearly invisible.
+    final opacity = (style?.fillOpacity ?? 0.22).clamp(0.08, 0.35);
     return ChalkPalette.withOpacity(color, opacity);
   }
 
@@ -611,6 +716,7 @@ class GenerativeDrawingRenderer {
     DrawingElement element,
     BoardTransform transform,
     double progress,
+    ChalkTextEngine textEngine,
   ) {
     final g = element.geometry;
     if (g is! TextGeometry) return;
@@ -626,7 +732,7 @@ class GenerativeDrawingRenderer {
             ? TextAlign.right
             : TextAlign.left;
     final spec = ChalkTextStyleSpec.forName('label');
-    _textEngine.paintText(
+    textEngine.paintText(
       canvas,
       g.text,
       origin: Offset(transform.sx(g.position.x), transform.sy(g.position.y)),

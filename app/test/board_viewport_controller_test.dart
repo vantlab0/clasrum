@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'dart:ui' show Offset, Size;
 
+import 'package:pwony/blackboard/model/board_document.dart';
+import 'package:pwony/blackboard/model/board_event.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -111,6 +114,16 @@ void main() {
       expect(c.offset.dx, lessThanOrEqualTo(1.0));
     });
 
+    test('supports virtual vertical extent beyond first screen', () {
+      final c = BoardViewportController();
+      c.onViewportSizeChanged(const Size(400, 400));
+      c.onContentBoundsChanged(const BoardRect(0, 0, 1, 2.5));
+      expect(c.contentExtent, greaterThan(2.5));
+      c.setViewport(const Offset(0, 2.0), 1.0);
+      expect(c.offset.dy, greaterThan(0.5));
+      expect(c.visibleRect.bottom, lessThanOrEqualTo(c.contentExtent + 0.0001));
+    });
+
     test('clamps scale to min/max', () {
       final c = BoardViewportController();
       c.onViewportSizeChanged(const Size(400, 800));
@@ -144,14 +157,12 @@ void main() {
     test('clamps to content bounds when set', () {
       final c = BoardViewportController();
       c.onViewportSizeChanged(const Size(400, 400));
-      // Content occupies right half of board. At 2x zoom the visible window
-      // fits inside it, so panning left must clamp to the content's left edge
-      // (minus the viewport's 10% comfort margin).
       c.onContentBoundsChanged(
         const BoardRect(0.5, 0.0, 0.5, 1.0),
       );
       c.setViewport(const Offset(-1.0, 0.0), 2.0);
-      expect(c.offset.dx, greaterThanOrEqualTo(0.45));
+      expect(c.offset.dx, greaterThanOrEqualTo(0.0));
+      expect(c.offset.dx, lessThanOrEqualTo(0.5));
     });
   });
 
@@ -201,15 +212,76 @@ void main() {
       );
       c.onViewportSizeChanged(const Size(400, 800));
 
-      // Manually interact.
       c.onManualInteractionStart();
       expect(c.isManuallyInteracting, isTrue);
+      expect(c.followLatest, isFalse);
       c.onManualInteractionEnd();
-      expect(c.isManuallyInteracting, isTrue); // still in cooldown
+      expect(c.isManuallyInteracting, isTrue);
 
-      // Wait for cooldown.
       await Future<void>.delayed(const Duration(milliseconds: 100));
       expect(c.isManuallyInteracting, isFalse);
+      expect(c.followLatest, isTrue);
+    });
+  });
+
+  group('virtual scroll and follow', () {
+    test('followLatestContent scrolls to bottom with headroom', () async {
+      final c = BoardViewportController(mobileBreakpoint: 600);
+      c.onViewportSizeChanged(const Size(400, 400));
+      c.onContentBoundsChanged(const BoardRect(0, 0, 1, 2.2));
+      await c.followLatestContent(animate: false);
+      expect(c.visibleRect.bottom, greaterThan(2.2));
+      expect(c.visibleRect.bottom, lessThanOrEqualTo(c.contentExtent + 0.0001));
+      expect(c.offset.dy, greaterThan(0.5));
+    });
+
+    test('manual suspend preserves offset until cooldown resumes follow', () async {
+      final c = BoardViewportController(
+        mobileBreakpoint: 600,
+        manualCooldown: const Duration(milliseconds: 40),
+      );
+      c.onViewportSizeChanged(const Size(400, 400));
+      c.onContentBoundsChanged(const BoardRect(0, 0, 1, 2.5));
+      c.setViewport(const Offset(0, 0.3), 1.0, userInitiated: true);
+      expect(c.followLatest, isFalse);
+      await c.followLatestContent(animate: false);
+      expect(c.offset.dy, closeTo(0.3, 0.0001));
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(c.followLatest, isTrue);
+      await c.followLatestContent(animate: false);
+      expect(c.offset.dy, greaterThan(0.3));
+    });
+
+    test('focusOnElements uses virtual bounds', () async {
+      final c = BoardViewportController(mobileBreakpoint: 600, forceAutoPan: true);
+      c.onViewportSizeChanged(const Size(400, 400));
+      c.onContentBoundsChanged(const BoardRect(0, 0, 1, 3.0));
+      final doc = BoardDocument.fromSnapshotEnvelope(<String, dynamic>{
+        'session_id': 's',
+        'snapshot': <String, dynamic>{
+          'session_id': 's',
+          'revision': 1,
+          'last_sequence': 1,
+          'elements': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'element_id': 'e1',
+              'type': 'write_text',
+              'level': 2,
+              'payload': <String, dynamic>{
+                'text': 'late',
+                'position': <String, dynamic>{'x': 0.1, 'y': 2.4},
+                'size': <String, dynamic>{'w': 0.2, 'h': 0.1},
+              },
+              'position': <String, dynamic>{'x': 0.1, 'y': 2.4},
+              'size': <String, dynamic>{'w': 0.2, 'h': 0.1},
+              'created_sequence': 1,
+            }
+          ],
+        },
+        'board_events': <dynamic>[],
+      });
+      await c.focusOnElements(<String>['e1'], document: doc, animate: false);
+      expect(c.visibleRect.bottom, greaterThan(2.0));
     });
   });
 

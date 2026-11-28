@@ -152,13 +152,15 @@ class QwenRealtimeSession:
         await self._send({"type": "input_audio_buffer.clear"})
 
     async def create_response(self) -> None:
+        # Callers should prefer hub._request_response(): it serialises requests
+        # and prevents overlapping/duplicate teaching responses.
         await self._send({"type": "response.create"})
 
     async def cancel_response(self) -> None:
         await self._send({"type": "response.cancel"})
 
     async def function_call_output(
-        self, call_id: str, output: str, *, continue_response: bool = True
+        self, call_id: str, output: str, *, continue_response: bool = False
     ) -> None:
         await self._send(
             {
@@ -170,12 +172,15 @@ class QwenRealtimeSession:
                 },
             }
         )
-        # Most tools need a model continuation. Flow-control tools such as
-        # wait_for_student deliberately do not: the tutor must stop and listen.
+        # By default the hub requests the continuation via its guarded
+        # _request_response() after the tool result has been persisted and the
+        # client's audio gate has been released. Flow-control tools such as
+        # wait_for_student and failed tools never pass continue_response=True.
         if continue_response:
             await self.create_response()
 
     async def prompt_text(self, text: str) -> None:
+        """Add a system/user instruction; response.create is hub-owned."""
         await self._send(
             {
                 "type": "conversation.item.create",
@@ -186,7 +191,6 @@ class QwenRealtimeSession:
                 },
             }
         )
-        await self.create_response()
 
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
         while True:

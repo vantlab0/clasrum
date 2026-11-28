@@ -325,6 +325,41 @@ void main() {
       recorder3.endRecording();
       expect(r3.elementBounds.length, 3);
     });
+
+    test('offscreen plan elements are culled and placement maps bounds', () {
+      final plan = DrawingPlan.parse(_basePlan());
+
+      final scrolled = BoardTransform
+          .fromSize(const ui.Size(800, 600), logicalExtent: 3.0)
+          .withViewport(offset: ui.Offset(0, 2.0));
+      final offscreenRecorder = ui.PictureRecorder();
+      final offscreenResult = GenerativeDrawingRenderer.render(
+        ui.Canvas(offscreenRecorder),
+        plan,
+        scrolled,
+        progress: 1.0,
+      );
+      offscreenRecorder.endRecording();
+      expect(offscreenResult.elementBounds, isEmpty);
+
+      final placement = BoardRect(0.5, 0.2, 0.4, 0.3);
+      final recorder = ui.PictureRecorder();
+      final result = GenerativeDrawingRenderer.render(
+        ui.Canvas(recorder),
+        plan,
+        BoardTransform.fromSize(const ui.Size(800, 600)),
+        progress: 1.0,
+        placement: placement,
+      );
+      recorder.endRecording();
+      expect(result.elementBounds, isNotEmpty);
+      for (final bounds in result.elementBounds.values) {
+        expect(bounds.x, greaterThanOrEqualTo(placement.x - 0.0001));
+        expect(bounds.right, lessThanOrEqualTo(placement.right + 0.0001));
+        expect(bounds.y, greaterThanOrEqualTo(placement.y - 0.0001));
+        expect(bounds.bottom, lessThanOrEqualTo(placement.bottom + 0.0001));
+      }
+    });
   });
 
   group('Board event integration', () {

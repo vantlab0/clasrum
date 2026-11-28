@@ -85,6 +85,9 @@ void main() {
         visibleRect: const BoardRect(0.1, 0.2, 0.8, 0.7),
         scale: 9.0,
         offset: const Offset(0.25, 0.5),
+        narrow: true,
+        contentExtent: 2.4,
+        reason: 'scroll_bottom',
       );
       expect(payload['type'], 'board.viewport_full');
       expect(payload['sequence'], 0);
@@ -93,6 +96,9 @@ void main() {
       expect(payload['visible_rect'],
           <String, dynamic>{'x': 0.1, 'y': 0.2, 'w': 0.8, 'h': 0.7});
       expect(payload['offset'], <String, dynamic>{'x': 0.25, 'y': 0.5});
+      expect(payload['layout_mode'], 'mobile');
+      expect(payload['content_extent'], 2.4);
+      expect(payload['reason'], 'scroll_bottom');
     });
   });
 

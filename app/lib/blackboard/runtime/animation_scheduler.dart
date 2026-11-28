@@ -228,12 +228,12 @@ class BoardAnimationScheduler {
     }
     final effective = _scale(duration ?? defaultDurationFor(event.kind));
     if (instant || effective.inMicroseconds <= 0) {
-      _reveals.remove(elementId);
-      _moves.remove(elementId);
+      _dropAnimations(elementId);
       _refreshActiveLevels();
       onComplete?.call();
       return;
     }
+    _dropAnimations(elementId);
     _reveals[elementId] = _Reveal(
       elementId: elementId,
       level: level,
@@ -241,7 +241,6 @@ class BoardAnimationScheduler {
       duration: effective,
       onComplete: onComplete,
     );
-    _moves.remove(elementId);
     _activeLevels.add(level);
     _ensureDriver();
     _notifyFrame();
@@ -262,13 +261,15 @@ class BoardAnimationScheduler {
     }
     final effective = _scale(duration ?? const Duration(milliseconds: 420));
     if (effective.inMicroseconds <= 0 || from == to) {
-      _moves.remove(elementId);
-      _reveals.remove(elementId);
+      _dropAnimations(elementId);
       _refreshActiveLevels();
       _notifyFrame();
       onComplete?.call();
       return;
     }
+    // A position animation supersedes any reveal of the same element. Resolve
+    // the superseded callback first so no waiter is left hanging.
+    _dropAnimations(elementId);
     _moves[elementId] = _MoveReveal(
       elementId: elementId,
       level: level,
@@ -278,18 +279,15 @@ class BoardAnimationScheduler {
       to: to,
       onComplete: onComplete,
     );
-    // A position animation supersedes any reveal of the same element; stale
-    // completion callbacks must never clear the current teaching beat.
-    _reveals.remove(elementId);
     _activeLevels.add(level);
     _ensureDriver();
     _notifyFrame();
   }
 
   void cancelElement(String elementId) {
-    final removed = _reveals.remove(elementId) != null;
-    final moved = _moves.remove(elementId) != null;
-    if (removed || moved) {
+    final removed = _reveals.containsKey(elementId) || _moves.containsKey(elementId);
+    _dropAnimations(elementId);
+    if (removed) {
       _refreshActiveLevels();
       _notifyFrame();
       _maybeGoIdle();
@@ -297,10 +295,16 @@ class BoardAnimationScheduler {
   }
 
   void cancelLevel(int level) {
-    final before = _reveals.length + _moves.length;
-    _reveals.removeWhere((_, reveal) => reveal.level == level);
-    _moves.removeWhere((_, move) => move.level == level);
-    if (before == _reveals.length + _moves.length) return;
+    final ids = <String>{
+      for (final entry in _reveals.entries)
+        if (entry.value.level == level) entry.key,
+      for (final entry in _moves.entries)
+        if (entry.value.level == level) entry.key,
+    };
+    if (ids.isEmpty) return;
+    for (final id in ids) {
+      _dropAnimations(id);
+    }
     _refreshActiveLevels();
     _notifyFrame();
     _maybeGoIdle();
@@ -309,8 +313,12 @@ class BoardAnimationScheduler {
   /// Cancels every reveal (clear/erase/snapshot restore) and resolves idle.
   void cancelAll() {
     if (_reveals.isEmpty && _moves.isEmpty) return;
-    _reveals.clear();
-    _moves.clear();
+    for (final id in _reveals.keys.toList(growable: false)) {
+      _dropAnimations(id);
+    }
+    for (final id in _moves.keys.toList(growable: false)) {
+      _dropAnimations(id);
+    }
     _refreshActiveLevels();
     _notifyFrame();
     _maybeGoIdle();
@@ -382,6 +390,12 @@ class BoardAnimationScheduler {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    final pending = <VoidCallback>[
+      for (final reveal in _reveals.values)
+        if (reveal.onComplete != null) reveal.onComplete!,
+      for (final move in _moves.values)
+        if (move.onComplete != null) move.onComplete!,
+    ];
     _reveals.clear();
     _moves.clear();
     _activeLevels.clear();
@@ -393,6 +407,9 @@ class BoardAnimationScheduler {
     _frameTick.dispose();
     onFrame = null;
     onIdle = null;
+    for (final callback in pending) {
+      callback();
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -484,6 +501,16 @@ class BoardAnimationScheduler {
     _frameEpoch++;
     _frameTick.value = _frameEpoch;
     onFrame?.call();
+  }
+
+  /// Removes animations for [elementId] and always resolves their callbacks.
+  /// Cancellation is a completion from the caller's point of view: a waiter
+  /// must never hang because an animation was superseded or erased.
+  void _dropAnimations(String elementId) {
+    final reveal = _reveals.remove(elementId);
+    final move = _moves.remove(elementId);
+    reveal?.onComplete?.call();
+    move?.onComplete?.call();
   }
 
   void _maybeGoIdle() {

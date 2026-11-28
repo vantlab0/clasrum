@@ -73,8 +73,8 @@ class BoardVerticalLayout {
     const maxWidth = 1.0 - 2 * sideMargin;
     var cursor = topMargin;
     for (final block in blocks) {
-      // Keep stacking even past the visible bottom: an overflowing stack is a
-      // truthful signal for the board-fullness detector to recycle the board.
+      // Keep stacking even past the first screen: the viewport owns virtual
+      // vertical scrolling, so y > 1 is valid board space.
       final width = block.width.clamp(0.08, maxWidth);
       // Keep a sensible original x when it already fits; otherwise left-align.
       var x = block.left;
@@ -83,14 +83,16 @@ class BoardVerticalLayout {
       } else {
         x = x.clamp(sideMargin, 1.0 - sideMargin - width);
       }
+      final dx = x - block.left;
+      final dy = cursor - block.top;
       for (final element in block.members) {
         final original = element.position ?? BoardPoint.zero;
         positions[element.elementId] = BoardPoint(
-          x + (original.x - block.left),
-          cursor + (original.y - block.top),
+          original.x + dx,
+          original.y + dy,
         );
       }
-      cursor += math.min(block.height, 1.0) + blockGap;
+      cursor += math.max(0.0, block.height) + blockGap;
     }
 
     // Resolve child offsets after their parent block has moved. A short loop

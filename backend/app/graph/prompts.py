@@ -25,10 +25,15 @@ MAX_PROMPT_CHARS = 11_500
 MAX_OBSERVATION_LINES = 6
 
 _PALETTE = (
-    "primary (#F2F0E8 default chalk), secondary (#A8A79E muted annotations), "
-    "blue (#9CC9E3 highlights and graph curves), yellow (#E8D58C emphasis), "
-    "red (#E39C9C mistakes and corrections), green (#A9D3A0 correct answers). "
-    "Send the role name (e.g. \"blue\") or an explicit #RRGGBB."
+    "Teaching text uses chalk roles: primary (#F2F0E8 readable prose), "
+    "secondary (#A8A79E muted annotations). Diagrams, illustrations, arrows, "
+    "shapes, graph axes/points/curves/labels and every other visual component "
+    "must use BRIGHT colours ONLY: cyan (#00D9FF), blue (#2979FF), "
+    "violet (#B388FF), coral (#FF5252), yellow (#FFD740), lime (#76FF03), "
+    "orange (#FF9100), pink (#FF80AB), teal (#1DE9B6). Never use black, "
+    "near-black, gray, charcoal, dark blue/green or off-white for visuals on "
+    "the black board; any other colour is sanitized server-side. Use several "
+    "complementary roles in complex diagrams and translucent but visible fills."
 )
 
 

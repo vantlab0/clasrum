@@ -195,6 +195,7 @@ class BlackboardView extends StatelessWidget {
               transform = transform.withViewport(
                 offset: viewport.offset,
                 scale: viewport.scale,
+                logicalExtent: viewport.contentExtent,
               );
             }
             final document = controller.document;
@@ -223,6 +224,7 @@ class BlackboardView extends StatelessWidget {
                     bounds: controller.renderCache.bounds,
                     interactive: interactive,
                     textEngine: controller.renderCache.textEngine,
+                    geometryCache: controller.renderCache.geometry,
                     reflow: reflow,
                     narrow: narrow,
                   ),
@@ -288,8 +290,6 @@ class _LatexOverlay extends StatefulWidget {
 }
 
 class _LatexOverlayState extends State<_LatexOverlay> {
-  static const int _maxCachedExpressions = 128;
-  final Map<String, SyntaxTree?> _parsed = <String, SyntaxTree?>{};
 
   @override
   Widget build(BuildContext context) {
@@ -381,7 +381,8 @@ class _LatexOverlayState extends State<_LatexOverlay> {
   }
 
   SyntaxTree? _parse(String expression) {
-    if (_parsed.containsKey(expression)) return _parsed[expression];
+    final cache = widget.controller.renderCache.latex;
+    if (cache.containsKey(expression)) return cache.get<SyntaxTree>(expression);
     SyntaxTree? tree;
     try {
       tree = SyntaxTree(
@@ -393,8 +394,7 @@ class _LatexOverlayState extends State<_LatexOverlay> {
     } catch (_) {
       tree = null;
     }
-    if (_parsed.length >= _maxCachedExpressions) _parsed.clear();
-    _parsed[expression] = tree;
+    cache.put(expression, tree);
     return tree;
   }
 }
@@ -422,6 +422,7 @@ class _BoardPainter extends CustomPainter {
     required this.bounds,
     required this.interactive,
     required this.textEngine,
+    required this.geometryCache,
     required this.reflow,
     required this.narrow,
   });
@@ -432,6 +433,7 @@ class _BoardPainter extends CustomPainter {
   final BoardBoundsRegistry bounds;
   final bool interactive;
   final ChalkTextEngine textEngine;
+  final BoardGeometryCache geometryCache;
   final Map<String, BoardPoint> reflow;
   final bool narrow;
 
@@ -443,7 +445,7 @@ class _BoardPainter extends CustomPainter {
       final rect = transform.contentRect;
       // Drop measurement bounds for erased/removed elements so a restored board
       // cannot reuse stale geometry from a previous revision.
-      bounds.retainOnly(document.elements.keys.toSet());
+      bounds.pruneIfChanged(document.revision, document.elements.keys.toSet());
 
       // 1. background — true black board (no border frame)
       final bgPaint = Paint()..color = ChalkPalette.board;
@@ -471,6 +473,12 @@ class _BoardPainter extends CustomPainter {
         reflow[element.elementId] ?? element.position ?? BoardPoint.zero,
       );
       final color = ChalkPalette.resolve(element.color);
+      // Illustrations never inherit muted teaching chalk: dark/gray/off-white
+      // ink is invisible on the black board. Sanitize at the render boundary.
+      final illustrationColor = ChalkPalette.resolveIllustration(
+        element.color,
+        fallbackRole: 'cyan',
+      );
 
       switch (element.kind) {
       case BoardEventType.writeText:
@@ -496,41 +504,51 @@ class _BoardPainter extends CustomPainter {
             canvas, element, resolvedPosition, progress, color);
         break;
       case BoardEventType.drawLine:
-        _paintDrawLine(canvas, element, resolvedPosition, progress, color);
+        _paintDrawLine(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.drawShape:
-        _paintDrawShape(canvas, element, resolvedPosition, progress, color);
+        _paintDrawShape(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.drawPath:
-        _paintDrawPath(canvas, element, resolvedPosition, progress, color);
+        _paintDrawPath(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.drawArrow:
-        _paintDrawArrow(canvas, element, resolvedPosition, progress, color);
+        _paintDrawArrow(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.drawDiagram:
         // A diagram is one logical element. Legacy `steps` and modern
         // `nodes`/`edges` are alternative encodings, never two paint passes.
         if (boardDiagramUsesLegacySteps(element.payload)) {
-          _paintDrawing(canvas, element, resolvedPosition, progress, color);
+          _paintDrawing(
+              canvas, element, resolvedPosition, progress, illustrationColor);
         } else {
-          _paintDrawDiagram(canvas, element, resolvedPosition, progress, color);
+          _paintDrawDiagram(
+              canvas, element, resolvedPosition, progress, illustrationColor);
         }
         break;
       case BoardEventType.drawPlan:
-        _paintDrawPlan(canvas, element, resolvedPosition, progress, color);
+        _paintDrawPlan(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.createCoordinateSystem:
         _paintCoordinateSystem(
-            canvas, element, resolvedPosition, progress, color);
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.plotFunction:
-        _paintPlotFunction(canvas, element, resolvedPosition, progress, color);
+        _paintPlotFunction(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.plotPoints:
-        _paintPlotPoints(canvas, element, resolvedPosition, progress, color);
+        _paintPlotPoints(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.addGraphLabel:
-        _paintGraphLabel(canvas, element, resolvedPosition, progress, color);
+        _paintGraphLabel(
+            canvas, element, resolvedPosition, progress, illustrationColor);
         break;
       case BoardEventType.highlight:
         _paintHighlight(canvas, element, resolvedPosition, progress, color);
@@ -610,9 +628,9 @@ class _BoardPainter extends CustomPainter {
         maxWidthPx: maxWidthPx,
         textAlign: textAlign,
       );
-      final highlightColor = ChalkPalette.resolve(
+      final highlightColor = ChalkPalette.resolveIllustration(
         payload['highlight_color'] ?? 'yellow',
-        fallback: ChalkPalette.yellow,
+        fallbackRole: 'yellow',
       );
       final bgRect = Rect.fromLTWH(
         px - 4,
@@ -652,11 +670,12 @@ class _BoardPainter extends CustomPainter {
       measured.y - padY,
       measured.w + 2 * padX,
       measured.h + 2 * padY,
-    ).clamp01();
+    ).clampToExtent(transform.logicalExtent);
     bounds.put(
       element.elementId,
       padded.isEmpty
           ? BoardRect.fromPositionSize(position, BoardSize(0.2, 0.05))
+              .clampToExtent(transform.logicalExtent)
           : padded,
     );
   }
@@ -709,7 +728,8 @@ class _BoardPainter extends CustomPainter {
     final height = element.size?.h ?? estimated?.h ?? 0.09;
     bounds.put(
       element.elementId,
-      BoardRect.fromLTWH(position.x, position.y, width, height),
+      BoardRect.fromLTWH(position.x, position.y, width, height)
+          .clampToExtent(transform.logicalExtent),
     );
   }
 
@@ -758,7 +778,7 @@ class _BoardPainter extends CustomPainter {
     final Color? fill = rawFill == null
         ? null
         : ChalkPalette.withOpacity(
-            ChalkPalette.resolve(rawFill, fallback: color),
+            ChalkPalette.resolveIllustration(rawFill, fallbackRole: 'cyan'),
             0.25,
           );
 
@@ -820,7 +840,9 @@ class _BoardPainter extends CustomPainter {
       ..strokeWidth = strokeWidth;
     canvas.drawPath(path, strokePaint);
     bounds.put(
-        element.elementId, BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h));
+        element.elementId,
+        BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h)
+            .clampToExtent(transform.logicalExtent));
   }
 
   void _paintDrawPath(
@@ -851,7 +873,7 @@ class _BoardPainter extends CustomPainter {
     final rawFill = payload['fill_color'];
     if (payload['closed'] == true && rawFill != null) {
       final fill = ChalkPalette.withOpacity(
-        ChalkPalette.resolve(rawFill, fallback: color),
+        ChalkPalette.resolveIllustration(rawFill, fallbackRole: 'cyan'),
         0.22,
       );
       canvas.drawPath(path, Paint()..color = fill);
@@ -873,9 +895,9 @@ class _BoardPainter extends CustomPainter {
         BoardRect(
           minX,
           minY,
-          (maxX - minX).clamp(0, 1),
-          (maxY - minY).clamp(0, 1),
-        ));
+          math.max(0.0, maxX - minX),
+          math.max(0.0, maxY - minY),
+        ).clampToExtent(transform.logicalExtent));
   }
 
   void _paintDrawArrow(
@@ -981,10 +1003,14 @@ class _BoardPainter extends CustomPainter {
       final edgePath = Path()
         ..moveTo(p1.dx, p1.dy)
         ..lineTo(p2.dx, p2.dy);
+      final edgeColor = ChalkPalette.resolveIllustration(
+        raw['color'] ?? payload['color'],
+        fallbackRole: 'blue',
+      );
       _strokePath(
         canvas,
         edgePath,
-        color,
+        edgeColor,
         transform.strokePixels(2.0),
         progress: progress,
       );
@@ -996,7 +1022,10 @@ class _BoardPainter extends CustomPainter {
       final id = raw['id'] as String?;
       final rect = id == null ? null : nodeRects[id];
       if (rect == null) continue;
-      final nodeColor = ChalkPalette.resolve(raw['color'], fallback: color);
+      final nodeColor = ChalkPalette.resolveIllustration(
+        raw['color'],
+        fallbackRole: 'violet',
+      );
       final visibleColor = ChalkPalette.withOpacity(nodeColor, progress);
 
       final path = Path();
@@ -1054,7 +1083,7 @@ class _BoardPainter extends CustomPainter {
       for (final box in nodeBounds.values.skip(1)) {
         union = union.union(box);
       }
-      bounds.put(element.elementId, union.clamp01());
+      bounds.put(element.elementId, union.clampToExtent(transform.logicalExtent));
     }
   }
 
@@ -1159,8 +1188,10 @@ class _BoardPainter extends CustomPainter {
       );
     }
 
-    bounds.put(element.elementId,
-        BoardRect.fromLTWH(position.x, position.y, size.w, size.h));
+    bounds.put(
+        element.elementId,
+        BoardRect.fromLTWH(position.x, position.y, size.w, size.h)
+            .clampToExtent(transform.logicalExtent));
   }
 
   void _paintPlotFunction(
@@ -1205,9 +1236,9 @@ class _BoardPainter extends CustomPainter {
         BoardRect(
           minX,
           minY,
-          (maxX - minX).clamp(0, 1),
-          (maxY - minY).clamp(0, 1),
-        ));
+          math.max(0.0, maxX - minX),
+          math.max(0.0, maxY - minY),
+        ).clampToExtent(transform.logicalExtent));
   }
 
   void _paintPlotPoints(
@@ -1218,16 +1249,21 @@ class _BoardPainter extends CustomPainter {
     Color color,
   ) {
     final payload = element.payload;
-    final pts = (payload['points'] as List?)
-            ?.whereType<Map<dynamic, dynamic>>()
-            .map((e) => BoardPoint.tryParse(e))
-            .whereType<BoardPoint>()
-            .toList() ??
-        <BoardPoint>[];
-    for (final point in pts) {
-      final pointColor = ChalkPalette.resolve(
-        element.payload['color'],
-        fallback: color,
+    // Preserve each point's own colour: graph markers must not collapse to a
+    // single element colour, and per-point colours are part of the tool contract.
+    final parsedPoints = <MapEntry<BoardPoint, Object?>>[];
+    for (final raw in (payload['points'] as List?) ?? const <Object>[]) {
+      if (raw is! Map) continue;
+      final point = BoardPoint.tryParse(raw);
+      if (point == null) continue;
+      parsedPoints.add(MapEntry<BoardPoint, Object?>(point, raw['color']));
+    }
+    final pts = parsedPoints.map((entry) => entry.key).toList();
+    for (final entry in parsedPoints) {
+      final point = entry.key;
+      final pointColor = ChalkPalette.resolveIllustration(
+        entry.value ?? payload['color'],
+        fallbackRole: 'coral',
       );
       final center = transform.toPixels(point);
       canvas.drawCircle(
@@ -1273,7 +1309,8 @@ class _BoardPainter extends CustomPainter {
     bounds.put(
         element.elementId,
         BoardRect.fromLTWH(at.x, at.y, size.width / transform.width,
-            size.height / transform.height));
+            size.height / transform.height)
+            .clampToExtent(transform.logicalExtent));
   }
 
   // ----------------------------------------------------------- annotations --
@@ -1303,8 +1340,10 @@ class _BoardPainter extends CustomPainter {
 
     final union = rects.reduce((a, b) => a.union(b));
     final pixelRect = transform.rectToPixels(union);
-    final highlightColor =
-        ChalkPalette.resolve(payload['color'], fallback: color);
+    final highlightColor = ChalkPalette.resolveIllustration(
+      payload['color'],
+      fallbackRole: 'yellow',
+    );
 
     switch (style) {
       case 'underline':
@@ -1386,8 +1425,10 @@ class _BoardPainter extends CustomPainter {
       position,
       element.size ?? const BoardSize(0.3, 0.09),
     ));
-    final highlightColor =
-        ChalkPalette.resolve(payload['color'], fallback: color);
+    final highlightColor = ChalkPalette.resolveIllustration(
+      payload['color'],
+      fallbackRole: 'yellow',
+    );
 
     final boxPaint = Paint()
       ..color = ChalkPalette.withOpacity(highlightColor, 0.25);
@@ -1406,7 +1447,8 @@ class _BoardPainter extends CustomPainter {
     bounds.put(
         element.elementId,
         BoardRect.fromLTWH(position.x, position.y, element.size?.w ?? 0.3,
-            element.size?.h ?? 0.09));
+            element.size?.h ?? 0.09)
+            .clampToExtent(transform.logicalExtent));
   }
 
   void _paintDrawing(
@@ -1430,13 +1472,15 @@ class _BoardPainter extends CustomPainter {
       position,
       sz,
       progress: progress,
+      textEngine: textEngine,
     );
 
-    // Write measured bounds so highlights can target drawing parts.
+    // Write measured bounds so highlights can target drawing parts. Renderer
+    // child ids are not document ids, so they are owned by the board element.
     for (final id in result.elementIds) {
       final b = result.bounds[id];
       if (b != null) {
-        bounds.put(id, b);
+        bounds.putOwned(element.elementId, id, b);
       }
     }
   }
@@ -1481,15 +1525,23 @@ class _BoardPainter extends CustomPainter {
             animations.progress(annotation.elementId).clamp(0.0, 1.0);
       }
     }
+    // Generated plan coordinates are plan-local; the board element owns the
+    // placement on the (possibly virtual) board.
+    final placement = element.size == null
+        ? null
+        : BoardRect.fromPositionSize(position, element.size!);
     final result = GenerativeDrawingRenderer.render(
       canvas,
       plan,
       transform,
       progress: progress,
       stageProgress: stageProgress,
+      textEngine: textEngine,
+      geometryCache: geometryCache,
+      placement: placement,
     );
     for (final entry in result.elementBounds.entries) {
-      bounds.put(entry.key, entry.value);
+      bounds.putOwned(element.elementId, entry.key, entry.value);
     }
     // Also register the overall plan bounds for the board element id.
     final boxes = result.elementBounds.values.toList(growable: false);
@@ -1498,7 +1550,7 @@ class _BoardPainter extends CustomPainter {
       for (final b in boxes.skip(1)) {
         union = union.union(b);
       }
-      bounds.put(element.elementId, union.clamp01());
+      bounds.put(element.elementId, union.clampToExtent(transform.logicalExtent));
     }
   }
 

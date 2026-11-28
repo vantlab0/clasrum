@@ -53,8 +53,13 @@ class BoardCollisionDetector {
   /// Best available normalized bounds for [element].
   static BoardRect? boundsOf(BoardElement element) {
     final declared = element.declaredBounds;
-    if (declared != null && !declared.isEmpty) return declared.clamp01();
-    return BoardBoundsEstimator.estimate(element)?.clamp01();
+    if (declared != null && !declared.isEmpty) {
+      return declared.clampToExtent(double.infinity);
+    }
+    return BoardBoundsEstimator.estimate(
+      element,
+      verticalExtent: double.infinity,
+    )?.clampToExtent(double.infinity);
   }
 
   /// Checks one pair. Returns null when either element is absent/invisible or

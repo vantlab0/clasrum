@@ -27,14 +27,16 @@ import re
 from typing import Annotated, Any, Literal
 
 from pydantic import (
-    AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
     field_validator,
     model_validator,
 )
+
+from app.board.palette import sanitize_illustration_color
 
 PROTOCOL_NAME = "clasrum.drawing"
 PROTOCOL_VERSION = 1
@@ -61,28 +63,25 @@ MAX_PAUSE_MS = 3000
 ANGLE_LIMIT = 720.0
 
 _ELEMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 ChalkRoles = ("primary", "secondary", "blue", "yellow", "red", "green")
 
 
 def _validate_color(value: str) -> str:
-    lowered = value.lower()
-    if lowered in ChalkRoles:
-        return lowered
-    if _HEX_RE.match(value):
-        return "#" + value[1:].upper()
-    raise ValueError(
-        "color must be a chalk role name (primary, secondary, blue, yellow, "
-        "red, green) or a #RRGGBB hex string"
-    )
+    """Sanitize a generated-plan colour into the bright illustration palette.
+
+    Generated plans are illustrations, not prose.  Legacy role names and any
+    Qwen-supplied hex are mapped to an approved high-contrast colour so dark,
+    gray and off-white ink can never reach the renderer.
+    """
+    return sanitize_illustration_color(value)
 
 
 ColorStr = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=4, max_length=9),
-    AfterValidator(_validate_color),
+    BeforeValidator(_validate_color),
+    Field(pattern=r"^#[0-9A-F]{6}$"),
 ]
 
 Normalized = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]

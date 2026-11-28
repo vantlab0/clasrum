@@ -51,8 +51,12 @@ class BoardEventQueue {
   final DateTime Function() _now;
   final SplayTreeMap<int, BoardEvent> _buffered;
   final LinkedHashSet<String> _rememberedEventIds = LinkedHashSet<String>();
-  final LinkedHashSet<String> _appliedEventIds = LinkedHashSet<String>();
+  // Applied ids are bounded: a long lesson can produce tens of thousands of
+  // events, and retaining all of them forever is an unbounded memory leak.
+  final LinkedHashMap<String, DateTime> _appliedEventIds =
+      LinkedHashMap<String, DateTime>();
   final Map<int, DateTime> _dependencyHeldSince = <int, DateTime>{};
+  final Set<int> _dependencyHeldNotified = <int>{};
   final List<String> _warnings = <String>[];
 
   int _appliedSequence = 0;
@@ -101,6 +105,8 @@ class BoardEventQueue {
     _rememberedEventIds.clear();
     _appliedEventIds.clear();
     _dependencyHeldSince.clear();
+    _dependencyHeldNotified.clear();
+    _dependencyHeldNotified.clear();
     _warnings.clear();
     _appliedSequence = appliedSequence < 0 ? 0 : appliedSequence;
     _gapActive = false;
@@ -117,7 +123,7 @@ class BoardEventQueue {
       // Idempotent replay: already reflected in the document.
       return false;
     }
-    if (_appliedEventIds.contains(event.eventId) ||
+    if (_appliedEventIds.containsKey(event.eventId) ||
         _rememberedEventIds.contains(event.eventId)) {
       return false;
     }
@@ -161,13 +167,14 @@ class BoardEventQueue {
     if (head.dependsOn.isEmpty) return head;
     var satisfied = true;
     for (final dependency in head.dependsOn) {
-      if (!_appliedEventIds.contains(dependency)) {
+      if (!_isApplied(dependency)) {
         satisfied = false;
         break;
       }
     }
     if (satisfied) {
       _dependencyHeldSince.remove(head.sequence);
+      _dependencyHeldNotified.remove(head.sequence);
       return head;
     }
     final heldSince = _dependencyHeldSince.putIfAbsent(head.sequence, _now);
@@ -179,7 +186,9 @@ class BoardEventQueue {
       _dependencyHeldSince.remove(head.sequence);
       return head;
     }
-    onDependencyHeld?.call(head);
+    if (_dependencyHeldNotified.add(head.sequence)) {
+      onDependencyHeld?.call(head);
+    }
     return null;
   }
 
@@ -188,6 +197,7 @@ class BoardEventQueue {
     final event = peekNext();
     if (event == null) return null;
     _buffered.remove(event.sequence);
+    _dependencyHeldNotified.remove(event.sequence);
     return event;
   }
 
@@ -198,9 +208,10 @@ class BoardEventQueue {
       _appliedSequence = event.sequence;
     }
     _buffered.remove(event.sequence);
-    _appliedEventIds.add(event.eventId);
+    _rememberApplied(event.eventId);
     _rememberToken(event);
     _dependencyHeldSince.remove(event.sequence);
+    _dependencyHeldNotified.remove(event.sequence);
     if (_gapActive && !hasGap) {
       _gapActive = false;
       onGapCleared?.call();
@@ -212,6 +223,7 @@ class BoardEventQueue {
     if (sequence > _appliedSequence) _appliedSequence = sequence;
     _buffered.removeWhere((key, _) => key <= _appliedSequence);
     _dependencyHeldSince.clear();
+    _dependencyHeldNotified.clear();
     if (_gapActive && !hasGap) {
       _gapActive = false;
       onGapCleared?.call();
@@ -222,6 +234,7 @@ class BoardEventQueue {
   void clearPending() {
     _buffered.clear();
     _dependencyHeldSince.clear();
+    _dependencyHeldNotified.clear();
     if (_gapActive) {
       _gapActive = false;
       onGapCleared?.call();
@@ -233,10 +246,27 @@ class BoardEventQueue {
     _rememberedEventIds.clear();
     _appliedEventIds.clear();
     _dependencyHeldSince.clear();
+    _dependencyHeldNotified.clear();
+    _dependencyHeldNotified.clear();
     onGapDetected = null;
     onBackfillRequest = null;
     onGapCleared = null;
     onDependencyHeld = null;
+  }
+
+  bool _isApplied(String eventId) {
+    final appliedAt = _appliedEventIds[eventId];
+    if (appliedAt == null) return false;
+    // Ids evicted from the bounded map are old enough that waiting on them is
+    // no longer useful; release the dependent event after the grace window.
+    return _now().difference(appliedAt) <= dependencyGrace * 2;
+  }
+
+  void _rememberApplied(String eventId) {
+    _appliedEventIds[eventId] = _now();
+    while (_appliedEventIds.length > maxRememberedEventIds) {
+      _appliedEventIds.remove(_appliedEventIds.keys.first);
+    }
   }
 
   void _notifyGap() {

@@ -67,6 +67,15 @@ CLOSE_QWEN_UNAVAILABLE = 4010
 MAX_AUTO_CONTINUES_PER_TURN = 120
 AUTO_CONTINUE_COOLDOWN_SECONDS = 1.0
 
+# A short grace window lets a function call arrive before buffered speech is
+# released to the client. Pure-speech responses are flushed immediately on
+# response.done (or when this timer expires), so low latency is preserved.
+AUDIO_TOOL_GRACE_SECONDS = 0.15
+# All response.create requests go through ``_request_response``; it blocks
+# overlapping responses and rapid duplicate requests from different paths.
+RESPONSE_REQUEST_COOLDOWN_SECONDS = 0.5
+CONTINUATION_WATCHDOG_SECONDS = 5.0
+
 # WS message types (docs/CONTRACTS.md §6).
 MSG_SESSION_READY = "session.ready"
 MSG_BOARD_EVENT = "board.event"
@@ -117,12 +126,12 @@ class QwenSession(Protocol):
         ...
 
     async def function_call_output(
-        self, call_id: str, output: str, *, continue_response: bool = True
+        self, call_id: str, output: str, *, continue_response: bool = False
     ) -> None:
         ...
 
     async def prompt_text(self, text: str) -> None:
-        """Send a text instruction into the conversation and request a response."""
+        """Send a text instruction; the hub owns response.create requests."""
         ...
 
     async def iterate(self) -> AsyncIterator[dict[str, Any]]:
@@ -154,6 +163,52 @@ class ResponseLifecycle:
     has_text: bool = False
     has_function_call: bool = False
     function_call_executed_ok: bool | None = None
+
+
+@dataclass
+class ToolCallState:
+    """One observed Qwen function call inside a single response."""
+
+    call_id: str
+    name: str = ""
+    sequence: int | None = None
+    submitted: bool = False
+    settled: bool = False
+    ok: bool | None = None
+    replay: bool = False
+
+
+@dataclass
+class ResponseGate:
+    """Orders/gates one response's audio against its function calls.
+
+    Audio deltas are buffered while function calls observed so far are still
+    executing (or have failed). Pure-speech responses use a short bounded grace
+    timer so they play promptly. Deltas are deduped and sorted by their Qwen
+    sequence before being forwarded; the original sequence value is preserved.
+    """
+
+    response_id: str
+    buffer: list[tuple[int, int, dict[str, Any]]] = field(default_factory=list)
+    seen_sequences: set[int] = field(default_factory=set)
+    next_local_sequence: int = 0
+    last_sequence: int | None = None
+    last_tool_sequence: int | None = None
+    gap_detected: bool = False
+    has_board_call: bool = False
+    released: bool = False
+    discarded: bool = False
+    finalized: bool = False
+    grace_task: asyncio.Task[None] | None = None
+    audio_done_event: dict[str, Any] | None = None
+    done_event: dict[str, Any] | None = None
+    calls: dict[str, ToolCallState] = field(default_factory=dict)
+
+    def has_pending_calls(self) -> bool:
+        return any(not call.settled for call in self.calls.values())
+
+    def has_unresolved_audio(self) -> bool:
+        return bool(self.buffer) or self.has_pending_calls()
 
 
 @dataclass(eq=False)
@@ -210,6 +265,17 @@ class LessonSocket:
     # twice. Cache the first result per (response_id, call_id) and resend it.
     tool_call_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_call_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    # Managed tool tasks are keyed by response_id:call_id so the Qwen event loop
+    # never awaits a slow tool inline and replays cannot execute twice.
+    tool_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    response_gates: dict[str, ResponseGate] = field(default_factory=dict)
+    response_request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Set while create_response() is in flight: response.created may not have
+    # arrived yet, so active_response_id alone cannot prevent duplicate creates.
+    response_request_pending: bool = False
+    last_response_request_at: float = 0.0
+    audio_gap_count: int = 0
+    tool_gap_count: int = 0
     # Visible-board recycling: the client reports measured fullness; the server
     # owns the persisted wipe so snapshots/replay/Qwen context stay in sync.
     last_viewport_report_sequence: int = -1
@@ -386,6 +452,7 @@ class LessonRealtimeHub:
                     await old.websocket.close(code=CLOSE_SUPERSEDED)
                 except Exception:  # pragma: no cover - best effort
                     logger.warning("failed to close superseded socket lesson=%s", lesson_id, exc_info=True)
+                await self._cancel_pending_work(old, reason="superseded")
                 old.closed.set()
             self._sockets[lesson_id] = socket
             self._all.setdefault(lesson_id, set()).add(socket)
@@ -514,6 +581,7 @@ class LessonRealtimeHub:
 
     async def disconnect(self, socket: LessonSocket) -> None:
         await self._lock_answer_mic(socket, reason="disconnected")
+        await self._cancel_pending_work(socket, reason="disconnected")
         if socket.qwen_task is not None:
             socket.qwen_task.cancel()
         if socket.qwen is not None:
@@ -670,10 +738,24 @@ class LessonRealtimeHub:
             and not socket.waiting_for_student
             and not socket.lesson_finished
         ):
-            try:
-                await socket.qwen.prompt_text(message)
-            except Exception:  # pragma: no cover
-                logger.warning("post-clear nudge failed lesson=%s", socket.lesson_id, exc_info=True)
+            await self._prompt_text(
+                socket, message, reason="viewport_recycle_nudge"
+            )
+
+    @staticmethod
+    def _is_narrow_layout_mode(layout_mode: str) -> bool:
+        """True for mobile/narrow/compact/portrait client layouts.
+
+        The Flutter client currently sends ``mobile``/``desktop``; accept the
+        other narrow aliases so a future compact/portrait report cannot
+        accidentally trigger a destructive desktop-style wipe.
+        """
+        value = str(layout_mode or "").strip().lower()
+        tokens = {part for part in value.replace("-", "_").replace(" ", "_").split("_") if part}
+        narrow_tokens = {"mobile", "narrow", "compact", "portrait", "phone", "small"}
+        if tokens & narrow_tokens:
+            return True
+        return value.startswith("mobile") or value.startswith("narrow") or value.startswith("compact")
 
     async def _handle_viewport_full(
         self,
@@ -681,7 +763,7 @@ class LessonRealtimeHub:
         lesson_id: str,
         envelope: dict[str, Any],
     ) -> None:
-        """Recycle the visible board once: validate, then persist a system clear."""
+        """Record narrow-board fullness; recycle the desktop board once."""
         try:
             sequence = int(envelope.get("sequence") or 0)
             coverage = float(envelope.get("coverage") or 0.0)
@@ -698,7 +780,18 @@ class LessonRealtimeHub:
             return  # duplicate/older report
 
         layout_mode = str(envelope.get("layout_mode") or "").strip().lower()
-        narrow = layout_mode == "mobile"
+        narrow = self._is_narrow_layout_mode(layout_mode)
+
+        if narrow:
+            # Mobile boards have a virtual vertical scroll extent: reaching the
+            # bottom is a reading-progress signal, not a request to wipe the
+            # board. Record/report fullness and stop; recycling is desktop-only.
+            logger.info(
+                "mobile viewport_bottom recorded lesson=%s sequence=%s coverage=%.2f mode=%s (no clear)",
+                lesson_id, sequence, coverage, layout_mode or "unknown",
+            )
+            socket.last_viewport_report_sequence = sequence
+            return
 
         async with socket.viewport_clear_lock:
             if sequence <= socket.last_viewport_cleared_sequence:
@@ -706,11 +799,7 @@ class LessonRealtimeHub:
             if sequence <= socket.last_viewport_report_sequence:
                 return
             socket.last_viewport_report_sequence = sequence
-            if narrow:
-                ok = await self._persist_system_board_clear(socket, lesson_id, sequence)
-                clear_kind = "all"
-            else:
-                ok, clear_kind = await self._recycle_desktop_board(socket, lesson_id, sequence)
+            ok, clear_kind = await self._recycle_desktop_board(socket, lesson_id, sequence)
             if not ok:
                 return
             socket.last_viewport_cleared_sequence = sequence
@@ -722,15 +811,7 @@ class LessonRealtimeHub:
                 layout_mode or "unknown",
                 clear_kind,
             )
-            if narrow:
-                message = (
-                    "System instruction: The student's visible board was full and "
-                    "has been wiped. The board is empty now; continue teaching "
-                    "from the cleared board with one short line per board_write_on_board call. "
-                    "On mobile, keep writing on the same board; it will be cleared again when full. "
-                    "Write actual teaching content, not meta labels like 'Definition' or 'Intuition'."
-                )
-            elif clear_kind == "left":
+            if clear_kind == "left":
                 message = (
                     "System instruction: The right side of the board is full. The left side was cleared; "
                     "continue teaching on the left side. Write one short line per board_write_on_board call "
@@ -820,11 +901,8 @@ class LessonRealtimeHub:
 
         # End of client stream: signal Qwen we're done sending audio for this turn.
         # Do not restart a finished lesson or override an explicit wait-for-student.
-        try:
-            if socket.qwen is not None and not socket.lesson_finished and not socket.waiting_for_student:
-                await socket.qwen.create_response()
-        except Exception:  # pragma: no cover
-            logger.warning("qwen create_response on end failed lesson=%s", lesson_id, exc_info=True)
+        if socket.qwen is not None:
+            await self._request_response(socket, reason="client_stream_end")
 
     async def _handle_client_text(
         self,
@@ -893,8 +971,9 @@ class LessonRealtimeHub:
                         await socket.qwen.commit_audio()
                     except Exception:  # pragma: no cover - commit may be unsupported in some modes
                         logger.debug("qwen commit_audio failed lesson=%s", lesson_id, exc_info=True)
-                    await socket.qwen.create_response()
-                    logger.info("answer audio.stop -> qwen response requested lesson=%s", lesson_id)
+                    await self._request_response(
+                        socket, reason="answer_submitted", force=True
+                    )
             except Exception:  # pragma: no cover
                 logger.warning("qwen create_response failed lesson=%s", lesson_id, exc_info=True)
             return
@@ -913,12 +992,7 @@ class LessonRealtimeHub:
                     await socket.qwen.cancel_response()
             except Exception:  # pragma: no cover
                 logger.warning("qwen cancel_response failed lesson=%s", lesson_id, exc_info=True)
-            try:
-                await socket.websocket.send_json(
-                    {MSG_TYPE: MSG_AUDIO_TRUNCATED, "response_id": None, "played_ms": 0}
-                )
-            except Exception:  # pragma: no cover
-                pass
+            await self._cancel_pending_work(socket, reason="interrupted")
             return
 
         if msg_type == CLIENT_SESSION_END:
@@ -977,245 +1051,248 @@ class LessonRealtimeHub:
         socket: LessonSocket,
         lesson_id: str,
     ) -> None:
-        """Bridge Qwen server events -> client + tool call execution."""
+        """Bridge Qwen events -> client while tool calls run in managed tasks."""
         assert socket.qwen is not None
         audio_delta_count = 0
-        response_has_board_tool_call: dict[str, bool] = {}
-        async for event in socket.qwen.iterate():
-            if socket.closed.is_set():
-                break
-            socket.last_qwen_event_at = time.monotonic()
-            etype = str(event.get("type") or "")
+        try:
+            async for event in socket.qwen.iterate():
+                if socket.closed.is_set():
+                    break
+                socket.last_qwen_event_at = time.monotonic()
+                etype = str(event.get("type") or "")
 
-            if etype == "error":
-                err = event.get("error") if isinstance(event.get("error"), dict) else {}
-                code = err.get("code") or event.get("code") or "qwen_error"
-                msg = err.get("message") or event.get("message") or "Qwen error"
-                resp_id = err.get("response_id") or event.get("response_id")
-                logger.warning("qwen error lesson=%s code=%s response_id=%s message=%s", lesson_id, code, resp_id, msg)
-                if resp_id and resp_id in socket.response_lifecycles:
-                    socket.response_lifecycles[resp_id].status = "failed"
-                await _send_error(socket, "qwen_unavailable", str(msg), retryable=True)
-                continue
+                if etype == "error":
+                    err = event.get("error") if isinstance(event.get("error"), dict) else {}
+                    code = err.get("code") or event.get("code") or "qwen_error"
+                    msg = err.get("message") or event.get("message") or "Qwen error"
+                    resp_id = err.get("response_id") or event.get("response_id")
+                    logger.warning("qwen error lesson=%s code=%s response_id=%s message=%s", lesson_id, code, resp_id, msg)
+                    if resp_id and resp_id in socket.response_lifecycles:
+                        socket.response_lifecycles[resp_id].status = "failed"
+                    await _send_error(socket, "qwen_unavailable", str(msg), retryable=True)
+                    continue
 
-            if etype == "input_audio_buffer.speech_started":
-                # Legacy VAD notification only. Manual turns do not use this to
-                # unlock the microphone or end a wait_for_student pause.
-                await socket.websocket.send_json(
-                    {MSG_TYPE: MSG_USER_SPEECH_STARTED, "source": "qwen"}
-                )
-                continue
-
-            if etype == "response.created":
-                response = event.get("response") if isinstance(event.get("response"), dict) else {}
-                response_id = str(response.get("id") or event.get("response_id") or "")
-                socket.last_qwen_response_created_at = time.monotonic()
-                socket.active_response_id = response_id or socket.active_response_id
-                if response_id:
-                    socket.response_lifecycles[response_id] = ResponseLifecycle(response_id=response_id, created_at=time.monotonic(), status="created")
-                    response_has_board_tool_call.setdefault(response_id, False)
-                    socket.startup_response_ids.add(response_id)
-                    if socket.startup_phase in {LessonStartupPhase.IDLE, LessonStartupPhase.PROMPT_SENT}:
-                        socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED
-                logger.info("qwen response.created lesson=%s response_id=%s", lesson_id, response_id)
-                continue
-
-            if etype == "response.output_item.added":
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                item_type = str(item.get("type") or "")
-                logger.info("qwen output_item.added lesson=%s response_id=%s item_type=%s", lesson_id, response_id, item_type)
-                if response_id and response_id in socket.response_lifecycles and item_type == "function_call":
-                    socket.response_lifecycles[response_id].has_function_call = True
-                continue
-
-            if etype in {"response.audio.delta", "response.output_audio.delta"}:
-                audio_delta_count += 1
-                socket.last_qwen_audio_at = time.monotonic()
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                if response_id and response_id in socket.response_lifecycles:
-                    socket.response_lifecycles[response_id].has_audio = True
-                if socket.startup_phase in {LessonStartupPhase.PROMPT_SENT, LessonStartupPhase.RESPONSE_STARTED}:
-                    socket.startup_phase = LessonStartupPhase.AUDIO_STARTED
-                    await self._send_startup_status(socket, "audio_started", "Preparing your first lesson...")
-                if audio_delta_count == 1 or audio_delta_count % 50 == 0:
-                    logger.info("qwen audio.delta lesson=%s count=%s response_id=%s type=%s", lesson_id, audio_delta_count, response_id, etype)
-                await socket.websocket.send_json(
-                    {
-                        MSG_TYPE: MSG_AUDIO_DELTA,
-                        "data": event.get("delta", ""),
-                        "sample_rate": get_settings().qwen_output_sample_rate,
-                        "sequence": event.get("sequence"),
-                    }
-                )
-                continue
-
-            if etype in {"response.audio.done", "response.output_audio.done"}:
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                logger.info("qwen audio.done lesson=%s response_id=%s type=%s", lesson_id, response_id, etype)
-                await socket.websocket.send_json({MSG_TYPE: MSG_AUDIO_DONE, "response_id": event.get("response_id")})
-                continue
-
-            if etype in {
-                "conversation.item.input_audio_transcription.completed",
-                "response.audio_transcript.delta",
-                "response.audio_transcript.done",
-                "response.output_audio_transcript.delta",
-                "response.output_audio_transcript.done",
-            }:
-                socket.last_qwen_transcript_at = time.monotonic()
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                if response_id and response_id in socket.response_lifecycles:
-                    socket.response_lifecycles[response_id].has_text = True
-                entry = self._transcript_entry_from_qwen(lesson_id, event)
-                if entry is not None:
-                    if str(entry.get("speaker")) == "student":
-                        await self._lock_answer_mic(socket, reason="answer_transcribed")
-                        socket.waiting_for_student = False
-                        socket.auto_continue_count = 0
-                    logger.info(
-                        "qwen transcript lesson=%s speaker=%s final=%s chars=%s response_id=%s",
-                        lesson_id,
-                        entry.get("speaker"),
-                        etype in {"conversation.item.input_audio_transcription.completed", "response.audio_transcript.done", "response.output_audio_transcript.done"},
-                        len(str(entry.get("text") or "")),
-                        response_id,
+                if etype == "input_audio_buffer.speech_started":
+                    # Legacy VAD notification only. Manual turns do not use this to
+                    # unlock the microphone or end a wait_for_student pause.
+                    await socket.websocket.send_json(
+                        {MSG_TYPE: MSG_USER_SPEECH_STARTED, "source": "qwen"}
                     )
-                    await self._persist_transcript(lesson_id, entry)
-                    await socket.websocket.send_json({MSG_TYPE: MSG_TRANSCRIPT_ENTRY, "entry": entry})
-                    if self._trigger_system is not None:
-                        try:
-                            is_final = etype in {
-                                "conversation.item.input_audio_transcription.completed",
-                                "response.audio_transcript.done",
-                                "response.output_audio_transcript.done",
-                            }
-                            async with session_scope() as db:
-                                await self._trigger_system.handle_transcript(
-                                    db,
-                                    lesson_id,
-                                    str(entry.get("text") or ""),
-                                    speaker=str(entry.get("speaker") or Speaker.TUTOR),
-                                    is_final=is_final,
+                    continue
+
+                if etype == "response.created":
+                    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    response_id = str(response.get("id") or event.get("response_id") or "")
+                    socket.last_qwen_response_created_at = time.monotonic()
+                    socket.active_response_id = response_id or socket.active_response_id
+                    if response_id:
+                        socket.response_lifecycles[response_id] = ResponseLifecycle(response_id=response_id, created_at=time.monotonic(), status="created")
+                        self._response_gate(socket, response_id)
+                        socket.startup_response_ids.add(response_id)
+                        if socket.startup_phase in {LessonStartupPhase.IDLE, LessonStartupPhase.PROMPT_SENT}:
+                            socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED
+                    logger.info("qwen response.created lesson=%s response_id=%s", lesson_id, response_id)
+                    continue
+
+                if etype == "response.output_item.added":
+                    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    item_type = str(item.get("type") or "")
+                    logger.info("qwen output_item.added lesson=%s response_id=%s item_type=%s", lesson_id, response_id, item_type)
+                    if response_id and response_id in socket.response_lifecycles and item_type == "function_call":
+                        socket.response_lifecycles[response_id].has_function_call = True
+                        gate = self._response_gate(socket, response_id)
+                        call_id = str(item.get("call_id") or "")
+                        if gate is not None and call_id:
+                            gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
+                            if gate.grace_task is not None:
+                                gate.grace_task.cancel()
+                                gate.grace_task = None
+                            gate.released = False
+                    continue
+
+                if etype in {"response.audio.delta", "response.output_audio.delta"}:
+                    audio_delta_count += 1
+                    socket.last_qwen_audio_at = time.monotonic()
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    if response_id and response_id in socket.response_lifecycles:
+                        socket.response_lifecycles[response_id].has_audio = True
+                    if socket.startup_phase in {LessonStartupPhase.PROMPT_SENT, LessonStartupPhase.RESPONSE_STARTED}:
+                        socket.startup_phase = LessonStartupPhase.AUDIO_STARTED
+                        await self._send_startup_status(socket, "audio_started", "Preparing your first lesson...")
+                    if audio_delta_count == 1 or audio_delta_count % 50 == 0:
+                        logger.info("qwen audio.delta lesson=%s count=%s response_id=%s type=%s", lesson_id, audio_delta_count, response_id, etype)
+                    await self._handle_audio_delta(socket, lesson_id, event, response_id)
+                    continue
+
+                if etype in {"response.audio.done", "response.output_audio.done"}:
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    logger.info("qwen audio.done lesson=%s response_id=%s type=%s", lesson_id, response_id, etype)
+                    gate = self._response_gate(socket, response_id)
+                    if gate is not None and not gate.discarded:
+                        if gate.has_unresolved_audio():
+                            # Never let audio.done overtake buffered deltas.
+                            gate.audio_done_event = event
+                        else:
+                            await socket.websocket.send_json(
+                                {
+                                    MSG_TYPE: MSG_AUDIO_DONE,
+                                    "response_id": event.get("response_id") or response_id,
+                                }
+                            )
+                    continue
+
+                if etype in {"response.cancelled", "response.cancel"}:
+                    cancel_id = str(event.get("response_id") or socket.active_response_id or "")
+                    await self._cancel_buffered_audio(
+                        socket, response_id=cancel_id or None, reason="response_cancelled"
+                    )
+                    continue
+
+                if etype in {
+                    "conversation.item.input_audio_transcription.completed",
+                    "response.audio_transcript.delta",
+                    "response.audio_transcript.done",
+                    "response.output_audio_transcript.delta",
+                    "response.output_audio_transcript.done",
+                }:
+                    socket.last_qwen_transcript_at = time.monotonic()
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    if response_id and response_id in socket.response_lifecycles:
+                        socket.response_lifecycles[response_id].has_text = True
+                    entry = self._transcript_entry_from_qwen(lesson_id, event)
+                    if entry is not None:
+                        if str(entry.get("speaker")) == "student":
+                            await self._lock_answer_mic(socket, reason="answer_transcribed")
+                            socket.waiting_for_student = False
+                            socket.auto_continue_count = 0
+                        logger.info(
+                            "qwen transcript lesson=%s speaker=%s final=%s chars=%s response_id=%s",
+                            lesson_id,
+                            entry.get("speaker"),
+                            etype in {"conversation.item.input_audio_transcription.completed", "response.audio_transcript.done", "response.output_audio_transcript.done"},
+                            len(str(entry.get("text") or "")),
+                            response_id,
+                        )
+                        await self._persist_transcript(lesson_id, entry)
+                        await socket.websocket.send_json({MSG_TYPE: MSG_TRANSCRIPT_ENTRY, "entry": entry})
+                        if self._trigger_system is not None:
+                            try:
+                                is_final = etype in {
+                                    "conversation.item.input_audio_transcription.completed",
+                                    "response.audio_transcript.done",
+                                    "response.output_audio_transcript.done",
+                                }
+                                async with session_scope() as db:
+                                    await self._trigger_system.handle_transcript(
+                                        db,
+                                        lesson_id,
+                                        str(entry.get("text") or ""),
+                                        speaker=str(entry.get("speaker") or Speaker.TUTOR),
+                                        is_final=is_final,
+                                    )
+                            except Exception:  # pragma: no cover
+                                logger.exception("transcript trigger processing failed lesson=%s", lesson_id)
+                    continue
+
+                if etype == "response.function_call_arguments.delta":
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    call_id = str(event.get("call_id") or "")
+                    name = str(event.get("name") or "")
+                    logger.debug("qwen function_call_arguments.delta lesson=%s response_id=%s call_id=%s name=%s", lesson_id, response_id, call_id, name)
+                    if response_id and call_id:
+                        gate = self._response_gate(socket, response_id)
+                        if gate is not None:
+                            state = gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
+                            state.name = name or state.name
+                            # Observing a call (even before arguments.done) gates
+                            # audio; the event loop keeps consuming Qwen events.
+                            if gate.grace_task is not None:
+                                gate.grace_task.cancel()
+                                gate.grace_task = None
+                            gate.released = False
+                    continue
+
+                if etype == "response.function_call_arguments.done":
+                    response_id = str(event.get("response_id") or socket.active_response_id or "")
+                    if response_id and response_id in socket.response_lifecycles:
+                        socket.response_lifecycles[response_id].has_function_call = True
+                    tool_name = str(event.get("name") or "")
+                    gate = self._response_gate(socket, response_id)
+                    if gate is not None and tool_name in {"board_intent", "create_board_visual"}:
+                        gate.has_board_call = True
+                    call_id = str(event.get("call_id") or "")
+                    if response_id and call_id:
+                        await self._submit_tool_call(
+                            socket, lesson_id, event, response_id, call_id
+                        )
+                    continue
+
+                if etype == "response.done":
+                    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    response_id = str(response.get("id") or event.get("response_id") or socket.active_response_id or "")
+                    status = str(response.get("status") or "")
+                    gate = self._response_gate(socket, response_id)
+                    if gate is not None:
+                        # A call may still be executing in its managed task. Hold
+                        # response.done (and the client's audio.done) until the gate
+                        # resolves; the event loop itself never blocks.
+                        gate.done_event = event
+                        for call_id, state in list(gate.calls.items()):
+                            if state.submitted:
+                                continue
+                            logger.warning(
+                                "function call had no arguments.done lesson=%s response_id=%s call_id=%s",
+                                lesson_id, response_id, call_id,
+                            )
+                            state.settled = True
+                    if status in {"failed", "cancelled"}:
+                        await self._cancel_buffered_audio(
+                            socket, response_id=response_id or None,
+                            reason=f"response_{status}",
+                        )
+                    if gate is None:
+                        await self._finalize_response(socket, event)
+                    elif gate.discarded:
+                        if gate.done_event is not None:
+                            gate.done_event = None
+                            await self._finalize_response(socket, event)
+                    elif not gate.has_pending_calls():
+                        # No tools left: response.done proves no more calls can
+                        # arrive, so release buffered speech immediately.
+                        await self._flush_audio_buffer(socket, gate, reason="response_done")
+                    continue
+
+                if etype == "teacher.state":
+                    await socket.websocket.send_json(
+                        {MSG_TYPE: MSG_TEACHER_STATE, **event.get("payload", {})}
+                    )
+                    continue
+
+                # Unknown Qwen events are ignored (forwards compatibility).
+        finally:
+            # Give already-submitted tools a chance to settle when the Qwen
+            # stream ends, so buffered audio is either flushed or explicitly
+            # discarded. Cancellation (disconnect/supersede) is handled by
+            # _cancel_pending_work instead.
+            if not socket.closed.is_set():
+                pending = [task for task in socket.tool_tasks.values() if not task.done()]
+                if pending:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*pending, return_exceptions=True),
+                            timeout=30.0,
+                        )
+                    except (asyncio.TimeoutError, asyncio.CancelledError):  # pragma: no cover
+                        pending_ids = {id(task) for task in pending}
+                        for task in pending:
+                            if not task.done():
+                                task.cancel()
+                        for key, task in list(socket.tool_tasks.items()):
+                            if id(task) in pending_ids:
+                                await self._abandon_tool_task(
+                                    socket, key, reason="stream_end_tool_timeout"
                                 )
-                        except Exception:  # pragma: no cover
-                            logger.exception("transcript trigger processing failed lesson=%s", lesson_id)
-                continue
-
-            if etype == "response.function_call_arguments.delta":
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                call_id = str(event.get("call_id") or "")
-                name = str(event.get("name") or "")
-                logger.debug("qwen function_call_arguments.delta lesson=%s response_id=%s call_id=%s name=%s", lesson_id, response_id, call_id, name)
-                continue
-
-            if etype == "response.function_call_arguments.done":
-                response_id = str(event.get("response_id") or socket.active_response_id or "")
-                if response_id and response_id in socket.response_lifecycles:
-                    socket.response_lifecycles[response_id].has_function_call = True
-                tool_name = str(event.get("name") or "")
-                response_has_board_tool_call[response_id] = (
-                    response_has_board_tool_call.get(response_id, False)
-                    or tool_name in {"board_intent", "create_board_visual"}
-                )
-                await self._handle_qwen_tool_call(socket, lesson_id, event, response_id=response_id)
-                continue
-
-            if etype == "response.done":
-                response = event.get("response") if isinstance(event.get("response"), dict) else {}
-                response_id = str(response.get("id") or event.get("response_id") or socket.active_response_id or "")
-                status = str(response.get("status") or "")
-                lifecycle = socket.response_lifecycles.get(response_id)
-                if lifecycle is not None:
-                    lifecycle.completed_at = time.monotonic()
-                    lifecycle.status = status or lifecycle.status or "done"
-                socket.active_response_id = None if socket.active_response_id == response_id else socket.active_response_id
-                has_board_call_in_response = response_has_board_tool_call.get(response_id, False)
-                board_satisfied = self._startup_board_ready(socket)
-                logger.info(
-                    "qwen response.done lesson=%s response_id=%s status=%s has_audio=%s has_text=%s has_function_call=%s board_tool_call=%s board_satisfied=%s",
-                    lesson_id, response_id, status,
-                    bool(lifecycle.has_audio) if lifecycle else None,
-                    bool(lifecycle.has_text) if lifecycle else None,
-                    bool(lifecycle.has_function_call) if lifecycle else None,
-                    has_board_call_in_response,
-                    board_satisfied,
-                )
-                if status in {"failed", "cancelled", "incomplete"}:
-                    logger.warning(
-                        "qwen response incomplete lesson=%s response_id=%s status=%s board_satisfied=%s",
-                        lesson_id, response_id, status, board_satisfied,
-                    )
-
-                # Controlled recovery during startup: if no board content yet, nudge for board_intent.
-                # Do not nudge when a board_intent/director is already in progress or another response is active.
-                now_mono = time.monotonic()
-                director_busy = (
-                    socket.last_board_director_started_at > 0
-                    and socket.last_board_director_finished_at < socket.last_board_director_started_at
-                    and (now_mono - socket.last_board_director_started_at) < 120
-                )
-                can_nudge = (
-                    not socket.closed.is_set()
-                    and not board_satisfied
-                    and socket.qwen is not None
-                    and socket.active_response_id is None
-                    and not director_busy
-                    and socket.startup_nudge_count < 3
-                    and (now_mono - socket.startup_last_nudge_at) >= 3.0
-                )
-                recovery_nudged = False
-                if can_nudge and not has_board_call_in_response:
-                    recovery_nudged = True
-                    socket.startup_nudge_count += 1
-                    socket.startup_last_nudge_at = now_mono
-                    socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED if (socket.last_qwen_audio_at or socket.last_qwen_transcript_at) else LessonStartupPhase.PROMPT_SENT
-                    logger.warning(
-                        "response.done without board tool call during startup lesson=%s response_id=%s nudge=%s",
-                        lesson_id, response_id, socket.startup_nudge_count,
-                    )
-                    await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
-                    try:
-                        await socket.qwen.prompt_text(
-                            "System instruction: The concept diagram is still missing. If the lesson title is not on the board, "
-                            "write it first with board_write_on_board, then immediately call create_board_visual to draw a diagram "
-                            "explaining the core concept. Say the cue phrases aloud as the stages appear, then keep teaching. "
-                            "Do not wait for the student."
-                        )
-                    except Exception:  # pragma: no cover
-                        logger.warning("startup recovery nudge failed lesson=%s", lesson_id, exc_info=True)
-                elif can_nudge and has_board_call_in_response and not board_satisfied:
-                    # board_intent was attempted in this response but did not result in a board event.
-                    recovery_nudged = True
-                    socket.startup_nudge_count += 1
-                    socket.startup_last_nudge_at = now_mono
-                    logger.warning(
-                        "response.done had board_intent but no board event lesson=%s response_id=%s nudge=%s director_error=%s",
-                        lesson_id, response_id, socket.startup_nudge_count, socket.last_board_director_error,
-                    )
-                    await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
-                    try:
-                        await socket.qwen.prompt_text(
-                            "System instruction: The previous diagram attempt did not produce a visible board update. "
-                            "Call create_board_visual again with a clear intent for a diagram that explains the core concept, "
-                            "using accurate short labels and stage cues. Then continue teaching aloud."
-                        )
-                    except Exception:  # pragma: no cover
-                        logger.warning("startup recovery nudge after failed board_intent failed lesson=%s", lesson_id, exc_info=True)
-
-                if not recovery_nudged:
-                    await self._maybe_auto_continue(
-                        socket, lesson_id, response_id, status, lifecycle
-                    )
-                continue
-
-            if etype == "teacher.state":
-                await socket.websocket.send_json(
-                    {MSG_TYPE: MSG_TEACHER_STATE, **event.get("payload", {})}
-                )
-                continue
-
-            # Unknown Qwen events are ignored (forwards compatibility).
 
     async def _handle_qwen_tool_call(
         self,
@@ -1239,10 +1316,11 @@ class LessonRealtimeHub:
                 )
                 try:
                     if socket.qwen is not None:
+                        # Replays only resend the cached, already persisted
+                        # result. Never request a second response here: the
+                        # original execution already owns that continuation.
                         await socket.qwen.function_call_output(
-                            call_id,
-                            json.dumps(cached),
-                            continue_response=str(event.get("name") or "") != "wait_for_student",
+                            call_id, json.dumps(cached)
                         )
                 except Exception:  # pragma: no cover - replay ack must not kill the socket
                     logger.warning("replayed function_call_output failed lesson=%s", lesson_id, exc_info=True)
@@ -1329,6 +1407,9 @@ class LessonRealtimeHub:
         if name == "lesson_finish":
             socket.lesson_finished = True
             await self._lock_answer_mic(socket, reason="lesson_finished")
+            await self._cancel_buffered_audio(
+                socket, response_id=response_id or None, reason="lesson_finished"
+            )
 
         if name == "board_intent":
             socket.startup_has_board_tool_call = True
@@ -1363,7 +1444,12 @@ class LessonRealtimeHub:
         finally:
             ok = bool(result.get("ok")) if isinstance(result, dict) else False
             if response_id and response_id in socket.response_lifecycles:
-                socket.response_lifecycles[response_id].function_call_executed_ok = ok
+                lifecycle = socket.response_lifecycles[response_id]
+                # One failed call must not be overwritten by a later success:
+                # continuation is only safe when every call persisted cleanly.
+                lifecycle.function_call_executed_ok = (
+                    lifecycle.function_call_executed_ok is not False and ok
+                )
             if name in {"board_intent", "create_board_visual"}:
                 socket.last_board_director_finished_at = _time.monotonic()
                 if not ok:
@@ -1423,6 +1509,591 @@ class LessonRealtimeHub:
         except Exception:  # pragma: no cover
             logger.warning("qwen function_call_output failed lesson=%s", lesson_id, exc_info=True)
         return result
+
+    # -- response gating / central response requests ----------------------
+
+    @staticmethod
+    def _tool_key(response_id: str, call_id: str) -> str:
+        return f"{response_id}:{call_id}"
+
+    def _response_gate(
+        self, socket: LessonSocket, response_id: str, *, create: bool = True
+    ) -> ResponseGate | None:
+        if not response_id:
+            return None
+        gate = socket.response_gates.get(response_id)
+        if gate is None and create:
+            gate = ResponseGate(response_id=response_id)
+            socket.response_gates[response_id] = gate
+            # Bound memory across long lessons without touching pending work.
+            if len(socket.response_gates) > 128:
+                for old_id, old_gate in list(socket.response_gates.items()):
+                    if old_id != response_id and not old_gate.has_unresolved_audio():
+                        socket.response_gates.pop(old_id, None)
+                        if len(socket.response_gates) <= 128:
+                            break
+        return gate
+
+    async def _request_response(
+        self, socket: LessonSocket, *, reason: str, force: bool = False
+    ) -> bool:
+        """Single guarded entry point for every ``response.create`` request.
+
+        ``force`` only bypasses the short cooldown; active responses, wait-for-
+        student pauses and finished/closed sockets are always respected.
+        """
+        if socket.closed.is_set() or socket.qwen is None:
+            logger.info("response.create skipped reason=%s lesson=%s (socket closed)", reason, socket.lesson_id)
+            return False
+        if socket.waiting_for_student or socket.lesson_finished:
+            logger.info(
+                "response.create skipped reason=%s lesson=%s waiting=%s finished=%s",
+                reason, socket.lesson_id, socket.waiting_for_student, socket.lesson_finished,
+            )
+            return False
+        now = time.monotonic()
+        async with socket.response_request_lock:
+            if socket.active_response_id is not None or socket.response_request_pending:
+                logger.info(
+                    "response.create skipped reason=%s lesson=%s active_response=%s pending=%s",
+                    reason,
+                    socket.lesson_id,
+                    socket.active_response_id,
+                    socket.response_request_pending,
+                )
+                return False
+            if not force:
+                since_request = now - socket.last_response_request_at
+                since_created = now - socket.last_qwen_response_created_at
+                if (
+                    since_request < RESPONSE_REQUEST_COOLDOWN_SECONDS
+                    or since_created < RESPONSE_REQUEST_COOLDOWN_SECONDS
+                ):
+                    logger.info(
+                        "response.create skipped reason=%s lesson=%s cooldown request=%.3f created=%.3f",
+                        reason, socket.lesson_id, since_request, since_created,
+                    )
+                    return False
+            socket.last_response_request_at = now
+            socket.response_request_pending = True
+        # Do not hold the lock across the transport round trip: other callers
+        # must be able to see the pending guard and skip immediately.
+        try:
+            await socket.qwen.create_response()
+            logger.info("response.create requested reason=%s lesson=%s", reason, socket.lesson_id)
+            return True
+        except Exception:  # pragma: no cover - transport best effort
+            logger.warning("response.create failed reason=%s lesson=%s", reason, socket.lesson_id, exc_info=True)
+            return False
+        finally:
+            async with socket.response_request_lock:
+                socket.response_request_pending = False
+
+    async def _prompt_text(
+        self,
+        socket: LessonSocket,
+        text: str,
+        *,
+        reason: str,
+        request_response: bool = True,
+    ) -> bool:
+        """Send an instruction; request the follow-up response through the guard."""
+        if socket.closed.is_set() or socket.qwen is None:
+            return False
+        try:
+            await socket.qwen.prompt_text(text)
+        except Exception:  # pragma: no cover - transport best effort
+            logger.warning("prompt_text failed reason=%s lesson=%s", reason, socket.lesson_id, exc_info=True)
+            return False
+        if request_response:
+            # prompt_text replaces adapter-side create_response: the hub decides
+            # whether a new turn is safe, but the prompt itself is a new turn so
+            # the short inter-response cooldown must not suppress it.
+            await self._request_response(socket, reason=reason, force=True)
+        return True
+
+    def _schedule_audio_grace(
+        self, socket: LessonSocket, gate: ResponseGate
+    ) -> None:
+        if gate.grace_task is not None or gate.calls or gate.released or gate.discarded:
+            return
+        gate.grace_task = asyncio.create_task(
+            self._audio_grace_timer(socket, gate),
+            name=f"audio-grace-{socket.lesson_id}-{gate.response_id}",
+        )
+
+    async def _audio_grace_timer(
+        self, socket: LessonSocket, gate: ResponseGate
+    ) -> None:
+        try:
+            await asyncio.sleep(AUDIO_TOOL_GRACE_SECONDS)
+            if gate.discarded or gate.released or gate.calls:
+                return
+            await self._flush_audio_buffer(socket, gate, reason="no_call_grace")
+        except asyncio.CancelledError:
+            return
+        except Exception:  # pragma: no cover - never break the bridge
+            logger.warning("audio grace flush failed lesson=%s response=%s", socket.lesson_id, gate.response_id, exc_info=True)
+        finally:
+            gate.grace_task = None
+
+    async def _handle_audio_delta(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        event: dict[str, Any],
+        response_id: str,
+    ) -> None:
+        gate = self._response_gate(socket, response_id)
+        if gate is None or gate.discarded:
+            return
+        raw_sequence = event.get("sequence")
+        if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool):
+            source_sequence: int | None = raw_sequence
+            order_sequence = raw_sequence
+        else:
+            source_sequence = None
+            order_sequence = 1_000_000 + gate.next_local_sequence
+            gate.next_local_sequence += 1
+        if order_sequence in gate.seen_sequences:
+            logger.info(
+                "qwen audio.delta duplicate ignored lesson=%s response_id=%s sequence=%s",
+                lesson_id, response_id, raw_sequence,
+            )
+            return
+        gate.seen_sequences.add(order_sequence)
+        if source_sequence is not None:
+            if gate.last_sequence is not None and source_sequence > gate.last_sequence + 1:
+                gate.gap_detected = True
+                socket.audio_gap_count += 1
+                logger.warning(
+                    "qwen audio.delta gap lesson=%s response_id=%s expected=%s got=%s",
+                    lesson_id, response_id, gate.last_sequence + 1, source_sequence,
+                )
+            gate.last_sequence = (
+                source_sequence
+                if gate.last_sequence is None
+                else max(gate.last_sequence, source_sequence)
+            )
+        payload = {
+            MSG_TYPE: MSG_AUDIO_DELTA,
+            "data": event.get("delta", ""),
+            "sample_rate": get_settings().qwen_output_sample_rate,
+            "sequence": event.get("sequence"),
+        }
+        if gate.released and not gate.calls:
+            await socket.websocket.send_json(payload)
+            return
+        gate.buffer.append((order_sequence, len(gate.buffer), payload))
+        if not gate.calls and not gate.released:
+            self._schedule_audio_grace(socket, gate)
+
+    async def _flush_audio_buffer(
+        self, socket: LessonSocket, gate: ResponseGate, *, reason: str
+    ) -> None:
+        if gate.discarded:
+            return
+        if gate.grace_task is not None:
+            gate.grace_task.cancel()
+            gate.grace_task = None
+        if gate.buffer:
+            entries = sorted(gate.buffer, key=lambda item: (item[0], item[1]))
+            gate.buffer.clear()
+            gate.released = True
+            logger.info(
+                "audio gate flushed lesson=%s response_id=%s deltas=%s reason=%s",
+                socket.lesson_id, gate.response_id, len(entries), reason,
+            )
+            for _, _, payload in entries:
+                await socket.websocket.send_json(payload)
+        else:
+            gate.released = True
+        if gate.audio_done_event is not None:
+            audio_done = gate.audio_done_event
+            gate.audio_done_event = None
+            await socket.websocket.send_json(
+                {
+                    MSG_TYPE: MSG_AUDIO_DONE,
+                    "response_id": audio_done.get("response_id") or gate.response_id,
+                }
+            )
+        if gate.done_event is not None and not gate.finalized:
+            done_event = gate.done_event
+            gate.done_event = None
+            await self._finalize_response(socket, done_event)
+
+    async def _cancel_buffered_audio(
+        self,
+        socket: LessonSocket,
+        *,
+        response_id: str | None = None,
+        reason: str,
+    ) -> None:
+        """Discard buffered speech so no false confirmation can be spoken."""
+        gates: list[ResponseGate]
+        if response_id:
+            gate = self._response_gate(socket, response_id, create=False)
+            gates = [gate] if gate is not None else []
+        else:
+            gates = list(socket.response_gates.values())
+        for gate in gates:
+            if gate.discarded:
+                continue
+            had_audio = bool(gate.buffer) or not gate.released
+            if gate.grace_task is not None:
+                gate.grace_task.cancel()
+                gate.grace_task = None
+            gate.buffer.clear()
+            gate.discarded = True
+            gate.audio_done_event = None
+            # Keep done_event: a deferred response.done still needs to clear
+            # active_response_id so it cannot block the next teaching turn.
+            if had_audio:
+                logger.info(
+                    "buffered audio discarded lesson=%s response_id=%s reason=%s",
+                    socket.lesson_id, gate.response_id, reason,
+                )
+                try:
+                    await socket.websocket.send_json(
+                        {
+                            MSG_TYPE: MSG_AUDIO_TRUNCATED,
+                            "response_id": gate.response_id,
+                            "reason": reason,
+                        }
+                    )
+                except Exception:  # pragma: no cover - teardown
+                    logger.debug("audio.truncated send failed lesson=%s", socket.lesson_id, exc_info=True)
+
+    async def _abandon_tool_task(
+        self, socket: LessonSocket, key: str, *, reason: str
+    ) -> None:
+        """Settle a cancelled tool so its response gate cannot block forever."""
+        response_id, _, call_id = key.partition(":")
+        if not response_id or not call_id:
+            return
+        gate = self._response_gate(socket, response_id, create=False)
+        if gate is not None:
+            state = gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
+            state.settled = True
+            state.ok = False
+        lifecycle = socket.response_lifecycles.get(response_id)
+        if lifecycle is not None:
+            lifecycle.function_call_executed_ok = False
+        await self._cancel_buffered_audio(
+            socket, response_id=response_id, reason=reason
+        )
+        if gate is not None and gate.done_event is not None:
+            done_event = gate.done_event
+            gate.done_event = None
+            await self._finalize_response(socket, done_event)
+        elif socket.active_response_id == response_id:
+            # No response.done ever arrived; do not leave the turn guard latched.
+            socket.active_response_id = None
+
+    async def _cancel_pending_work(
+        self, socket: LessonSocket, *, reason: str
+    ) -> None:
+        await self._cancel_buffered_audio(socket, reason=reason)
+        for key, task in list(socket.tool_tasks.items()):
+            if not task.done():
+                task.cancel()
+            await self._abandon_tool_task(socket, key, reason=reason)
+        socket.tool_tasks.clear()
+
+    async def _submit_tool_call(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        event: dict[str, Any],
+        response_id: str,
+        call_id: str,
+    ) -> None:
+        """Submit tool execution to a managed task; never block the event loop."""
+        gate = self._response_gate(socket, response_id)
+        if gate is None or gate.discarded:
+            return
+        state = gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
+        state.name = str(event.get("name") or state.name)
+        raw_sequence = event.get("sequence")
+        if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool):
+            state.sequence = raw_sequence
+            if gate.last_tool_sequence is not None and raw_sequence > gate.last_tool_sequence + 1:
+                socket.tool_gap_count += 1
+                logger.warning(
+                    "qwen function_call sequence gap lesson=%s response_id=%s call_id=%s expected=%s got=%s",
+                    lesson_id, response_id, call_id, gate.last_tool_sequence + 1, raw_sequence,
+                )
+            gate.last_tool_sequence = (
+                raw_sequence
+                if gate.last_tool_sequence is None
+                else max(gate.last_tool_sequence, raw_sequence)
+            )
+        # A newly observed call re-gates audio from this point onward.
+        if gate.grace_task is not None:
+            gate.grace_task.cancel()
+            gate.grace_task = None
+        gate.released = False
+        key = self._tool_key(response_id, call_id)
+        existing = socket.tool_tasks.get(key)
+        if existing is not None and not existing.done():
+            logger.info(
+                "qwen function_call already running lesson=%s response_id=%s call_id=%s",
+                lesson_id, response_id, call_id,
+            )
+            return
+        replay = call_id in socket.tool_call_results or (state.submitted and state.settled)
+        if replay:
+            state.replay = True
+        state.submitted = True
+        task = asyncio.create_task(
+            self._run_tool_task(
+                socket, lesson_id, event, response_id, call_id, key, replay=replay
+            ),
+            name=f"qwen-tool-{lesson_id}-{response_id}-{call_id}",
+        )
+        socket.tool_tasks[key] = task
+
+    async def _run_tool_task(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        event: dict[str, Any],
+        response_id: str,
+        call_id: str,
+        key: str,
+        *,
+        replay: bool,
+    ) -> None:
+        ok = False
+        try:
+            await self._handle_qwen_tool_call(
+                socket, lesson_id, event, response_id=response_id
+            )
+            cached = socket.tool_call_results.get(key)
+            ok = bool(cached.get("ok")) if isinstance(cached, dict) else False
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - tool task must never crash the loop
+            logger.exception("qwen tool task failed lesson=%s call_id=%s", lesson_id, call_id)
+            ok = False
+        finally:
+            if socket.tool_tasks.get(key) is asyncio.current_task():
+                socket.tool_tasks.pop(key, None)
+        await self._on_tool_call_settled(
+            socket, lesson_id, response_id, call_id, ok=ok, replay=replay
+        )
+
+    async def _on_tool_call_settled(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        response_id: str,
+        call_id: str,
+        *,
+        ok: bool,
+        replay: bool,
+    ) -> None:
+        gate = self._response_gate(socket, response_id, create=False)
+        if gate is None:
+            return
+        state = gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
+        state.settled = True
+        state.ok = ok
+        state.replay = state.replay or replay
+        if not ok:
+            # Never speak a confirmation for a tool that did not persist.
+            await self._cancel_buffered_audio(
+                socket, response_id=response_id, reason="tool_failed"
+            )
+            if gate.done_event is not None:
+                done_event = gate.done_event
+                gate.done_event = None
+                await self._finalize_response(socket, done_event)
+            return
+        if gate.discarded:
+            if gate.done_event is not None:
+                done_event = gate.done_event
+                gate.done_event = None
+                await self._finalize_response(socket, done_event)
+            return
+        if gate.has_pending_calls():
+            return
+        await self._flush_audio_buffer(socket, gate, reason="tool_calls_complete")
+
+    def _gate_has_flow_control_call(self, gate: ResponseGate | None) -> bool:
+        if gate is None:
+            return False
+        return any(
+            call.name in {"wait_for_student", "lesson_finish"}
+            for call in gate.calls.values()
+        )
+
+    async def _finalize_response(
+        self, socket: LessonSocket, event: dict[str, Any]
+    ) -> None:
+        """Handle a Qwen response.done once its audio gate and tools are settled."""
+        lesson_id = socket.lesson_id
+        response = event.get("response") if isinstance(event.get("response"), dict) else {}
+        response_id = str(
+            response.get("id") or event.get("response_id") or socket.active_response_id or ""
+        )
+        status = str(response.get("status") or "")
+        gate = self._response_gate(socket, response_id, create=False)
+        if gate is not None and gate.finalized:
+            return
+        if gate is not None:
+            gate.finalized = True
+        lifecycle = socket.response_lifecycles.get(response_id)
+        if lifecycle is not None:
+            lifecycle.completed_at = time.monotonic()
+            lifecycle.status = status or lifecycle.status or "done"
+        socket.active_response_id = None if socket.active_response_id == response_id else socket.active_response_id
+        has_board_call_in_response = bool(gate.has_board_call) if gate is not None else False
+        board_satisfied = self._startup_board_ready(socket)
+        logger.info(
+            "qwen response.done lesson=%s response_id=%s status=%s has_audio=%s has_text=%s has_function_call=%s board_tool_call=%s board_satisfied=%s",
+            lesson_id, response_id, status,
+            bool(lifecycle.has_audio) if lifecycle else None,
+            bool(lifecycle.has_text) if lifecycle else None,
+            bool(lifecycle.has_function_call) if lifecycle else None,
+            has_board_call_in_response,
+            board_satisfied,
+        )
+        if status in {"failed", "cancelled", "incomplete"}:
+            logger.warning(
+                "qwen response incomplete lesson=%s response_id=%s status=%s board_satisfied=%s",
+                lesson_id, response_id, status, board_satisfied,
+            )
+        if status in {"failed", "cancelled"}:
+            await self._cancel_buffered_audio(
+                socket, response_id=response_id, reason=f"response_{status}"
+            )
+
+        if gate is not None and gate.gap_detected:
+            # Source-side sequence gap: regenerate the teaching step rather than
+            # letting a half-delivered explanation stall the lesson.
+            await self._request_response(
+                socket, reason="audio_sequence_gap_recovery", force=True
+            )
+            return
+
+        now_mono = time.monotonic()
+        director_busy = (
+            socket.last_board_director_started_at > 0
+            and socket.last_board_director_finished_at < socket.last_board_director_started_at
+            and (now_mono - socket.last_board_director_started_at) < 120
+        )
+        can_nudge = (
+            not socket.closed.is_set()
+            and not board_satisfied
+            and socket.qwen is not None
+            and socket.active_response_id is None
+            and not director_busy
+            and socket.startup_nudge_count < 3
+            and (now_mono - socket.startup_last_nudge_at) >= 3.0
+        )
+        recovery_nudged = False
+        if can_nudge and not has_board_call_in_response:
+            recovery_nudged = True
+            socket.startup_nudge_count += 1
+            socket.startup_last_nudge_at = now_mono
+            socket.startup_phase = LessonStartupPhase.RESPONSE_STARTED if (socket.last_qwen_audio_at or socket.last_qwen_transcript_at) else LessonStartupPhase.PROMPT_SENT
+            logger.warning(
+                "response.done without board tool call during startup lesson=%s response_id=%s nudge=%s",
+                lesson_id, response_id, socket.startup_nudge_count,
+            )
+            await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
+            await self._prompt_text(
+                socket,
+                "System instruction: The concept diagram is still missing. If the lesson title is not on the board, "
+                "write it first with board_write_on_board, then immediately call create_board_visual to draw a diagram "
+                "explaining the core concept. Say the cue phrases aloud as the stages appear, then keep teaching. "
+                "Do not wait for the student.",
+                reason="startup_recovery_no_board_call",
+            )
+        elif can_nudge and has_board_call_in_response and not board_satisfied:
+            recovery_nudged = True
+            socket.startup_nudge_count += 1
+            socket.startup_last_nudge_at = now_mono
+            logger.warning(
+                "response.done had board_intent but no board event lesson=%s response_id=%s nudge=%s director_error=%s",
+                lesson_id, response_id, socket.startup_nudge_count, socket.last_board_director_error,
+            )
+            await self._send_startup_status(socket, "recovering", "Preparing your first lesson...")
+            await self._prompt_text(
+                socket,
+                "System instruction: The previous diagram attempt did not produce a visible board update. "
+                "Call create_board_visual again with a clear intent for a diagram that explains the core concept, "
+                "using accurate short labels and stage cues. Then continue teaching aloud.",
+                reason="startup_recovery_board_failed",
+            )
+
+        if recovery_nudged:
+            return
+
+        if lifecycle is not None and lifecycle.has_function_call:
+            # Tool continuations are hub-managed and only after a successful,
+            # persisted result. wait_for_student/lesson_finish stop here.
+            if (
+                lifecycle.function_call_executed_ok is True
+                and not self._gate_has_flow_control_call(gate)
+            ):
+                await self._request_response(
+                    socket, reason="tool_continuation", force=True
+                )
+            return
+
+        await self._maybe_auto_continue(
+            socket, lesson_id, response_id, status, lifecycle
+        )
+        await self._schedule_continuation_watchdog(
+            socket, lesson_id, response_id, status, lifecycle
+        )
+
+    async def _schedule_continuation_watchdog(
+        self,
+        socket: LessonSocket,
+        lesson_id: str,
+        response_id: str,
+        status: str,
+        lifecycle: ResponseLifecycle | None,
+    ) -> None:
+        """Recover a teaching step that ended with no audio/text/tool call."""
+        if lifecycle is not None and (
+            lifecycle.has_audio or lifecycle.has_text or lifecycle.has_function_call
+        ):
+            return
+
+        async def _watch() -> None:
+            try:
+                await asyncio.sleep(CONTINUATION_WATCHDOG_SECONDS)
+                if socket.closed.is_set() or socket.lesson_finished:
+                    logger.info("continuation watchdog skipped lesson=%s reason=closed_or_finished", lesson_id)
+                    return
+                if socket.waiting_for_student:
+                    logger.info("continuation watchdog skipped lesson=%s reason=waiting_for_student", lesson_id)
+                    return
+                if socket.active_response_id is not None:
+                    logger.info("continuation watchdog skipped lesson=%s reason=active_response=%s", lesson_id, socket.active_response_id)
+                    return
+                started = socket.response_lifecycles.get(response_id)
+                if started is not None and (
+                    started.has_audio or started.has_text or started.has_function_call
+                ):
+                    return
+                logger.warning(
+                    "continuation watchdog: empty teaching response lesson=%s response_id=%s status=%s",
+                    lesson_id, response_id, status,
+                )
+                await self._request_response(socket, reason="continuation_watchdog_empty")
+            except asyncio.CancelledError:
+                return
+            except Exception:  # pragma: no cover
+                logger.warning("continuation watchdog failed lesson=%s", lesson_id, exc_info=True)
+
+        asyncio.create_task(
+            _watch(), name=f"continue-watchdog-{lesson_id}-{response_id}"
+        )
 
     # -- helpers ----------------------------------------------------------
 
@@ -1554,7 +2225,11 @@ class LessonRealtimeHub:
                 # Watchdog/response.done will handle recovery; do not create duplicate response.
                 return
             try:
-                await socket.qwen.prompt_text(prompt)
+                sent = await self._prompt_text(
+                    socket, prompt, reason="initial_teaching"
+                )
+                if not sent:
+                    raise RuntimeError("initial teaching prompt was not submitted")
                 logger.info("initial teaching instruction submitted lesson=%s fresh=%s attempt=%s", lesson.id, is_fresh, socket.startup_attempt)
             except Exception:
                 socket.startup_phase = LessonStartupPhase.FAILED
@@ -1631,27 +2306,39 @@ class LessonRealtimeHub:
         drive it with a bare ``response.create`` — no synthetic user message is
         added to the conversation or transcript.
         """
+        def _skip(reason: str) -> None:
+            logger.info(
+                "auto-continue skipped lesson=%s response_id=%s reason=%s",
+                lesson_id, response_id, reason,
+            )
+
         if socket.closed.is_set() or socket.qwen is None:
+            _skip("socket_closed")
             return
         if status in {"failed", "cancelled"}:
+            _skip(f"response_{status}")
             return
         if socket.waiting_for_student or socket.lesson_finished:
+            _skip("waiting_for_student" if socket.waiting_for_student else "lesson_finished")
             return
         if socket.active_response_id is not None:
+            _skip(f"active_response={socket.active_response_id}")
             return
         if not (socket.startup_has_board_event or socket.last_board_event_at > 0):
-            return  # startup recovery owns the conversation until the board exists
-        if self._director_busy(socket):
+            _skip("startup_board_missing")  # startup recovery owns the conversation
             return
-        # A tool call already triggers response.create via function_call_output;
-        # creating another here would produce two overlapping responses.
+        # A successful tool call already requests its own continuation after the
+        # result has been persisted and acknowledged.
         if lifecycle is not None and lifecycle.has_function_call:
+            _skip("function_call_owns_continuation")
             return
-        # Do not spin on empty/completion-only responses.
+        # Do not spin on empty/completion-only responses; the watchdog covers them.
         if lifecycle is None or not (lifecycle.has_audio or lifecycle.has_text):
+            _skip("empty_response")
             return
         now = time.monotonic()
         if (now - socket.last_auto_continue_at) < AUTO_CONTINUE_COOLDOWN_SECONDS:
+            _skip("cooldown")
             return
         if socket.auto_continue_count >= MAX_AUTO_CONTINUES_PER_TURN:
             logger.warning(
@@ -1661,14 +2348,16 @@ class LessonRealtimeHub:
             return
         socket.auto_continue_count += 1
         socket.last_auto_continue_at = now
-        try:
-            await socket.qwen.create_response()
+        # This path has its own 1s cooldown above; the response has already
+        # completed, so the creation-time cooldown must not stall the step.
+        requested = await self._request_response(
+            socket, reason="auto_continue", force=True
+        )
+        if requested:
             logger.info(
                 "auto-continue teaching lesson=%s response_id=%s count=%s",
                 lesson_id, response_id, socket.auto_continue_count,
             )
-        except Exception:  # pragma: no cover
-            logger.warning("auto-continue failed lesson=%s", lesson_id, exc_info=True)
 
     async def _safe_prompt_text(self, socket: LessonSocket, text: str, *, reason: str) -> bool:
         if socket.closed.is_set() or socket.qwen is None:
@@ -1681,13 +2370,10 @@ class LessonRealtimeHub:
             logger.info("skip prompt_text cooldown reason=%s lesson=%s", reason, socket.lesson_id)
             return False
         socket.startup_last_nudge_at = now
-        try:
-            await socket.qwen.prompt_text(text)
+        sent = await self._prompt_text(socket, text, reason=reason)
+        if sent:
             logger.info("prompt_text sent reason=%s lesson=%s lease=%s", reason, socket.lesson_id, socket.lease_id)
-            return True
-        except Exception:  # pragma: no cover
-            logger.warning("prompt_text failed reason=%s lesson=%s", reason, socket.lesson_id, exc_info=True)
-            return False
+        return sent
 
     def _schedule_startup_watchdog(self, socket: LessonSocket, lesson_id: str) -> None:
         async def _watch() -> None:
@@ -1803,6 +2489,7 @@ class LessonRealtimeHub:
     ) -> None:
         """End the lesson (graph finalize + board snapshot) and notify client."""
         await self._lock_answer_mic(socket, reason="lesson_ended")
+        await self._cancel_pending_work(socket, reason="lesson_ended")
         try:
             async with session_scope() as fresh_db:
                 lesson = await fresh_db.get(Lesson, lesson_id)

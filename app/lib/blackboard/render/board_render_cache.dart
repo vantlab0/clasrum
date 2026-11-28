@@ -1,3 +1,5 @@
+import 'dart:ui' show Path, Picture;
+
 import '../model/board_geometry.dart';
 import 'chalk_text.dart';
 
@@ -9,7 +11,9 @@ import 'chalk_text.dart';
 /// `BoardDocument.boundsOf` when an element has not been painted yet.
 class BoardBoundsRegistry {
   final Map<String, BoardRect> _bounds = <String, BoardRect>{};
+  final Map<String, String> _ownerByChild = <String, String>{};
   int _version = 0;
+  int _lastPruneRevision = -1;
 
   int get version => _version;
 
@@ -33,18 +37,49 @@ class BoardBoundsRegistry {
     _version++;
   }
 
+  /// Registers geometry belonging to [ownerId] but keyed by a renderer-local
+  /// child id (e.g. a generated plan element or a drawing step). The child
+  /// survives pruning while its owner element is still in the document.
+  void putOwned(String ownerId, String childId, BoardRect bounds) {
+    _ownerByChild[childId] = ownerId;
+    put(childId, bounds);
+  }
+
   void retainOnly(Set<String> aliveIds) {
-    final removed = _bounds.keys.where((id) => !aliveIds.contains(id)).toList();
-    if (removed.isEmpty) return;
+    final removed = _bounds.keys
+        .where(
+          (id) =>
+              !aliveIds.contains(id) &&
+              !aliveIds.contains(_ownerByChild[id]),
+        )
+        .toList();
+    final deadOwners = _ownerByChild.entries
+        .where((entry) => !aliveIds.contains(entry.value))
+        .map((entry) => entry.key)
+        .toList();
+    if (removed.isEmpty && deadOwners.isEmpty) return;
     for (final id in removed) {
       _bounds.remove(id);
+    }
+    for (final id in deadOwners) {
+      _ownerByChild.remove(id);
     }
     _version++;
   }
 
+  /// Avoids rebuilding the alive-id set on every animation frame when the
+  /// document revision has not changed.
+  void pruneIfChanged(int revision, Set<String> aliveIds) {
+    if (_lastPruneRevision == revision) return;
+    _lastPruneRevision = revision;
+    retainOnly(aliveIds);
+  }
+
   void clear() {
-    if (_bounds.isEmpty) return;
+    if (_bounds.isEmpty && _ownerByChild.isEmpty) return;
     _bounds.clear();
+    _ownerByChild.clear();
+    _lastPruneRevision = -1;
     _version++;
   }
 }
@@ -85,9 +120,62 @@ class BoardGeometryCache {
     _entries[key] = value;
     _lru.add(key);
     while (_entries.length > maxEntries) {
-      final oldest = _lru.removeAt(0);
-      _entries.remove(oldest);
+      _evict(_lru.removeAt(0));
     }
+  }
+
+  void clear() {
+    for (final key in _entries.keys.toList(growable: false)) {
+      _evict(key);
+    }
+  }
+
+  void dispose() => clear();
+
+  void _evict(String key) {
+    final value = _entries.remove(key);
+    if (value is Path) {
+      value.reset();
+    } else if (value is Picture) {
+      value.dispose();
+    }
+  }
+}
+
+/// Small bounded LRU for parsed LaTeX syntax trees. Expressions are immutable
+/// and frequently parsed again during repaint; clearing the entire map when it
+/// fills caused a reparse storm in long lessons.
+class LatexExpressionCache {
+  LatexExpressionCache({this.maxEntries = 192});
+
+  final int maxEntries;
+  final Map<String, Object?> _entries = <String, Object?>{};
+  final List<String> _lru = <String>[];
+
+  int get length => _entries.length;
+
+  bool containsKey(String expression) => _entries.containsKey(expression);
+
+  T? get<T extends Object>(String expression) {
+    final value = _entries[expression];
+    if (value == null) return null;
+    _lru.remove(expression);
+    _lru.add(expression);
+    return value as T;
+  }
+
+  /// Cached `null` means a known-invalid expression. [containsKey] distinguishes
+  /// it from a miss.
+  void put(String expression, Object? syntaxTree) {
+    if (_entries.containsKey(expression)) {
+      _lru.remove(expression);
+    } else {
+      while (_entries.length >= maxEntries) {
+        _entries.remove(_lru.removeAt(0));
+      }
+    }
+    _entries[expression] = syntaxTree;
+    _lru.add(expression);
   }
 
   void clear() {
@@ -105,12 +193,14 @@ class BoardRenderCache {
   final ChalkTextEngine textEngine;
   final BoardBoundsRegistry bounds = BoardBoundsRegistry();
   final BoardGeometryCache geometry = BoardGeometryCache();
+  final LatexExpressionCache latex = LatexExpressionCache();
 
   void prune(Set<String> aliveElementIds) => bounds.retainOnly(aliveElementIds);
 
   void dispose() {
     textEngine.dispose();
-    geometry.clear();
+    geometry.dispose();
+    latex.clear();
     bounds.clear();
   }
 }

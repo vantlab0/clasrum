@@ -256,6 +256,72 @@ async def test_visible_board_full_wipes_once_and_nudges_tutor() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("layout_mode", ["mobile", "compact_portrait", "narrow"])
+async def test_mobile_viewport_full_never_clears_the_board(layout_mode: str) -> None:
+    """Narrow boards scroll vertically: reaching the bottom is not a wipe."""
+    lesson_id = await _create_lesson()
+    async with session_scope() as db:
+        lesson = await db.get(Lesson, lesson_id)
+        assert lesson is not None
+        lesson.last_board_sequence = 4
+        await db.commit()
+
+    hub = LessonRealtimeHub()
+    ws = FakeWs()
+    qwen = FakeQwen()
+    socket = LessonSocket(
+        websocket=ws,
+        lesson_id=lesson_id,
+        student_id="student-1",
+        lease_id="lease-1",
+        qwen=qwen,
+    )
+    async with hub._lock:
+        hub._sockets[lesson_id] = socket
+        hub._all.setdefault(lesson_id, set()).add(socket)
+
+    report = json.dumps(
+        {
+            "type": CLIENT_BOARD_VIEWPORT_FULL,
+            "sequence": 4,
+            "coverage": 0.97,
+            "scale": 2.0,
+            "layout_mode": layout_mode,
+            "visible_rect": {"x": 0, "y": 0, "w": 1, "h": 1},
+            "offset": {"x": 0, "y": 0},
+        }
+    )
+    await hub._handle_client_text(socket, lesson_id, report)
+
+    assert not [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
+    assert qwen.prompt_texts == []
+    assert socket.last_viewport_report_sequence == 4
+    assert socket.last_viewport_cleared_sequence == -1
+
+    async with session_scope() as db:
+        lesson = await db.get(Lesson, lesson_id)
+        assert lesson is not None
+        assert lesson.last_board_sequence == 4
+        from sqlalchemy import func, select
+
+        from app.db.models import LessonBoardEvent
+
+        clear_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(LessonBoardEvent)
+                .where(LessonBoardEvent.lesson_id == lesson_id)
+                .where(LessonBoardEvent.type == "clear")
+            )
+        ).scalar_one()
+        assert clear_count == 0
+
+
+@pytest.mark.asyncio
 async def test_manual_board_clear_wipes_once_without_nudging_tutor() -> None:
     lesson_id = await _create_lesson()
     async with session_scope() as db:

@@ -248,11 +248,15 @@ class ProtocolStyle {
         if (dash != null) 'dash': dash!.map(_round4).toList(),
       };
 
+  /// Illustration colours are always snapped to the bright board palette.
+  /// The [fallback] argument is kept for API compatibility; when no explicit
+  /// colour exists it is itself snapped, so legacy chalk roles cannot leak into
+  /// a diagram as dark/gray ink.
   Color resolveStrokeColor({Color fallback = ChalkPalette.primary}) =>
-      ChalkPalette.resolve(strokeColor, fallback: fallback);
+      ChalkPalette.resolveIllustration(strokeColor ?? fallback, fallbackRole: 'cyan');
 
   Color resolveFillColor({Color fallback = ChalkPalette.primary}) =>
-      ChalkPalette.resolve(fillColor, fallback: fallback);
+      ChalkPalette.resolveIllustration(fillColor ?? fallback, fallbackRole: 'teal');
 }
 
 // ---------------------------------------------------------------------------

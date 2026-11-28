@@ -36,6 +36,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.board.palette import sanitize_illustration_color
 from app.db.constants import CHALK_COLORS
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,21 @@ ColorStr = Annotated[
     str,
     StringConstraints(pattern=HEX_OR_ROLE_PATTERN),
     AfterValidator(_normalize_color),
+]
+
+
+def _sanitize_illustration(value: Any) -> str:
+    return sanitize_illustration_color(value)
+
+
+# Illustrations (diagrams, drawings, graphs, generated visuals) may never use
+# black/gray/off-white/dark ink on the black board.  BeforeValidator runs ahead
+# of the shape check, so an untrusted hex is snapped to the bright palette here
+# instead of being rejected or passed through verbatim.
+IllustrationColorStr = Annotated[
+    str,
+    BeforeValidator(_sanitize_illustration),
+    Field(pattern=r"^#[0-9A-F]{6}$"),
 ]
 
 Normalized = Annotated[
@@ -251,7 +267,9 @@ class DataPoint(StrictModel):
     x: DataCoord = Field(description="Data-space x coordinate.")
     y: DataCoord = Field(description="Data-space y coordinate.")
     label: LabelText | None = Field(default=None, description="Optional point label.")
-    color: ColorStr | None = Field(default=None, description="Chalk role or hex.")
+    color: IllustrationColorStr | None = Field(
+        default=None, description="Bright illustration role or hex (sanitized)."
+    )
     radius: Annotated[float, Field(ge=0.001, le=0.1, allow_inf_nan=False)] | None = Field(
         default=None, description="Marker radius as a fraction of the board (0.001..0.1)."
     )
@@ -492,7 +510,7 @@ class DrawLineArgs(StrictModel):
 
     start: CanvasPoint = Field(description="Normalized start point, 0..1.")
     end: CanvasPoint = Field(description="Normalized end point, 0..1.")
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
     stroke_width: StrokeWidth = Field(default=2.0)
     dash: Annotated[
         list[Annotated[float, Field(ge=0.5, le=50.0, allow_inf_nan=False)]],
@@ -505,7 +523,7 @@ class DrawLineArgs(StrictModel):
             {
                 "start": self.start.to_payload(),
                 "end": self.end.to_payload(),
-                "color": self.color or "primary",
+                "color": self.color or "#00D9FF",
                 "stroke_width": _r(self.stroke_width),
                 "dash": [_r(v) for v in self.dash] if self.dash else None,
                 "arrowhead": self.arrowhead,
@@ -519,8 +537,8 @@ class DrawShapeArgs(StrictModel):
     shape: ShapeKind = Field(description="Shape primitive to draw.")
     position: Position = Field(description="Top-left of the shape's bounding box.")
     size: Size = Field(description="Bounding box size.")
-    color: ColorStr | None = Field(default=None)
-    fill_color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
+    fill_color: IllustrationColorStr | None = Field(default=None)
     stroke_width: StrokeWidth = Field(default=2.0)
     corners: Annotated[float, Field(ge=0.0, le=0.5, allow_inf_nan=False)] | None = Field(
         default=None, description="Corner rounding for rect shapes (0..0.5)."
@@ -543,7 +561,7 @@ class DrawShapeArgs(StrictModel):
                 "shape": self.shape,
                 "position": self.position.to_payload(),
                 "size": self.size.to_payload(),
-                "color": self.color or "primary",
+                "color": self.color or "#00D9FF",
                 "fill_color": self.fill_color,
                 "stroke_width": _r(self.stroke_width),
                 "corners": _r(self.corners) if self.corners is not None else None,
@@ -560,9 +578,9 @@ class DrawPathArgs(StrictModel):
     )
     closed: bool = Field(default=False)
     smooth: bool = Field(default=True)
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
     stroke_width: StrokeWidth = Field(default=2.0)
-    fill_color: ColorStr | None = Field(default=None)
+    fill_color: IllustrationColorStr | None = Field(default=None)
 
     def build_payload(self) -> dict[str, Any]:
         return _clean(
@@ -570,7 +588,7 @@ class DrawPathArgs(StrictModel):
                 "points": [p.to_payload() for p in self.points],
                 "closed": self.closed,
                 "smooth": self.smooth,
-                "color": self.color or "primary",
+                "color": self.color or "#00D9FF",
                 "stroke_width": _r(self.stroke_width),
                 "fill_color": self.fill_color,
             }
@@ -586,7 +604,7 @@ class DrawArrowArgs(StrictModel):
     label: Annotated[str, Field(min_length=1, max_length=MAX_LABEL)] | None = Field(
         default=None
     )
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
     stroke_width: StrokeWidth = Field(default=2.0)
 
     def build_payload(self) -> dict[str, Any]:
@@ -596,7 +614,7 @@ class DrawArrowArgs(StrictModel):
                 "end": self.end.to_payload(),
                 "curve": _r(self.curve),
                 "label": self.label,
-                "color": self.color or "primary",
+                "color": self.color or "#00D9FF",
                 "stroke_width": _r(self.stroke_width),
             }
         )
@@ -612,7 +630,7 @@ class DiagramNode(StrictModel):
     shape: ShapeKind | None = Field(default="rect")
     position: Position
     size: Size | None = Field(default=None)
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
 
     def to_payload(self) -> dict[str, Any]:
         return _clean(
@@ -638,6 +656,9 @@ class DiagramEdge(StrictModel):
     style: Literal["solid", "dashed", "arrow"] = Field(default="solid")
     arrow: bool = Field(default=True)
     curve: Curve = Field(default=0.0)
+    color: IllustrationColorStr | None = Field(
+        default=None, description="Connector colour; defaults to a bright palette role."
+    )
 
     def to_payload(self) -> dict[str, Any]:
         return _clean(
@@ -648,6 +669,7 @@ class DiagramEdge(StrictModel):
                 "style": self.style,
                 "arrow": self.arrow,
                 "curve": _r(self.curve),
+                "color": self.color,
             }
         )
 
@@ -667,6 +689,9 @@ class DrawDiagramArgs(StrictModel):
     )
     coordinate_note: Annotated[str, Field(min_length=1, max_length=MAX_NOTES)] | None = (
         Field(default=None, description="Optional coordinate-system note for the diagram.")
+    )
+    color: IllustrationColorStr | None = Field(
+        default=None, description="Connector colour; nodes may override with their own."
     )
 
     @model_validator(mode="after")
@@ -692,6 +717,7 @@ class DrawDiagramArgs(StrictModel):
                 "edges": [edge.to_payload() for edge in self.edges],
                 "title": self.title,
                 "coordinate_note": self.coordinate_note,
+                "color": self.color or "#2979FF",
             }
         )
 
@@ -721,7 +747,7 @@ class CreateCoordinateSystemArgs(StrictModel):
     y_step: Annotated[float, Field(gt=0.0, le=DATA_COORD_LIMIT, allow_inf_nan=False)] | None = (
         Field(default=None)
     )
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
 
     @field_validator("x_range", "y_range")
     @classmethod
@@ -740,7 +766,7 @@ class CreateCoordinateSystemArgs(StrictModel):
                 "y_label": self.y_label,
                 "x_step": _r(self.x_step) if self.x_step is not None else None,
                 "y_step": _r(self.y_step) if self.y_step is not None else None,
-                "color": self.color or "primary",
+                "color": self.color or "#00D9FF",
             }
         )
 
@@ -762,7 +788,7 @@ class PlotFunctionArgs(StrictModel):
     x_domain: RangeTuple | None = Field(
         default=None, description="Optional sampling domain [min, max]; defaults to the axes range."
     )
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
     stroke_width: StrokeWidth = Field(default=2.0)
     style: LineStyle = Field(default="solid")
     label: LabelText | None = Field(default=None)
@@ -782,7 +808,7 @@ class PlotPointsArgs(StrictModel):
     points: Annotated[
         list[DataPoint], Field(min_length=1, max_length=MAX_DATA_POINTS)
     ] = Field(description=f"1..{MAX_DATA_POINTS} points in data coordinates.")
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
 
     def build_payload(self) -> dict[str, Any]:
         ordered = sorted(self.points, key=lambda point: point.x)
@@ -790,7 +816,7 @@ class PlotPointsArgs(StrictModel):
             {
                 "coordinate_system_id": self.coordinate_system_id,
                 "points": [point.to_payload() for point in ordered],
-                "color": self.color or "blue",
+                "color": self.color or "#2979FF",
             }
         )
 
@@ -803,7 +829,7 @@ class AddGraphLabelArgs(StrictModel):
     text: Annotated[str, Field(min_length=1, max_length=MAX_TITLE)] = Field(
         description="Label text (<=300 chars)."
     )
-    color: ColorStr | None = Field(default=None)
+    color: IllustrationColorStr | None = Field(default=None)
     with_leader: bool = Field(default=False)
 
     def build_payload(self) -> dict[str, Any]:
@@ -812,7 +838,7 @@ class AddGraphLabelArgs(StrictModel):
                 "coordinate_system_id": self.coordinate_system_id,
                 "at": {"x": _r(self.at.x), "y": _r(self.at.y)},
                 "text": self.text,
-                "color": self.color or "primary",
+                "color": self.color or "#FFD740",
                 "with_leader": self.with_leader,
             }
         )

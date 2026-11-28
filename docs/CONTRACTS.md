@@ -24,21 +24,25 @@ file outside your own scope; request changes through the Lead.
 
 * Timestamps: RFC 3339 UTC with milliseconds, `2026-11-11T05:50:00.123Z`.
 * All ids are opaque strings (UUID4 for DB rows, ULID-ish for events/elements).
-* Normalized board coordinates: `x`, `y` in `[0,1]`, origin top-left, `y` grows
-  downward. Sizes/widths also normalized. Flutter multiplies by the board
-  content rect. **Never** send pixels from the backend.
+* Normalized board coordinates: `x` in `[0,1]`, `y` grows downward. Logical content
+  `y` starts at `0`; on mobile the vertical layout may stack content beyond `1`.
+  Flutter owns a virtual vertical extent (one screen = `1.0` logical unit) and
+  maps logical coordinates through one `BoardTransform`. **Never** send pixels
+  from the backend.
 * JSON keys are `snake_case` everywhere (REST, WS, board events, Dart models use
   the same wire names with `@JsonKey`-free manual parsing).
-* Colors: hex strings `#RRGGBB`. Fixed chalk palette (Flutter owns it; backend
-  sends palette role names or explicit colors):
-  * `primary` `#F2F0E8` — default chalk
-  * `secondary` `#A8A79E` — muted annotations
-  * `blue` `#9CC9E3` — highlights / graph curves
-  * `yellow` `#E8D58C` — emphasis
-  * `red` `#E39C9C` — mistakes / corrections
-  * `green` `#A9D3A0` — success / correct answers
-  Backend sends `color` as a role name from that list (flutter resolves) **or**
-  an explicit `#RRGGBB`; both accepted.
+* Colors: hex strings `#RRGGBB`. Two palettes are enforced at both boundaries:
+  * Teaching text uses the readable chalk roles: `primary` `#F2F0E8`,
+    `secondary` `#A8A79E`, `blue` `#9CC9E3`, `yellow` `#E8D58C`,
+    `red` `#E39C9C`, `green` `#A9D3A0`.
+  * Illustrations, diagrams, arrows, nodes, graph axes/points/curves/labels and
+    generated visuals use **bright** colours only: `cyan` `#00D9FF`, `blue`
+    `#2979FF`, `violet` `#B388FF`, `coral` `#FF5252`, `yellow` `#FFD740`, `lime`
+    `#76FF03`, `orange` `#FF9100`, `pink` `#FF80AB`, `teal` `#1DE9B6`.
+  Backend sends a role name or an explicit `#RRGGBB`; both are sanitized before
+  persistence/broadcast and again by the Flutter renderer. Legacy chalk roles and
+  dark/gray/off-white hex values are snapped to the bright palette for
+  illustrations, so invisible ink can never reach the black board.
 * Errors use a stable envelope (see §7).
 * Auth: `Authorization: Bearer <jwt>` for REST. For WebSocket, `?token=<jwt>`
   query param is allowed (browsers cannot set headers).
@@ -142,7 +146,7 @@ groups) — no screenshots.
 | `draw_shape` | `{ shape, position, size, color?, fill_color?, stroke_width?, corners?: float, points?: {x,y}[] }` |
 | `draw_path` | `{ points: {x,y}[], closed?: bool, smooth?: bool, color?, stroke_width?, fill_color? }` |
 | `draw_arrow` | `{ start, end, curve?: float (-1..1), label?: string, color?, stroke_width? }` |
-| `draw_diagram` | `{ kind, nodes: [{id, label?, shape?, position, size?, color?}], edges: [{from, to, label?, style?, arrow?, curve?}], title?, coordinate_note? }` |
+| `draw_diagram` | `{ kind, nodes: [{id, label?, shape?, position, size?, color?}], edges: [{from, to, label?, style?, arrow?, curve?, color?}], title?, coordinate_note?, color? }` — node/edge colours are independent bright roles |
 
 `draw_shape.shape` ∈ `rect`, `circle`, `ellipse`, `triangle`, `polygon`,
 `rhombus`, `cylinder`. `draw_diagram.kind` ∈ `flowchart`, `circuit`, `force`,
@@ -351,7 +355,7 @@ Client→server:
 | `session.end` | `{reason?}` |
 | `board.request_snapshot` | `{}` |
 | `board.backfill` | `{after_sequence}` |
-| `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset}` — measured visible board is full; server persists one system-owned clear |
+| `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset, layout_mode, content_extent, reason}` — visible rect is full. Narrow/mobile clients have a virtual vertical extent: reaching the bottom is a progress signal only and never clears the board. Desktop clients get one system-owned clear per sequence |
 | `board.clear` | `{sequence}` — explicit student clear; server persists one system-owned clear and broadcasts it through the normal event path |
 | `ping` | `{}` |
 
