@@ -42,9 +42,15 @@ class BoardVerticalLayout {
     final candidates = <BoardElement>[];
     for (final element in document.visibleElements) {
       if (!_isBlockContent(element)) continue;
-      // Plots and labels belong to a coordinate-system block and travel with it.
       final parentId = element.parentId;
-      if (parentId != null && parentId.isNotEmpty && document[parentId] != null) {
+      final parent = (parentId == null || parentId.isEmpty)
+          ? null
+          : document[parentId];
+      final groupId = element.groupId ?? '';
+      // Child labels/ticks follow their parent's block displacement. Members of
+      // a *different* group keep their group placement instead of being pulled
+      // away by an ungrouped parent.
+      if (parent != null && (groupId.isEmpty || groupId == (parent.groupId ?? ''))) {
         continue;
       }
       candidates.add(element);
@@ -95,26 +101,26 @@ class BoardVerticalLayout {
       cursor += math.max(0.0, block.height) + blockGap;
     }
 
-    // Resolve child offsets after their parent block has moved. A short loop
-    // covers nested parents without requiring a topological sort.
-    for (var pass = 0; pass < 3; pass++) {
+    // Children that were not already placed by a group inherit their parent's
+    // displacement. Iterate until stable so deeply nested diagrams (stage ->
+    // node -> label -> axis tick) follow the same reflow; a bounded pass count
+    // also guards against malformed parent cycles.
+    final maxPasses = document.visibleElements.length + 1;
+    for (var pass = 0; pass < maxPasses; pass++) {
       var changed = false;
       for (final element in document.visibleElements) {
+        if (positions.containsKey(element.elementId)) continue;
         final parentId = element.parentId;
-        if (parentId == null) continue;
+        if (parentId == null || parentId.isEmpty) continue;
         final parentTarget = positions[parentId];
         final parentOriginal = document[parentId]?.position;
         if (parentTarget == null || parentOriginal == null) continue;
         final original = element.position ?? BoardPoint.zero;
-        final target = BoardPoint(
+        positions[element.elementId] = BoardPoint(
           original.x + parentTarget.x - parentOriginal.x,
           original.y + parentTarget.y - parentOriginal.y,
         );
-        final previous = positions[element.elementId];
-        if (previous == null || previous != target) {
-          positions[element.elementId] = target;
-          changed = true;
-        }
+        changed = true;
       }
       if (!changed) break;
     }

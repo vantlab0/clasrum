@@ -55,6 +55,9 @@ class BoardEventQueue {
   // events, and retaining all of them forever is an unbounded memory leak.
   final LinkedHashMap<String, DateTime> _appliedEventIds =
       LinkedHashMap<String, DateTime>();
+  // IDs that fell out of the bounded applied map. A bounded secondary set
+  // keeps old dependencies satisfied without TTL expiry re-blocking events.
+  final LinkedHashSet<String> _evictedAppliedIds = LinkedHashSet<String>();
   final Map<int, DateTime> _dependencyHeldSince = <int, DateTime>{};
   final Set<int> _dependencyHeldNotified = <int>{};
   final List<String> _warnings = <String>[];
@@ -62,6 +65,7 @@ class BoardEventQueue {
   int _appliedSequence = 0;
   bool paused = false;
   bool _gapActive = false;
+  int _gapNotifiedAfter = -1;
 
   /// Fired once per gap episode when an out-of-order sequence arrives.
   BoardGapCallback? onGapDetected;
@@ -81,8 +85,22 @@ class BoardEventQueue {
   /// The next sequence the queue can emit.
   int get expectedSequence => _appliedSequence + 1;
 
-  bool get hasGap =>
-      _buffered.isNotEmpty && !_buffered.containsKey(_appliedSequence + 1);
+  bool get hasGap => _gapAfterSequence != null;
+
+  /// Last applied sequence before the first break in the buffered run.
+  ///
+  /// A gap can sit *behind* a contiguous prefix (e.g. applied=5, buffered
+  /// 6 and 8): looking only at the head misses that hole forever.
+  int? get _gapAfterSequence {
+    if (_buffered.isEmpty) return null;
+    var expected = _appliedSequence + 1;
+    for (final sequence in _buffered.keys) {
+      if (sequence < expected) continue;
+      if (sequence > expected) return expected - 1;
+      expected = sequence + 1;
+    }
+    return null;
+  }
 
   bool get hasBufferedEvents => _buffered.isNotEmpty;
 
@@ -104,12 +122,14 @@ class BoardEventQueue {
     _buffered.clear();
     _rememberedEventIds.clear();
     _appliedEventIds.clear();
+    _evictedAppliedIds.clear();
     _dependencyHeldSince.clear();
     _dependencyHeldNotified.clear();
     _dependencyHeldNotified.clear();
     _warnings.clear();
     _appliedSequence = appliedSequence < 0 ? 0 : appliedSequence;
     _gapActive = false;
+    _gapNotifiedAfter = -1;
     paused = false;
   }
 
@@ -130,7 +150,6 @@ class BoardEventQueue {
     if (_buffered.containsKey(event.sequence)) {
       return false;
     }
-    final wasGap = hasGap;
     _buffered[event.sequence] = event;
     _rememberToken(event);
     if (_buffered.length > maxBufferedEvents) {
@@ -138,17 +157,18 @@ class BoardEventQueue {
       final removable =
           _buffered.keys.toList().reversed.take(overflow).toList();
       for (final sequence in removable) {
+        final dropped = _buffered[sequence];
         _buffered.remove(sequence);
+        // A dropped event can still arrive later via backfill. Removing only
+        // its remembered token keeps it eligible without allowing applied ids
+        // to be re-enqueued.
+        if (dropped != null && !_appliedEventIds.containsKey(dropped.eventId)) {
+          _rememberedEventIds.remove(dropped.eventId);
+        }
         _warn('dropped far-future event seq=$sequence (buffer full)');
       }
     }
-    final isGapNow = hasGap;
-    if (isGapNow && !wasGap) {
-      _notifyGap();
-    } else if (!isGapNow && _gapActive) {
-      _gapActive = false;
-      onGapCleared?.call();
-    }
+    _syncGapState();
     return true;
   }
 
@@ -212,10 +232,7 @@ class BoardEventQueue {
     _rememberToken(event);
     _dependencyHeldSince.remove(event.sequence);
     _dependencyHeldNotified.remove(event.sequence);
-    if (_gapActive && !hasGap) {
-      _gapActive = false;
-      onGapCleared?.call();
-    }
+    _syncGapState();
   }
 
   /// Marks a sequence as applied without the event object (snapshot restore).
@@ -224,10 +241,7 @@ class BoardEventQueue {
     _buffered.removeWhere((key, _) => key <= _appliedSequence);
     _dependencyHeldSince.clear();
     _dependencyHeldNotified.clear();
-    if (_gapActive && !hasGap) {
-      _gapActive = false;
-      onGapCleared?.call();
-    }
+    _syncGapState();
   }
 
   /// Clears buffered events (does not change the applied sequence).
@@ -237,6 +251,7 @@ class BoardEventQueue {
     _dependencyHeldNotified.clear();
     if (_gapActive) {
       _gapActive = false;
+      _gapNotifiedAfter = -1;
       onGapCleared?.call();
     }
   }
@@ -245,6 +260,7 @@ class BoardEventQueue {
     _buffered.clear();
     _rememberedEventIds.clear();
     _appliedEventIds.clear();
+    _evictedAppliedIds.clear();
     _dependencyHeldSince.clear();
     _dependencyHeldNotified.clear();
     _dependencyHeldNotified.clear();
@@ -254,27 +270,47 @@ class BoardEventQueue {
     onDependencyHeld = null;
   }
 
-  bool _isApplied(String eventId) {
-    final appliedAt = _appliedEventIds[eventId];
-    if (appliedAt == null) return false;
-    // Ids evicted from the bounded map are old enough that waiting on them is
-    // no longer useful; release the dependent event after the grace window.
-    return _now().difference(appliedAt) <= dependencyGrace * 2;
-  }
+  bool _isApplied(String eventId) =>
+      _appliedEventIds.containsKey(eventId) ||
+      _evictedAppliedIds.contains(eventId);
 
   void _rememberApplied(String eventId) {
     _appliedEventIds[eventId] = _now();
+    _evictedAppliedIds.remove(eventId);
     while (_appliedEventIds.length > maxRememberedEventIds) {
-      _appliedEventIds.remove(_appliedEventIds.keys.first);
+      final evicted = _appliedEventIds.keys.first;
+      _appliedEventIds.remove(evicted);
+      _evictedAppliedIds.add(evicted);
+      while (_evictedAppliedIds.length > maxRememberedEventIds) {
+        _evictedAppliedIds.remove(_evictedAppliedIds.first);
+      }
     }
   }
 
-  void _notifyGap() {
+  void _syncGapState() {
+    final after = _gapAfterSequence;
+    if (after == null) {
+      if (_gapActive) {
+        _gapActive = false;
+        _gapNotifiedAfter = -1;
+        onGapCleared?.call();
+      }
+      return;
+    }
+    // Notify on the first hole and whenever the contiguous prefix advances to
+    // a new hole; a buffered prefix must not hide the gap behind it.
+    if (!_gapActive || after > _gapNotifiedAfter) {
+      _notifyGap(after);
+    }
+  }
+
+  void _notifyGap(int afterSequence) {
     _gapActive = true;
-    final expected = _appliedSequence + 1;
+    _gapNotifiedAfter = afterSequence;
+    final expected = afterSequence + 1;
     final received = _buffered.isEmpty ? expected : _buffered.keys.last;
     onGapDetected?.call(expected, received);
-    onBackfillRequest?.call(_appliedSequence);
+    onBackfillRequest?.call(afterSequence);
   }
 
   void _rememberToken(BoardEvent event) {

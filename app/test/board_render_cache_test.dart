@@ -34,6 +34,25 @@ void main() {
     expect(version, lessThan(afterFirst));
   });
 
+  test('bounds registry notifies only when measurements actually change', () {
+    final registry = BoardBoundsRegistry();
+    var notifications = 0;
+    registry.onChanged = () => notifications++;
+
+    registry.put('text', const BoardRect(0.1, 0.2, 0.3, 0.08));
+    expect(notifications, 1);
+    // Repeated frames repaint the same box; they must not re-trigger viewport
+    // sync (which would schedule another post-frame callback every frame).
+    registry.put('text', const BoardRect(0.1, 0.2, 0.3, 0.08));
+    expect(notifications, 1);
+    registry.put('text', const BoardRect(0.1, 0.5, 0.3, 0.4));
+    expect(notifications, 2);
+    registry.clear();
+    expect(notifications, 3);
+    registry.clear();
+    expect(notifications, 3);
+  });
+
   test('latex cache uses LRU eviction instead of clearing everything', () {
     final cache = LatexExpressionCache(maxEntries: 2);
     cache.put('a', 'tree-a');

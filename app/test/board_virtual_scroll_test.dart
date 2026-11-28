@@ -3,6 +3,7 @@ import 'dart:ui' show Offset, Size;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pwony/blackboard/blackboard.dart';
 import 'package:pwony/blackboard/model/board_transform.dart';
+import 'package:pwony/blackboard/runtime/board_viewport_controller.dart';
 
 BoardEvent _textEvent({
   required int sequence,
@@ -55,6 +56,17 @@ void main() {
         logicalExtent: 2.5,
       );
       expect(clamped.dy, closeTo(1.5, 0.0001));
+    });
+
+    test('virtual bottom is reachable at normal zoom', () {
+      final controller = BoardViewportController();
+      addTearDown(controller.dispose);
+      controller.onViewportSizeChanged(const Size(400, 800));
+      controller.setViewport(Offset.zero, 1.0);
+      controller.onContentBoundsChanged(const BoardRect(0, 0, 1, 2));
+      controller.setViewport(const Offset(0, 10), 1.0);
+
+      expect(controller.visibleRect.bottom, closeTo(controller.contentExtent, 0.001));
     });
 
     test('same-group reflow displacement is atomic', () {

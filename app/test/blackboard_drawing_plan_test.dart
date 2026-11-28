@@ -340,7 +340,12 @@ void main() {
         progress: 1.0,
       );
       offscreenRecorder.endRecording();
-      expect(offscreenResult.elementBounds, isEmpty);
+      // Painting is still culled, but measured bounds cover every revealed
+      // stage so scrolling cannot change the element's extent.
+      expect(
+        offscreenResult.elementBounds.keys,
+        unorderedEquals(<String>['body', 'tail', 'label']),
+      );
 
       final placement = BoardRect(0.5, 0.2, 0.4, 0.3);
       final recorder = ui.PictureRecorder();

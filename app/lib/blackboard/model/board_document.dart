@@ -305,6 +305,7 @@ class BoardDocument {
     Iterable<String> elementIds, {
     Map<String, BoardRect>? measuredBounds,
     double verticalExtent = 1.0,
+    bool clampToExtent = true,
   }) {
     BoardRect? union;
     for (final id in elementIds) {
@@ -313,11 +314,13 @@ class BoardDocument {
         0,
         measuredBounds: measuredBounds,
         verticalExtent: verticalExtent,
+        clampToExtent: clampToExtent,
       );
       if (bounds == null) continue;
       union = union == null ? bounds : union.union(bounds);
     }
-    return union?.clampToExtent(verticalExtent);
+    if (union == null) return null;
+    return clampToExtent ? union.clampToExtent(verticalExtent) : union;
   }
 
   BoardRect? _boundsOfId(
@@ -325,25 +328,28 @@ class BoardDocument {
     int depth, {
     Map<String, BoardRect>? measuredBounds,
     double verticalExtent = 1.0,
+    bool clampToExtent = true,
   }) {
     final element = _elements[id];
     if (element == null || !element.isVisible) return null;
-    // TextPainter measurements from the renderer take precedence for text so
-    // wraps on narrow/mobile viewports cannot be missed by annotations/focus.
+    BoardRect? fit(BoardRect rect) =>
+        clampToExtent ? rect.clampToExtent(verticalExtent) : rect;
+    // Renderer measurements take precedence for every element kind: equations,
+    // graphs, draw plans and wrapped labels can all overflow their declared
+    // boxes, and the virtual extent must grow from what was actually painted.
     final measured = measuredBounds?[id];
-    if (measured != null &&
-        !measured.isEmpty &&
-        (element.kind == BoardEventType.writeText ||
-            element.kind == BoardEventType.writeHeading ||
-            element.kind == BoardEventType.updateText)) {
-      return measured.clampToExtent(verticalExtent);
+    if (measured != null && !measured.isEmpty) {
+      return fit(measured);
     }
     final declared = element.declaredBounds;
     if (declared != null && !declared.isEmpty) {
-      return declared.clampToExtent(verticalExtent);
+      return fit(declared);
     }
-    final estimated = BoardBoundsEstimator.estimate(element);
-    if (estimated != null) return estimated.clampToExtent(verticalExtent);
+    final estimated = BoardBoundsEstimator.estimate(
+      element,
+      verticalExtent: verticalExtent,
+    );
+    if (estimated != null) return fit(estimated);
     if (depth < 2 &&
         (element.kind == BoardEventType.highlight ||
             element.kind == BoardEventType.highlightEquation)) {
@@ -361,6 +367,7 @@ class BoardDocument {
           targets,
           measuredBounds: measuredBounds,
           verticalExtent: verticalExtent,
+          clampToExtent: clampToExtent,
         );
       }
     }

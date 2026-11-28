@@ -73,17 +73,23 @@ class BlackboardController extends ChangeNotifier {
   ///
   /// Used by focus and viewport clamping so wrapped/mobile text is never
   /// treated as its older declared (pre-measurement) box.
-  BoardRect? measuredContentBounds({double verticalExtent = 1.0}) {
+  BoardRect? measuredContentBounds({
+    double verticalExtent = 1.0,
+    bool clampToExtent = true,
+  }) {
     final aliveIds =
         document.visibleElements.map((e) => e.elementId).toSet();
     renderCache.bounds.retainOnly(aliveIds);
     final measured = Map<String, BoardRect>.fromEntries(
       renderCache.bounds.entries,
     );
+    // The viewport asks for raw bounds when growing its virtual extent. If we
+    // clamp here, content below the old extent can never extend the extent.
     return document.boundsOf(
       aliveIds,
       measuredBounds: measured,
       verticalExtent: verticalExtent,
+      clampToExtent: clampToExtent,
     );
   }
 
@@ -150,6 +156,9 @@ class BlackboardController extends ChangeNotifier {
     _document = base;
     _queue.reset(base.lastSequence);
     _instantEventIds.clear();
+    // Restored snapshots replace every element revision at the same ids. Old
+    // TextPainter measurements must not survive the replacement.
+    renderCache.resetForSnapshot();
     // Snapshot replacement must invalidate the painter even when the sequence
     // is unchanged (e.g. a full restore at the same revision).
     _scheduler.notifyFrame();
@@ -214,7 +223,9 @@ class BlackboardController extends ChangeNotifier {
 
   /// Completes when every buffered event has been reduced and all reveals are
   /// finished. An unresolved sequence gap is treated as drained: the transport
-  /// has already been asked to backfill it via [onBackfillRequested].
+  /// has already been asked to backfill it via [onBackfillRequested]. When the
+  /// animation clock is paused, reveals cannot advance, so this returns after a
+  /// short grace period instead of waiting forever.
   Future<void> waitForIdle() async {
     while (!_disposed) {
       _pump();
@@ -227,7 +238,18 @@ class BlackboardController extends ChangeNotifier {
         await Future<void>.delayed(const Duration(milliseconds: 16));
         continue;
       }
-      await _scheduler.waitForIdle();
+      // A paused clock has no ticks to complete the scheduler's idle future.
+      // Yield once for a possible immediate resume, then stop waiting instead
+      // of stranding callers behind an animation that cannot advance.
+      if (_scheduler.isPaused) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        if (_scheduler.isPaused) return;
+        continue;
+      }
+      await _scheduler.waitForIdle().timeout(
+            const Duration(milliseconds: 50),
+            onTimeout: () {},
+          );
     }
   }
 

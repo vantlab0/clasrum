@@ -147,6 +147,8 @@ class GenerativeDrawingRenderer {
     // Resolve timing and visibility once. Clip paths depend on the live
     // transform (including pan/zoom), so only paths needed by the visible
     // elements are rebuilt each frame.
+    final revealedElements =
+        <({DrawingElement element, double progress, BoardRect bounds})>[];
     final visibleElements =
         <({DrawingElement element, double progress, BoardRect bounds})>[];
     final neededClipIds = <String>{};
@@ -174,13 +176,18 @@ class GenerativeDrawingRenderer {
       if (elementProgress <= 0.0) continue;
 
       final localBounds = element.bounds();
-      if (!localVisible.intersects(localBounds.inflate(0.02))) continue;
-
-      visibleElements.add((
+      final entry = (
         element: element,
         progress: elementProgress,
         bounds: localBounds,
-      ));
+      );
+      // Published bounds must cover every revealed stage, not only the part
+      // currently culled into the viewport; otherwise scrolling changes the
+      // element's extent and the layout oscillates.
+      revealedElements.add(entry);
+      if (!localVisible.intersects(localBounds.inflate(0.02))) continue;
+
+      visibleElements.add(entry);
       final clipId = element.clipId;
       if (clipId != null) neededClipIds.add(clipId);
     }
@@ -194,6 +201,17 @@ class GenerativeDrawingRenderer {
     }
 
     final bounds = <String, BoardRect>{};
+    for (final entry in revealedElements) {
+      bounds[entry.element.id] = placement == null
+          ? entry.bounds
+          : BoardRect(
+              placement.x + entry.bounds.x * placement.w,
+              placement.y + entry.bounds.y * placement.h,
+              entry.bounds.w * placement.w,
+              entry.bounds.h * placement.h,
+            );
+    }
+
     for (final entry in visibleElements) {
       final element = entry.element;
       final clipId = element.clipId;
@@ -213,15 +231,6 @@ class GenerativeDrawingRenderer {
           entry.progress,
           engine,
         );
-        bounds[element.id] = (placement == null
-                ? entry.bounds
-                : BoardRect(
-                    placement.x + entry.bounds.x * placement.w,
-                    placement.y + entry.bounds.y * placement.h,
-                    entry.bounds.w * placement.w,
-                    entry.bounds.h * placement.h,
-                  ))
-            .clampToExtent(transform.logicalExtent);
       } finally {
         if (hasClip) {
           canvas.restore();

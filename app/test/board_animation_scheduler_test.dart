@@ -66,6 +66,30 @@ void main() {
     expect(scheduler.isAnimating, isTrue);
   });
 
+  test('superseding a reveal drops its stale active level', () {
+    final scheduler = BoardAnimationScheduler(
+      driverFactory: (onTick) => _FakeFrameDriver(onTick),
+    );
+    addTearDown(scheduler.dispose);
+
+    scheduler.reveal(
+      event: _event(1),
+      elementId: 'e',
+      level: 3,
+      duration: const Duration(milliseconds: 400),
+    );
+    expect(scheduler.activeLevels, <int>{3});
+
+    scheduler.reveal(
+      event: _event(2),
+      elementId: 'e',
+      level: 5,
+      duration: const Duration(milliseconds: 400),
+    );
+    expect(scheduler.activeLevels, <int>{5});
+    expect(scheduler.isAnimatingLevel(3), isFalse);
+  });
+
   test('cancelling all animations resolves callbacks and idle waiters', () async {
     late _FakeFrameDriver driver;
     final scheduler = BoardAnimationScheduler(

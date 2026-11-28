@@ -38,6 +38,21 @@ class BoardFullnessSnapshot {
       };
 }
 
+/// Decides whether a fullness snapshot may trigger a server-side wipe.
+///
+/// Reaching the bottom of a growing virtual board is normal; only a genuinely
+/// full visible screen counts. The report is also de-duplicated per sequence
+/// and extent so late frame notifications cannot clear the board twice.
+bool shouldReportViewportFull(
+  BoardFullnessSnapshot snapshot, {
+  required int reportedSequence,
+  required int reportedExtentMillis,
+}) {
+  if (!snapshot.isFull || !snapshot.reachedBottom) return false;
+  return snapshot.sequence > reportedSequence ||
+      reportedExtentMillis < (snapshot.contentExtent * 1000).round();
+}
+
 class BoardFullnessDetector {
   const BoardFullnessDetector._();
 

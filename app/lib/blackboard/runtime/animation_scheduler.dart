@@ -509,6 +509,7 @@ class BoardAnimationScheduler {
   void _dropAnimations(String elementId) {
     final reveal = _reveals.remove(elementId);
     final move = _moves.remove(elementId);
+    if (reveal != null || move != null) _refreshActiveLevels();
     reveal?.onComplete?.call();
     move?.onComplete?.call();
   }

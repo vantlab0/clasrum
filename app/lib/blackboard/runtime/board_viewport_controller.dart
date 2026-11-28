@@ -85,6 +85,7 @@ class BoardViewportController extends ChangeNotifier {
   Offset _animTargetOffset = Offset.zero;
   double _animStartScale = 1.0;
   double _animTargetScale = 1.0;
+  int _animationGeneration = 0;
 
   // ------------------------------------------------------------------ getters --
 
@@ -225,6 +226,7 @@ class BoardViewportController extends ChangeNotifier {
   Future<void> focusOnElement(
     String elementId, {
     BoardDocument? document,
+    Map<String, BoardRect>? measuredBounds,
     String priority = 'normal',
     bool animate = true,
   }) {
@@ -232,6 +234,7 @@ class BoardViewportController extends ChangeNotifier {
     if (document != null) {
       rect = document.boundsOf(
         <String>[elementId],
+        measuredBounds: measuredBounds,
         verticalExtent: _contentExtent,
       );
     }
@@ -247,13 +250,18 @@ class BoardViewportController extends ChangeNotifier {
   Future<void> focusOnElements(
     List<String> elementIds, {
     BoardDocument? document,
+    Map<String, BoardRect>? measuredBounds,
     String priority = 'normal',
     bool animate = true,
   }) {
     if (elementIds.isEmpty) return Future<void>.value();
     BoardRect? rect;
     if (document != null) {
-      rect = document.boundsOf(elementIds, verticalExtent: _contentExtent);
+      rect = document.boundsOf(
+        elementIds,
+        measuredBounds: measuredBounds,
+        verticalExtent: _contentExtent,
+      );
     }
     if (rect == null || rect.isEmpty) {
       BoardRect? union;
@@ -328,6 +336,7 @@ class BoardViewportController extends ChangeNotifier {
       return Future<void>.value();
     }
 
+    final generation = ++_animationGeneration;
     _animationInProgress = true;
     _animStartOffset = _normalizedOffset;
     _animStartScale = _normalizedScale;
@@ -339,6 +348,7 @@ class BoardViewportController extends ChangeNotifier {
     controller
       ..value = 0.0;
     return controller.forward().then((_) {
+      if (generation != _animationGeneration) return;
       controller.removeListener(_tickAnimation);
       _animationInProgress = false;
     });
@@ -355,16 +365,13 @@ class BoardViewportController extends ChangeNotifier {
   }
 
   void _cancelAnimation() {
+    _animationGeneration++;
     _animationController?.removeListener(_tickAnimation);
     _animationController?.stop(canceled: true);
     _animationInProgress = false;
   }
 
   // ----------------------------------------------------------- clamping --
-
-  void _clampOffset({Offset? target}) {
-    _normalizedOffset = _clampOffsetValue(target ?? _normalizedOffset);
-  }
 
   Offset _clampOffsetValue(Offset offset, {double? scale}) {
     final effectiveScale = math.min(math.max(scale ?? _normalizedScale, minScale), maxScale);
@@ -380,10 +387,27 @@ class BoardViewportController extends ChangeNotifier {
     if (bounds != null && !bounds.isEmpty) {
       final comfortX = visibleW * 0.1;
       final comfortY = visibleH * 0.1;
-      minX = math.min(minX, math.max(0.0, bounds.x - comfortX));
-      minY = math.min(minY, math.max(0.0, bounds.y - comfortY));
-      maxX = math.max(maxX, math.min(maxX, bounds.right - visibleW + comfortX));
-      maxY = math.max(maxY, math.min(maxY, bounds.bottom - visibleH + comfortY));
+      // Intersect the global range with the content range. The previous
+      // min/max pair widened the range instead, so panning could still land on
+      // an empty part of the board.
+      final contentMinX = math.max(0.0, bounds.x - comfortX);
+      final contentMaxX = math.min(maxX, bounds.right - visibleW + comfortX);
+      final contentMinY = math.max(0.0, bounds.y - comfortY);
+      // The virtual extent intentionally extends below the last measured box.
+      // Let the visible window reach that bottom so fullness can be reported;
+      // the fullness gate still requires a genuinely full screen.
+      final contentMaxY = math.min(
+        maxY,
+        bounds.bottom - visibleH + extentGrowthHeadroom,
+      );
+      if (contentMinX <= contentMaxX) {
+        minX = contentMinX;
+        maxX = contentMaxX;
+      }
+      if (contentMinY <= contentMaxY) {
+        minY = contentMinY;
+        maxY = contentMaxY;
+      }
       maxX = maxX.clamp(0.0, (1.0 - visibleW).clamp(0.0, 1.0));
       maxY = maxY.clamp(0.0, (_contentExtent - visibleH).clamp(0.0, _contentExtent));
       if (maxX < minX) maxX = minX;

@@ -470,6 +470,54 @@ void main() {
       expect(zoomed.h, closeTo(normal.h, 0.02));
     });
 
+    testWidgets('long text wrap width follows the viewport, not the pan offset',
+        (tester) async {
+      final document = BoardDocument.empty(sessionId: 'sess_dup').apply(_event(
+        sequence: 1,
+        id: 'panned_text',
+        type: 'write_text',
+        payload: <String, dynamic>{
+          'text': 'Photosynthesis converts sunlight into chemical energy '
+              'inside the chloroplasts of the leaf',
+          'style': 'body',
+          'heading_level': 0,
+          'font_scale': 1,
+          'position': <String, dynamic>{'x': 0.08, 'y': 0.08},
+        },
+      ));
+      final controller = BlackboardController(
+        animationsEnabled: false,
+        initialDocument: document,
+      );
+      addTearDown(controller.dispose);
+      final viewport = BoardViewportController();
+      addTearDown(viewport.dispose);
+      viewport.setViewport(const Offset(0.2, 0), 2.0);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 1000,
+            height: 800,
+            child: BlackboardView(
+              controller: controller,
+              viewportController: viewport,
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      final bounds = controller.renderCache.bounds['panned_text'];
+      expect(bounds, isNotNull);
+      // At scale 2 the visible board window is x=0.2..0.7. Wrapping against
+      // sx(1.0) would let this line extend past that right edge after a pan.
+      expect(
+        bounds!.right,
+        lessThanOrEqualTo(viewport.visibleRect.right + 0.02),
+      );
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('narrow board ignores tiny backend wrap widths', (tester) async {
       final document = BoardDocument.empty(sessionId: 'sess_dup').apply(_event(
         sequence: 1,

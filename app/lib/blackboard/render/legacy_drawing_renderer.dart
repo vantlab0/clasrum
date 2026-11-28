@@ -485,9 +485,7 @@ class DrawingRenderer {
       ui.Offset(x1, y1),
       ui.Offset(x2, y2),
     );
-    return transform
-        .normalizedRect(pixelRect)
-        .clampToExtent(transform.logicalExtent);
+    return transform.normalizedRect(pixelRect);
   }
 
   static BoardRect _pathBounds(
@@ -522,9 +520,7 @@ class DrawingRenderer {
       (maxX - minX).clamp(0.0, double.infinity),
       (maxY - minY).clamp(0.0, double.infinity),
     );
-    return transform
-        .normalizedRect(pixelRect)
-        .clampToExtent(transform.logicalExtent);
+    return transform.normalizedRect(pixelRect);
   }
 
   static BoardRect _rectBounds(
@@ -543,9 +539,7 @@ class DrawingRenderer {
       (sz['w'] as num? ?? 0.1).toDouble() * sx,
       (sz['h'] as num? ?? 0.1).toDouble() * sy,
     );
-    return transform
-        .normalizedRect(pixelRect)
-        .clampToExtent(transform.logicalExtent);
+    return transform.normalizedRect(pixelRect);
   }
 
   static BoardRect _circleBounds(
@@ -564,9 +558,7 @@ class DrawingRenderer {
       (sz['w'] as num? ?? 0.1).toDouble() * sx,
       (sz['h'] as num? ?? 0.1).toDouble() * sy,
     );
-    return transform
-        .normalizedRect(pixelRect)
-        .clampToExtent(transform.logicalExtent);
+    return transform.normalizedRect(pixelRect);
   }
 
   static BoardRect _textBounds(
@@ -596,9 +588,7 @@ class DrawingRenderer {
       maxWidthPx: maxWidth.clamp(20.0, double.infinity),
     );
     final pixelRect = ui.Rect.fromLTWH(x, y, layout.width, layout.height);
-    return transform
-        .normalizedRect(pixelRect)
-        .clampToExtent(transform.logicalExtent);
+    return transform.normalizedRect(pixelRect);
   }
 
   // ------------------------------------------------------------------

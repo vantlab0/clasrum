@@ -355,7 +355,7 @@ Client→server:
 | `session.end` | `{reason?}` |
 | `board.request_snapshot` | `{}` |
 | `board.backfill` | `{after_sequence}` |
-| `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset, layout_mode, content_extent, reason}` — visible rect is full. Narrow/mobile clients have a virtual vertical extent: reaching the bottom is a progress signal only and never clears the board. Desktop clients get one system-owned clear per sequence |
+| `board.viewport_full` | `{sequence, coverage, visible_rect, scale, offset, layout_mode?, content_extent, reason}` — advisory telemetry only; never clears the board. `layout_mode` is client-supplied and ignored for authorization. Clears originate only from the server layout engine or an explicit `board.clear` |
 | `board.clear` | `{sequence}` — explicit student clear; server persists one system-owned clear and broadcasts it through the normal event path |
 | `ping` | `{}` |
 
@@ -405,7 +405,11 @@ state), and typed input is limited to the topic field on Home.
 
 Reliability:
 * `audio.delta.sequence` is the Qwen audio chunk order; client may drop late
-  chunks but must not stall the pipeline.
+  chunks but must not stall the pipeline. Reordering that resolves before
+  `audio.done` is not a gap. A sequence still missing at `audio.done` discards
+  the partial speech (`audio.truncated`) and asks Qwen once for a speech-only
+  repeat; Qwen has no audio replay event, so this is regeneration, not
+  retransmission.
 * Board events are the source of truth and arrive with `sequence`; duplicates
   ignored. On reconnect the client sends `board.backfill` with its last applied
   sequence and then `session.ready` is followed by `board.events`.

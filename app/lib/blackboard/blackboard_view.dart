@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_math_fork/flutter_math.dart';
 import 'package:flutter_math_fork/tex.dart';
 
@@ -89,9 +90,13 @@ double _textWrapWidthPx({
 }) {
   final maxWidthNorm = (payload['max_width'] as num?)?.toDouble();
   final scaledWidth = transform.width * transform.viewportScale;
+  // The right edge of the *viewport* is independent of pan offset. Using
+  // sx(1.0) here collapses the wrap width after a rightward pan and turns one
+  // line of prose into a huge stack of stale measured bounds.
+  final viewportRightPx = transform.contentRect.right;
   var width = maxWidthNorm != null
       ? maxWidthNorm * scaledWidth - 2 * _textPaddingPx
-      : transform.sx(1.0) - originPx - 2 * _textPaddingPx;
+      : viewportRightPx - originPx - 2 * _textPaddingPx;
   if (narrow && width < scaledWidth * _narrowMinWrapFraction) {
     width = scaledWidth * _narrowMinWrapFraction;
   }
@@ -170,6 +175,13 @@ class BlackboardView extends StatelessWidget {
   final bool interactive;
   final BoardViewportController? viewportController;
 
+  /// Elements actually sent to a canvas in the most recent paint. Exposed for
+  /// culling regressions without depending on the private painter type.
+  static int get debugPaintedElementCount =>
+      _BoardPainter.debugPaintedElementCount;
+  static set debugPaintedElementCount(int value) =>
+      _BoardPainter.debugPaintedElementCount = value;
+
   @override
   Widget build(BuildContext context) {
     final viewport = viewportController;
@@ -225,6 +237,7 @@ class BlackboardView extends StatelessWidget {
                     interactive: interactive,
                     textEngine: controller.renderCache.textEngine,
                     geometryCache: controller.renderCache.geometry,
+                    layerPictures: controller.renderCache.layerPictures,
                     reflow: reflow,
                     narrow: narrow,
                   ),
@@ -272,6 +285,69 @@ class _CombinedListenable extends Listenable {
 
 /// Renders LaTeX equations with flutter_math_fork on top of the canvas board.
 ///
+typedef _EquationSizeCallback = void Function(Size size);
+
+/// Publishes the real laid-out size of a `flutter_math_fork` widget. Equations
+/// cannot be measured by the canvas painter, so their bounds must come from the
+/// overlay's layout pass instead of an estimator.
+class _MeasuredEquation extends SingleChildRenderObjectWidget {
+  const _MeasuredEquation({
+    super.key,
+    required this.onMeasured,
+    required Widget child,
+  }) : super(child: child);
+
+  final _EquationSizeCallback onMeasured;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderMeasuredEquation(onMeasured: onMeasured);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderMeasuredEquation renderObject,
+  ) {
+    renderObject.onMeasured = onMeasured;
+  }
+}
+
+class _RenderMeasuredEquation extends RenderProxyBox {
+  _RenderMeasuredEquation({required _EquationSizeCallback onMeasured})
+      : _onMeasured = onMeasured;
+
+  _EquationSizeCallback _onMeasured;
+  Size _lastNotifiedSize = Size.zero;
+  _EquationSizeCallback? _lastNotifiedCallback;
+
+  set onMeasured(_EquationSizeCallback value) {
+    if (_onMeasured == value) return;
+    _onMeasured = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    // The callback closure changes on every rebuild when the viewport moves,
+    // even when the intrinsic formula size does not. Re-publish so bounds
+    // follow the new rect.
+    if (size == _lastNotifiedSize && identical(_lastNotifiedCallback, _onMeasured)) {
+      return;
+    }
+    _lastNotifiedSize = size;
+    _lastNotifiedCallback = _onMeasured;
+    _onMeasured(size);
+  }
+
+  @override
+  void detach() {
+    _lastNotifiedSize = Size.zero;
+    _lastNotifiedCallback = null;
+    super.detach();
+  }
+}
+
 /// Parsed syntax trees are cached by source string: animation frames only
 /// rebuild clip rectangles, they do not reparse TeX on every repaint.
 class _LatexOverlay extends StatefulWidget {
@@ -343,7 +419,32 @@ class _LatexOverlayState extends State<_LatexOverlay> {
           child: FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.topLeft,
-            child: _mathWidget(expression, fontSize, color),
+            child: _MeasuredEquation(
+              key: ValueKey<String>(element.elementId),
+              onMeasured: (measured) {
+                // FittedBox(scaleDown) never enlarges and may shrink the
+                // formula into the allocated rect. Publish the painted size,
+                // not the unscaled intrinsic size.
+                final fit = measured.width <= 0 || measured.height <= 0
+                    ? 0.0
+                    : math.min(
+                        rect.width / measured.width,
+                        rect.height / measured.height,
+                      ).clamp(0.0, 1.0);
+                widget.controller.renderCache.bounds.put(
+                  element.elementId,
+                  widget.transform.normalizedRect(
+                    ui.Rect.fromLTWH(
+                      rect.left,
+                      rect.top,
+                      measured.width * fit,
+                      measured.height * fit,
+                    ),
+                  ),
+                );
+              },
+              child: _mathWidget(expression, fontSize, color),
+            ),
           ),
         ),
       ),
@@ -423,6 +524,7 @@ class _BoardPainter extends CustomPainter {
     required this.interactive,
     required this.textEngine,
     required this.geometryCache,
+    required this.layerPictures,
     required this.reflow,
     required this.narrow,
   });
@@ -434,18 +536,27 @@ class _BoardPainter extends CustomPainter {
   final bool interactive;
   final ChalkTextEngine textEngine;
   final BoardGeometryCache geometryCache;
+  final BoardLayerPictureCache layerPictures;
   final Map<String, BoardPoint> reflow;
   final bool narrow;
+
+  /// Test/debug counter: elements actually sent to a canvas this frame.
+  static int debugPaintedElementCount = 0;
+
+  static const double _cullMarginNorm = 0.06;
 
   ChalkTextEngine get _textEngine => textEngine;
 
   @override
   void paint(ui.Canvas canvas, ui.Size size) {
     try {
+      debugPaintedElementCount = 0;
       final rect = transform.contentRect;
       // Drop measurement bounds for erased/removed elements so a restored board
       // cannot reuse stale geometry from a previous revision.
       bounds.pruneIfChanged(document.revision, document.elements.keys.toSet());
+      final visible = transform.visibleLogicalRect.inflate(_cullMarginNorm);
+      final reflowKey = _reflowSignature();
 
       // 1. background — true black board (no border frame)
       final bgPaint = Paint()..color = ChalkPalette.board;
@@ -454,15 +565,117 @@ class _BoardPainter extends CustomPainter {
       // Layer order: 2 text, 3 equation, 4 drawing, 5 graph, 6 annotation.
       // Within a level, insertion order = z-order.
       for (final layer in <int>[2, 3, 4, 5, 6]) {
-        final elements = document.elementsForLayer(layer);
-        for (final element in elements) {
-          _paintElement(canvas, element);
+        final key = _layerKey(layer, reflowKey);
+        if (animations.isAnimatingLevel(layer)) {
+          // Animated layers change every frame. Paint them directly and drop
+          // their stale picture; they are recorded once after they settle.
+          layerPictures.invalidate(layer);
+          _paintLayerElements(canvas, layer, visible);
+          continue;
         }
+        final cached = layerPictures.pictureFor(layer, key);
+        if (cached != null) {
+          canvas.drawPicture(cached);
+          final cachedBounds = layerPictures.boundsFor(layer, key);
+          final cachedOwners = layerPictures.ownersFor(layer, key);
+          if (cachedBounds != null && cachedOwners != null) {
+            bounds.restore(cachedBounds, cachedOwners);
+          }
+          continue;
+        }
+        final recorder = ui.PictureRecorder();
+        _paintLayerElements(ui.Canvas(recorder), layer, visible);
+        final picture = recorder.endRecording();
+        layerPictures.put(
+          layer,
+          key,
+          picture,
+          Map<String, BoardRect>.fromEntries(bounds.entries),
+          bounds.owners,
+        );
+        canvas.drawPicture(picture);
       }
     } catch (_) {
       // Never crash the board painter; keep the last stable frame.
       // The text measurement cache is intentionally retained across frames.
     }
+  }
+
+  String _reflowSignature() {
+    final keys = reflow.keys.toList()..sort();
+    final buffer = StringBuffer();
+    for (final key in keys) {
+      final point = reflow[key]!;
+      buffer
+        ..write(key)
+        ..write(':')
+        ..write(point.x.toStringAsFixed(4))
+        ..write(',')
+        ..write(point.y.toStringAsFixed(4))
+        ..write(';');
+    }
+    return buffer.toString();
+  }
+
+  String _layerKey(int layer, String reflowKey) {
+    final buffer = StringBuffer()
+      ..write(layer)
+      ..write('|')
+      ..write(document.revision)
+      ..write('|')
+      ..write(transform.hashCode)
+      ..write('|')
+      ..write(narrow)
+      ..write('|')
+      ..write(reflowKey);
+    // Annotations read the bounds registry, so their cached commands must also
+    // follow any measurement change in the other layers.
+    if (layer == 6) buffer..write('|')..write(bounds.version);
+    return buffer.toString();
+  }
+
+  void _paintLayerElements(
+    ui.Canvas canvas,
+    int layer,
+    BoardRect visible,
+  ) {
+    for (final element in document.elementsForLayer(layer)) {
+      final resolved = animations.resolvedPosition(
+        element.elementId,
+        reflow[element.elementId] ?? element.position ?? BoardPoint.zero,
+      );
+      // Highlights paint against the measured bounds of their targets and are
+      // cheap, so never cull them by their own (often placeholder) box.
+      final annotation = element.kind == BoardEventType.highlight ||
+          element.kind == BoardEventType.highlightEquation;
+      if (!annotation) {
+        final box = _cullBoundsFor(element, resolved);
+        if (box != null && !box.isEmpty && !visible.intersects(box)) {
+          // Offscreen elements are not painted, but viewport extent/follow and
+          // fullness still need a conservative box for them. Publish it once.
+          if (bounds[element.elementId] == null) {
+            bounds.put(element.elementId, box);
+          }
+          continue;
+        }
+      }
+      debugPaintedElementCount++;
+      _paintElement(canvas, element);
+    }
+  }
+
+  BoardRect? _cullBoundsFor(BoardElement element, BoardPoint resolvedPosition) {
+    final base = element.position ?? BoardPoint.zero;
+    final dx = resolvedPosition.x - base.x;
+    final dy = resolvedPosition.y - base.y;
+    final source = bounds[element.elementId] ??
+        element.declaredBounds ??
+        BoardBoundsEstimator.estimate(
+          element,
+          verticalExtent: transform.logicalExtent,
+        );
+    if (source == null) return null;
+    return BoardRect(source.x + dx, source.y + dy, source.w, source.h);
   }
 
   void _paintElement(ui.Canvas canvas, BoardElement element) {
@@ -670,12 +883,13 @@ class _BoardPainter extends CustomPainter {
       measured.y - padY,
       measured.w + 2 * padX,
       measured.h + 2 * padY,
-    ).clampToExtent(transform.logicalExtent);
+    );
+    // Keep raw measured bounds: the viewport grows its virtual extent from
+    // them, while painters/annotations still clamp at the point of use.
     bounds.put(
       element.elementId,
       padded.isEmpty
           ? BoardRect.fromPositionSize(position, BoardSize(0.2, 0.05))
-              .clampToExtent(transform.logicalExtent)
           : padded,
     );
   }
@@ -723,13 +937,15 @@ class _BoardPainter extends CustomPainter {
     // LaTeX is painted by [_LatexOverlay] using flutter_math_fork. The canvas
     // only publishes measured bounds so highlights and collision checks wrap
     // the real formula rather than a placeholder box.
+    final cached = bounds[element.elementId];
     final estimated = BoardBoundsEstimator.estimate(element);
-    final width = element.size?.w ?? estimated?.w ?? 0.34;
-    final height = element.size?.h ?? estimated?.h ?? 0.09;
+    // Keep the measured formula size, but track the live (possibly animated or
+    // reflowed) position so moves cannot leave stale bounds behind.
+    final width = cached?.w ?? element.size?.w ?? estimated?.w ?? 0.34;
+    final height = cached?.h ?? element.size?.h ?? estimated?.h ?? 0.09;
     bounds.put(
       element.elementId,
-      BoardRect.fromLTWH(position.x, position.y, width, height)
-          .clampToExtent(transform.logicalExtent),
+      BoardRect.fromLTWH(position.x, position.y, width, height),
     );
   }
 
@@ -840,9 +1056,9 @@ class _BoardPainter extends CustomPainter {
       ..strokeWidth = strokeWidth;
     canvas.drawPath(path, strokePaint);
     bounds.put(
-        element.elementId,
-        BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h)
-            .clampToExtent(transform.logicalExtent));
+      element.elementId,
+      BoardRect.fromLTWH(pos.x, pos.y, size.w, size.h),
+    );
   }
 
   void _paintDrawPath(
@@ -891,13 +1107,14 @@ class _BoardPainter extends CustomPainter {
     final minY = ys.reduce((a, b) => a < b ? a : b);
     final maxY = ys.reduce((a, b) => a > b ? a : b);
     bounds.put(
-        element.elementId,
-        BoardRect(
-          minX,
-          minY,
-          math.max(0.0, maxX - minX),
-          math.max(0.0, maxY - minY),
-        ).clampToExtent(transform.logicalExtent));
+      element.elementId,
+      BoardRect(
+        minX,
+        minY,
+        math.max(0.0, maxX - minX),
+        math.max(0.0, maxY - minY),
+      ),
+    );
   }
 
   void _paintDrawArrow(
@@ -1083,7 +1300,7 @@ class _BoardPainter extends CustomPainter {
       for (final box in nodeBounds.values.skip(1)) {
         union = union.union(box);
       }
-      bounds.put(element.elementId, union.clampToExtent(transform.logicalExtent));
+      bounds.put(element.elementId, union);
     }
   }
 
@@ -1150,6 +1367,10 @@ class _BoardPainter extends CustomPainter {
 
     final xLabel = payload['x_label'] as String?;
     final yLabel = payload['y_label'] as String?;
+    var pxLeft = rect.left;
+    var pxTop = rect.top;
+    var pxRight = rect.right;
+    var pxBottom = rect.bottom;
     if (xLabel != null && xLabel.isNotEmpty) {
       final size = _textEngine.measure(
         text: xLabel,
@@ -1158,15 +1379,21 @@ class _BoardPainter extends CustomPainter {
         fontSizePx: transform.fontPixels(ChalkTextStyleSpec.forName('label').heightFraction),
         maxWidthPx: rect.width,
       );
+      final labelLeft = rect.center.dx - size.width / 2;
+      final labelTop = rect.bottom + 6;
       _paintChalkLabel(
         canvas,
         xLabel,
-        Offset(rect.center.dx - size.width / 2, rect.bottom + 6),
+        Offset(labelLeft, labelTop),
         color: color,
         progress: progress,
         maxWidthPx: rect.width,
         payload: element.payload,
       );
+      pxLeft = math.min(pxLeft, labelLeft);
+      pxTop = math.min(pxTop, labelTop);
+      pxRight = math.max(pxRight, labelLeft + size.width);
+      pxBottom = math.max(pxBottom, labelTop + size.height);
     }
     if (yLabel != null && yLabel.isNotEmpty) {
       final spec = ChalkTextStyleSpec.forName('label');
@@ -1177,21 +1404,31 @@ class _BoardPainter extends CustomPainter {
         fontSizePx: transform.fontPixels(spec.heightFraction),
         maxWidthPx: rect.width,
       );
+      final labelLeft = rect.left - size.width - 6;
+      final labelTop = rect.center.dy - size.height / 2;
       _paintChalkLabel(
         canvas,
         yLabel,
-        Offset(rect.left - size.width - 6, rect.center.dy - size.height / 2),
+        Offset(labelLeft, labelTop),
         color: color,
         progress: progress,
         maxWidthPx: rect.width,
         payload: element.payload,
       );
+      pxLeft = math.min(pxLeft, labelLeft);
+      pxTop = math.min(pxTop, labelTop);
+      pxRight = math.max(pxRight, labelLeft + size.width);
+      pxBottom = math.max(pxBottom, labelTop + size.height);
     }
 
+    // Axis labels are drawn outside the coordinate rect but remain part of the
+    // element's measured footprint for scroll extent and reflow.
     bounds.put(
-        element.elementId,
-        BoardRect.fromLTWH(position.x, position.y, size.w, size.h)
-            .clampToExtent(transform.logicalExtent));
+      element.elementId,
+      transform.normalizedRect(
+        ui.Rect.fromLTRB(pxLeft, pxTop, pxRight, pxBottom),
+      ),
+    );
   }
 
   void _paintPlotFunction(
@@ -1232,13 +1469,14 @@ class _BoardPainter extends CustomPainter {
     final minY = ys.reduce((a, b) => a < b ? a : b);
     final maxY = ys.reduce((a, b) => a > b ? a : b);
     bounds.put(
-        element.elementId,
-        BoardRect(
-          minX,
-          minY,
-          math.max(0.0, maxX - minX),
-          math.max(0.0, maxY - minY),
-        ).clampToExtent(transform.logicalExtent));
+      element.elementId,
+      BoardRect(
+        minX,
+        minY,
+        math.max(0.0, maxX - minX),
+        math.max(0.0, maxY - minY),
+      ),
+    );
   }
 
   void _paintPlotPoints(
@@ -1306,11 +1544,10 @@ class _BoardPainter extends CustomPainter {
       maxWidthPx: transform.width * 0.3,
       payload: element.payload,
     );
-    bounds.put(
-        element.elementId,
-        BoardRect.fromLTWH(at.x, at.y, size.width / transform.width,
-            size.height / transform.height)
-            .clampToExtent(transform.logicalExtent));
+    final measured = transform.normalizedRect(
+      ui.Rect.fromLTWH(center.dx + 6, center.dy, size.width, size.height),
+    );
+    bounds.put(element.elementId, measured);
   }
 
   // ----------------------------------------------------------- annotations --
@@ -1339,7 +1576,11 @@ class _BoardPainter extends CustomPainter {
     if (rects.isEmpty) return;
 
     final union = rects.reduce((a, b) => a.union(b));
-    final pixelRect = transform.rectToPixels(union);
+    // Keep the raw union in the registry for extent growth, but paint only
+    // inside the current virtual board.
+    final pixelRect = transform.rectToPixels(
+      union.clampToExtent(transform.logicalExtent),
+    );
     final highlightColor = ChalkPalette.resolveIllustration(
       payload['color'],
       fallbackRole: 'yellow',
@@ -1445,10 +1686,14 @@ class _BoardPainter extends CustomPainter {
       strokePaint,
     );
     bounds.put(
-        element.elementId,
-        BoardRect.fromLTWH(position.x, position.y, element.size?.w ?? 0.3,
-            element.size?.h ?? 0.09)
-            .clampToExtent(transform.logicalExtent));
+      element.elementId,
+      BoardRect.fromLTWH(
+        position.x,
+        position.y,
+        element.size?.w ?? 0.3,
+        element.size?.h ?? 0.09,
+      ),
+    );
   }
 
   void _paintDrawing(
@@ -1550,7 +1795,7 @@ class _BoardPainter extends CustomPainter {
       for (final b in boxes.skip(1)) {
         union = union.union(b);
       }
-      bounds.put(element.elementId, union.clampToExtent(transform.logicalExtent));
+      bounds.put(element.elementId, union);
     }
   }
 

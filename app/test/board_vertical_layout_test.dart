@@ -180,5 +180,79 @@ void main() {
         closeTo(parentDelta, 0.0001),
       );
     });
+
+    test('nested parent-child labels inherit the full displaced chain', () {
+      final document = _document(<BoardEvent>[
+        _event(
+          sequence: 1,
+          id: 'stage',
+          x: 0.5,
+          y: 0.1,
+          groupId: 'cycle',
+        ),
+        _event(
+          sequence: 2,
+          id: 'node',
+          x: 0.55,
+          y: 0.12,
+          groupId: 'cycle',
+          parentId: 'stage',
+        ),
+        _event(
+          sequence: 3,
+          id: 'tick',
+          x: 0.6,
+          y: 0.14,
+          groupId: 'cycle',
+          parentId: 'node',
+        ),
+      ]);
+      final positions = BoardVerticalLayout.positions(
+        document: document,
+        narrow: true,
+        boundsOf: (element) => BoardRect(
+          element.position!.x,
+          element.position!.y,
+          0.2,
+          0.08,
+        ),
+      );
+      final stageDelta = positions['stage']!.y - 0.1;
+      expect(positions['node']!.y - 0.12, closeTo(stageDelta, 0.0001));
+      expect(positions['tick']!.y - 0.14, closeTo(stageDelta, 0.0001));
+    });
+
+    test('grouped child of an ungrouped parent keeps its own group block', () {
+      final document = _document(<BoardEvent>[
+        _event(sequence: 1, id: 'axes', x: 0.4, y: 0.1),
+        _event(
+          sequence: 2,
+          id: 'label',
+          x: 0.55,
+          y: 0.14,
+          groupId: 'labels',
+          parentId: 'axes',
+        ),
+      ]);
+      final positions = BoardVerticalLayout.positions(
+        document: document,
+        narrow: true,
+        boundsOf: (element) => BoardRect(
+          element.position!.x,
+          element.position!.y,
+          0.2,
+          0.08,
+        ),
+      );
+      final parentDelta = positions['axes']!.y - 0.1;
+      expect(positions['label']!.y - 0.14, isNot(closeTo(parentDelta, 0.0001)));
+      expect(
+        positions['label']!.y,
+        closeTo(BoardVerticalLayout.topMargin +
+            0.08 +
+            BoardVerticalLayout.blockGap,
+            0.0001),
+      );
+    });
   });
 }

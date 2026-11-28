@@ -75,6 +75,53 @@ void main() {
       expect(snapshot.reachedBottom, isTrue);
     });
 
+    test('reaching the bottom alone never reports a clear', () {
+      final atBottom = BoardFullnessDetector.snapshot(
+        visibleRect: const BoardRect(0, 1.0, 1, 1),
+        elementBounds: const <BoardRect>[BoardRect(0, 1.0, 1, 0.2)],
+        sequence: 11,
+        contentExtent: 2.0,
+      );
+      expect(atBottom.reachedBottom, isTrue);
+      expect(atBottom.isFull, isFalse);
+      expect(
+        shouldReportViewportFull(
+          atBottom,
+          reportedSequence: -1,
+          reportedExtentMillis: -1,
+        ),
+        isFalse,
+      );
+    });
+
+    test('full bottom reports once per sequence and extent', () {
+      final full = BoardFullnessDetector.snapshot(
+        visibleRect: visible,
+        elementBounds: const <BoardRect>[
+          BoardRect(0, 0, 0.5, 0.6),
+          BoardRect(0.5, 0, 0.5, 0.6),
+          BoardRect(0, 0.6, 1, 0.3),
+        ],
+        sequence: 7,
+      );
+      expect(
+        shouldReportViewportFull(
+          full,
+          reportedSequence: 6,
+          reportedExtentMillis: 1000,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldReportViewportFull(
+          full,
+          reportedSequence: 7,
+          reportedExtentMillis: 1000,
+        ),
+        isFalse,
+      );
+    });
+
     test('once latched, coverage must drop below the release threshold', () {
       final boxes = <BoardRect>[
         const BoardRect(0, 0, 0.4, 1),

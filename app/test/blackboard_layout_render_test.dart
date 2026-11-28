@@ -143,6 +143,100 @@ void main() {
       expect(find.text(latex), findsNothing);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('equation bounds use the laid-out formula size', (tester) async {
+      const latex = r'\frac{a}{b} + \sqrt{x}';
+      final document = BoardDocument.empty(sessionId: 'sess_layout').apply(
+            _writeText(
+              sequence: 1,
+              id: 'eq_measured',
+              text: latex,
+              style: 'equation',
+              extra: <String, dynamic>{'latex': latex},
+            ),
+          );
+      final controller = BlackboardController(
+        animationsEnabled: false,
+        initialDocument: document,
+      );
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            height: 600,
+            child: BlackboardView(controller: controller),
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      final bounds = controller.renderCache.bounds['eq_measured'];
+      expect(bounds, isNotNull);
+      expect(bounds!.w, greaterThan(0));
+      expect(bounds.h, greaterThan(0));
+      // The declared 0.34 box is a placeholder; the measured formula is tighter.
+      expect(bounds.w, lessThan(0.34));
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('graph labels', () {
+    testWidgets('measured graph bounds include labels outside the axes',
+        (tester) async {
+      final document = BoardDocument.empty(sessionId: 'sess_layout').apply(
+        BoardEvent.fromJson(<String, dynamic>{
+          'event_id': 'graph_1',
+          'session_id': 'sess_layout',
+          'sequence': 1,
+          'type': 'create_coordinate_system',
+          'element_id': 'graph_1',
+          'payload': <String, dynamic>{
+            'position': <String, dynamic>{'x': 0.2, 'y': 0.2},
+            'size': <String, dynamic>{'w': 0.4, 'h': 0.4},
+            'x_range': <num>[0, 10],
+            'y_range': <num>[0, 10],
+            'x_label': 'time (s)',
+            'y_label': 'velocity (m/s)',
+            'grid': false,
+          },
+          'created_at': '2026-11-28T00:00:00.000Z',
+          'board_revision': 1,
+          'animate': false,
+        }),
+      );
+      final controller = BlackboardController(
+        animationsEnabled: false,
+        initialDocument: document,
+      );
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            height: 600,
+            child: BlackboardView(controller: controller),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      final bounds = controller.renderCache.bounds['graph_1'];
+      expect(bounds, isNotNull);
+      expect(bounds!.x, lessThan(0.2));
+      expect(bounds.bottom, greaterThan(0.6));
+      // The extent consumer must use the measured graph footprint, not the
+      // declared 0.4-high box that omits the axis label.
+      final measured = controller.measuredContentBounds(
+        verticalExtent: 1.0,
+        clampToExtent: false,
+      );
+      expect(measured, isNotNull);
+      expect(measured!.bottom, greaterThan(0.6));
+      expect(tester.takeException(), isNull);
+    });
   });
 
   group('group-aware collision detection', () {

@@ -156,6 +156,60 @@ void main() {
     expect(controller.animations.progress('e'), greaterThan(frozen));
   });
 
+  test('measuredContentBounds can expose raw bounds beyond the current extent', () {
+    final controller = BlackboardController(animationsEnabled: false);
+    addTearDown(controller.dispose);
+    controller.enqueue(_event(
+      1,
+      extra: <String, dynamic>{
+        'position': <String, dynamic>{'x': 0.1, 'y': 1.4},
+        'size': <String, dynamic>{'w': 0.3, 'h': 0.2},
+      },
+    ));
+    controller.renderCache.bounds.put(
+      'e',
+      const BoardRect(0.1, 1.4, 0.3, 0.2),
+    );
+
+    final clamped = controller.measuredContentBounds(verticalExtent: 1.0)!;
+    final raw = controller.measuredContentBounds(
+      verticalExtent: 1.0,
+      clampToExtent: false,
+    )!;
+    expect(clamped.bottom, lessThanOrEqualTo(1.0));
+    expect(raw.y, closeTo(1.4, 0.0001));
+    expect(raw.bottom, closeTo(1.6, 0.0001));
+  });
+
+  test('snapshot restore invalidates stale measured bounds', () {
+    final controller = BlackboardController(animationsEnabled: false);
+    addTearDown(controller.dispose);
+    controller.enqueue(_event(1));
+    controller.renderCache.bounds.put('e', const BoardRect(0.1, 0.18, 0.3, 0.05));
+    expect(controller.renderCache.bounds['e'], isNotNull);
+
+    controller.loadSnapshot(controller.document);
+    expect(controller.renderCache.bounds['e'], isNull);
+  });
+
+  test('waitForIdle does not hang while animations are paused', () async {
+    _FakeFrameDriver? driver;
+    final controller = BlackboardController(
+      frameDriverFactory: (onTick) {
+        driver = _FakeFrameDriver(onTick);
+        return driver!;
+      },
+    );
+    addTearDown(controller.dispose);
+
+    controller.enqueue(_event(1));
+    expect(controller.isAnimating, isTrue);
+    controller.pauseAnimations();
+
+    await controller.waitForIdle().timeout(const Duration(milliseconds: 500));
+    expect(controller.isAnimating, isTrue);
+  });
+
   test('foreign-session events never desynchronize the queue', () {
     final controller = BlackboardController(
       initialDocument: BoardDocument.empty(sessionId: 's1'),

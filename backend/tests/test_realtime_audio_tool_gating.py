@@ -13,8 +13,11 @@ from typing import Any
 
 import pytest
 
+import app.realtime.hub as hub_module
 from app.board.registry import ToolRegistry
 from app.realtime.hub import (
+    MSG_MIC_LOCK,
+    MSG_MIC_UNLOCK,
     MSG_AUDIO_DELTA,
     MSG_AUDIO_DONE,
     MSG_AUDIO_TRUNCATED,
@@ -39,6 +42,7 @@ class FakeQwen:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self.create_response_count = 0
+        self.cancel_response_count = 0
         self.function_outputs: list[tuple[str, str, bool]] = []
         self.prompt_texts: list[str] = []
 
@@ -58,7 +62,7 @@ class FakeQwen:
         self.create_response_count += 1
 
     async def cancel_response(self) -> None:
-        return None
+        self.cancel_response_count += 1
 
     async def function_call_output(
         self, call_id: str, output: str, *, continue_response: bool = False
@@ -368,19 +372,28 @@ async def test_adapter_does_not_implicitly_create_responses() -> None:
 
 
 @pytest.mark.asyncio
-async def test_audio_deltas_are_deduped_sorted_and_gap_recovered() -> None:
-    """Out-of-order deltas are released in sequence order; gaps trigger recovery."""
+async def test_audio_deltas_are_deduped_sorted_without_gap_recovery_on_reorder() -> None:
+    """Out-of-order deltas that all arrive are sorted, not treated as a gap."""
     hub = LessonRealtimeHub()
     qwen = FakeQwen()
     socket = _socket(qwen)
+    reasons: list[str] = []
+    original_request = hub._request_response
+
+    async def record_reason(*args, **kwargs):
+        reasons.append(str(kwargs.get("reason") or ""))
+        return await original_request(*args, **kwargs)
+
+    hub._request_response = record_reason  # type: ignore[method-assign]
 
     task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
     qwen.push(_created())
     qwen.push(_delta("A", 0))
-    qwen.push(_delta("D", 3))  # source-side gap: 1 and 2 not seen yet
+    qwen.push(_delta("D", 3))  # out of order, but 1 and 2 arrive before done
     qwen.push(_delta("B", 1))
     qwen.push(_delta("duplicate", 1))
     qwen.push(_delta("C", 2))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
     qwen.push(_done())
     await qwen.queue.put(None)
     await asyncio.wait_for(task, timeout=2)
@@ -388,8 +401,9 @@ async def test_audio_deltas_are_deduped_sorted_and_gap_recovered() -> None:
     deltas = socket.websocket.of_type(MSG_AUDIO_DELTA)
     assert [delta["data"] for delta in deltas] == ["A", "B", "C", "D"]
     assert [delta["sequence"] for delta in deltas] == [0, 1, 2, 3]
-    assert socket.audio_gap_count == 1
-    assert qwen.create_response_count == 1  # guarded gap recovery response
+    assert socket.audio_gap_count == 0
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED) == []
+    assert "audio_gap_repeat" not in reasons
 
 
 @pytest.mark.asyncio
@@ -496,3 +510,593 @@ async def test_cancelling_pending_tool_settles_its_response_gate(monkeypatch) ->
     assert gate.done_event is None
     assert socket.active_response_id is None
     assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+
+
+@pytest.mark.asyncio
+async def test_audio_arriving_well_after_old_grace_before_call_is_still_held(monkeypatch) -> None:
+    """Audio before a late call must never be released by a timing heuristic."""
+
+    async def slow_execute(self, db, lesson_id, name, arguments, *, source=None):
+        return {"ok": True, "sequence": 1}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", slow_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("Question before the tool lookup", 0))
+    # Longer than AUDIO_TOOL_GRACE_SECONDS (0.15s): the old gate would already
+    # have played this chunk before the function call below was observed.
+    await asyncio.sleep(0.25)
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+
+    qwen.push(_call(name="ask_student"))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert [d["data"] for d in socket.websocket.of_type(MSG_AUDIO_DELTA)] == [
+        "Question before the tool lookup"
+    ]
+    assert qwen.function_outputs
+
+
+@pytest.mark.asyncio
+async def test_function_call_found_only_in_done_manifest_runs_before_audio(monkeypatch) -> None:
+    """Qwen's response.done.output is authoritative when argument events are absent."""
+    executed: list[str] = []
+
+    async def ok_execute(self, db, lesson_id, name, arguments, *, source=None):
+        executed.append(name)
+        return {"ok": True, "sequence": len(executed)}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", ok_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    done_with_manifest = {
+        "type": "response.done",
+        "response": {
+            "id": "r1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "manifest_call",
+                    "name": "board_write_on_board",
+                    "arguments": json.dumps({"text": "saved fact"}),
+                }
+            ],
+        },
+    }
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("Saved.", 0))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(done_with_manifest)
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert executed == ["board_write_on_board"]
+    assert qwen.function_outputs and json.loads(qwen.function_outputs[0][1])["ok"] is True
+    assert [d["data"] for d in socket.websocket.of_type(MSG_AUDIO_DELTA)] == ["Saved."]
+    assert socket.websocket.of_type(MSG_AUDIO_DONE)
+
+
+@pytest.mark.asyncio
+async def test_late_tool_call_after_finalize_is_rejected_without_side_effects(monkeypatch) -> None:
+    """No tool may execute after the response boundary has been closed."""
+    executed: list[str] = []
+
+    async def spy_execute(self, db, lesson_id, name, arguments, *, source=None):
+        executed.append(name)
+        return {"ok": True}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", spy_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("First answer", 0))
+    qwen.push(_done())
+    await _wait_for(lambda: qwen.create_response_count == 1)
+    assert socket.response_gates["r1"].finalized is True
+
+    qwen.push(_call(call_id="late_call"))
+    await _wait_for(lambda: len(qwen.function_outputs) == 1)
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert executed == []
+    assert json.loads(qwen.function_outputs[0][1])["error"] == "late_tool_call"
+    assert "late_call" in socket.response_gates["r1"].late_calls
+
+
+@pytest.mark.asyncio
+async def test_every_tool_in_multi_call_response_settles_before_audio(monkeypatch) -> None:
+    """Audio is released once, after the slowest of several tool calls."""
+    finished: set[str] = set()
+
+    async def staggered_execute(self, db, lesson_id, name, arguments, *, source=None):
+        args = json.loads(arguments)
+        call_id = args["call_id"]
+        await asyncio.sleep(args["delay"])
+        finished.add(call_id)
+        # A premature release would be observed here.
+        assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+        return {"ok": True, "call_id": call_id}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", staggered_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    def call(call_id: str, delay: float) -> dict[str, Any]:
+        return {
+            "type": "response.function_call_arguments.done",
+            "response_id": "r1",
+            "call_id": call_id,
+            "name": "board_write_on_board",
+            "arguments": json.dumps({"call_id": call_id, "delay": delay}),
+        }
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("All saved.", 0))
+    qwen.push(call("one", 0.01))
+    qwen.push(call("two", 0.04))
+    qwen.push(call("three", 0.02))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert finished == {"one", "two", "three"}
+    assert len(qwen.function_outputs) == 3
+    assert [d["data"] for d in socket.websocket.of_type(MSG_AUDIO_DELTA)] == ["All saved."]
+    assert len(socket.websocket.of_type(MSG_AUDIO_DONE)) == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_student_unlock_follows_buffered_question_audio() -> None:
+    """The microphone opens only after the gated question is actually sent."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("What do you think?", 0))
+    qwen.push(_call(name="wait_for_student"))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    deltas = socket.websocket.of_type(MSG_AUDIO_DELTA)
+    unlocks = socket.websocket.of_type(MSG_MIC_UNLOCK)
+    assert len(deltas) == 1 and len(unlocks) == 1
+    assert socket.websocket.sent.index(deltas[0]) < socket.websocket.sent.index(unlocks[0])
+    assert socket.waiting_for_student is True
+    assert qwen.create_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_response_done_is_recovered_without_releasing_audio(monkeypatch) -> None:
+    """A stalled response cannot hold audio or the turn guard forever."""
+    monkeypatch.setattr(hub_module, "RESPONSE_ACTIVITY_WATCHDOG_SECONDS", 0.05)
+    monkeypatch.setattr(hub_module, "WATCHDOG_POLL_SECONDS", 0.05)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("Untrusted partial speech", 0))
+    await _wait_for(lambda: qwen.create_response_count == 1, timeout=2)
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert qwen.cancel_response_count >= 1
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+    assert socket.active_response_id is None
+    assert socket.response_gates["r1"].finalized is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_audio_does_not_claim_truncated_audio() -> None:
+    """Cancellation must not fabricate a false audio.truncated event."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push({"type": "response.cancel", "response_id": "r1"})
+    qwen.push(_done(status="cancelled"))
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED) == []
+
+
+def test_late_done_cannot_overwrite_the_first_response_status() -> None:
+    """A duplicate done event must not replace a completed response with cancel."""
+    hub = LessonRealtimeHub()
+    socket = _socket(FakeQwen())
+    gate = hub._response_gate(socket, "r1")
+    assert gate is not None
+
+    hub._record_gate_done(gate, _done("completed"), "completed")
+    hub._record_gate_done(gate, _done("cancelled"), "cancelled")
+
+    assert gate.done_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_response_without_done_settles_turn_guard(monkeypatch) -> None:
+    """A cancelled gate must not hold active_response_id without a done event."""
+    monkeypatch.setattr(hub_module, "DISCARDED_GATE_SETTLE_SECONDS", 0.01)
+    monkeypatch.setattr(hub_module, "WATCHDOG_POLL_SECONDS", 0.01)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("Never spoken", 0))
+    qwen.push({"type": "response.cancel", "response_id": "r1"})
+    await _wait_for(
+        lambda: socket.response_gates.get("r1") is not None
+        and socket.response_gates["r1"].discarded,
+        timeout=2,
+    )
+    await _wait_for(lambda: socket.active_response_id is None, timeout=2)
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    gate = socket.response_gates["r1"]
+    assert gate.finalized is True
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+    assert qwen.create_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_without_done_settles_turn_guard(monkeypatch) -> None:
+    """A failed tool with no later response.done must not latch the lesson."""
+
+    async def failing_execute(self, db, lesson_id, name, arguments, *, source=None):
+        return {"ok": False, "error": "board_unavailable"}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", failing_execute)
+    monkeypatch.setattr(hub_module, "DISCARDED_GATE_SETTLE_SECONDS", 0.01)
+    monkeypatch.setattr(hub_module, "WATCHDOG_POLL_SECONDS", 0.01)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("False confirmation", 0))
+    qwen.push(_call())
+    await _wait_for(
+        lambda: socket.response_gates.get("r1") is not None
+        and socket.response_gates["r1"].discarded,
+        timeout=2,
+    )
+    await _wait_for(lambda: socket.active_response_id is None, timeout=2)
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.response_gates["r1"].finalized is True
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+    assert qwen.create_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_student_rolls_back_when_another_tool_fails(monkeypatch) -> None:
+    """An unspoken question must not leave the lesson waiting for an answer."""
+
+    async def mixed_execute(self, db, lesson_id, name, arguments, *, source=None):
+        return {"ok": False, "error": "board_unavailable"}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", mixed_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("What do you think?", 0))
+    qwen.push(_call(name="wait_for_student"))
+    qwen.push(_call(call_id="call_2"))
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.waiting_for_student is False
+    assert socket.mic_unlocked is False
+    assert socket.websocket.of_type(MSG_MIC_UNLOCK) == []
+    assert socket.websocket.of_type(MSG_MIC_LOCK)
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert qwen.create_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_lesson_finish_still_speaks_its_summary(monkeypatch) -> None:
+    """finishing the lesson must not discard the tutor's final speech."""
+
+    async def ok_execute(self, db, lesson_id, name, arguments, *, source=None):
+        return {"ok": True}
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", ok_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("That completes the lesson.", 0))
+    qwen.push(_call(name="lesson_finish"))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.lesson_finished is True
+    assert [d["data"] for d in socket.websocket.of_type(MSG_AUDIO_DELTA)] == [
+        "That completes the lesson."
+    ]
+    assert len(socket.websocket.of_type(MSG_AUDIO_DONE)) == 1
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED) == []
+    assert qwen.create_response_count == 0
+
+
+@pytest.mark.asyncio
+async def test_create_guard_outlives_a_slow_in_flight_create(monkeypatch) -> None:
+    """No second response.create while the first transport call is still running."""
+    monkeypatch.setattr(hub_module, "RESPONSE_CREATED_GUARD_SECONDS", 0.01)
+    monkeypatch.setattr(hub_module, "WATCHDOG_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(hub_module, "RESPONSE_REQUEST_COOLDOWN_SECONDS", 0.0)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+
+    async def slow_create() -> None:
+        await asyncio.sleep(0.15)
+        qwen.create_response_count += 1
+
+    qwen.create_response = slow_create  # type: ignore[method-assign]
+    socket = _socket(qwen)
+
+    first = asyncio.create_task(hub._request_response(socket, reason="first", force=True))
+    await asyncio.sleep(0.05)
+    second = await hub._request_response(socket, reason="second", force=True)
+    assert second is False
+    assert await first is True
+    assert qwen.create_response_count == 1
+    await _wait_for(lambda: not socket.response_request_pending, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_late_tool_output_failure_does_not_kill_qwen_loop() -> None:
+    """A transport error while acknowledging a late call must not stop the loop."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+
+    async def broken_output(call_id: str, output: str, *, continue_response: bool = False) -> None:
+        raise RuntimeError("transport closed")
+
+    qwen.function_call_output = broken_output  # type: ignore[method-assign]
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("Hello", 0))
+    qwen.push(_done())
+    qwen.push(_call(call_id="late_call", name="board_write_on_board"))
+    qwen.push(
+        {
+            "type": "response.audio_transcript.done",
+            "response_id": "r1",
+            "speaker": "tutor",
+            "transcript": "Still teaching.",
+        }
+    )
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.websocket.of_type(MSG_TRANSCRIPT_ENTRY)
+    assert socket.response_gates["r1"].late_calls == {"late_call"}
+
+
+@pytest.mark.asyncio
+async def test_confirmed_missing_audio_truncates_and_repeats_once() -> None:
+    """A missing chunk at audio.done discards partial speech and asks for a repeat."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    reasons: list[str] = []
+    original_request = hub._request_response
+
+    async def record_reason(*args, **kwargs):
+        reasons.append(str(kwargs.get("reason") or ""))
+        return await original_request(*args, **kwargs)
+
+    hub._request_response = record_reason  # type: ignore[method-assign]
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("A", 0))
+    qwen.push(_delta("C", 2))  # sequence 1 never arrives
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    truncated = socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+    assert [m["reason"] for m in truncated] == ["audio_sequence_missing"]
+    assert socket.audio_gap_count == 1
+    assert len(qwen.prompt_texts) == 1
+    repeat = qwen.prompt_texts[0].lower()
+    assert "repeat" in repeat
+    assert "do not call any board tool" in repeat
+    assert reasons.count("audio_gap_repeat") == 1
+    assert qwen.create_response_count == 1
+    assert socket.response_gates["r1"].finalized is True
+    assert socket.active_response_id is None
+    assert socket.audio_gap_repeats == 1
+
+
+@pytest.mark.asyncio
+async def test_audio_only_repeat_rejects_board_tools(monkeypatch) -> None:
+    """A gap repeat cannot re-run board writes through a best-effort prompt."""
+    async def forbidden_execute(self, db, lesson_id, name, arguments, *, source=None):
+        raise AssertionError("audio-only recovery must not execute tools")
+
+    monkeypatch.setattr(ToolRegistry, "execute_structured", forbidden_execute)
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("A", 0))
+    qwen.push(_delta("C", 2))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    qwen.push(_created("r2"))
+    qwen.push(
+        {
+            "type": "response.function_call_arguments.done",
+            "response_id": "r2",
+            "call_id": "repeat_call",
+            "name": "board_write_on_board",
+            "arguments": "{}",
+        }
+    )
+    qwen.push({"type": "response.done", "response": {"id": "r2", "status": "completed"}})
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.response_gates["r2"].audio_only_recovery is True
+    assert any("gap_recovery_audio_only" in output for _, output, _ in qwen.function_outputs)
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+
+
+@pytest.mark.asyncio
+async def test_missing_sequence_field_never_triggers_gap_recovery() -> None:
+    """Without source sequences there is nothing to confirm at audio.done."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+    reasons: list[str] = []
+    original_request = hub._request_response
+
+    async def record_reason(*args, **kwargs):
+        reasons.append(str(kwargs.get("reason") or ""))
+        return await original_request(*args, **kwargs)
+
+    hub._request_response = record_reason  # type: ignore[method-assign]
+
+    def delta_without_sequence(data: str) -> dict[str, Any]:
+        return {
+            "type": "response.audio.delta",
+            "response_id": "r1",
+            "delta": data,
+        }
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(delta_without_sequence("A"))
+    qwen.push(delta_without_sequence("B"))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert [d["data"] for d in socket.websocket.of_type(MSG_AUDIO_DELTA)] == ["A", "B"]
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED) == []
+    assert socket.audio_gap_count == 0
+    assert "audio_gap_repeat" not in reasons
+
+
+@pytest.mark.asyncio
+async def test_failed_response_with_gap_does_not_repeat() -> None:
+    """A failed/cancelled turn must not generate a fresh teaching turn."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("A", 0))
+    qwen.push(_delta("C", 2))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done(status="failed"))
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+    assert qwen.prompt_texts == []
+    assert qwen.create_response_count == 0
+    assert socket.audio_gap_repeats == 0
+
+
+@pytest.mark.asyncio
+async def test_late_delta_after_confirmed_gap_is_not_played() -> None:
+    """A chunk arriving after the boundary cannot resurrect discarded speech."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("A", 0))
+    qwen.push(_delta("C", 2))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    qwen.push(_delta("B", 1))
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert socket.websocket.of_type(MSG_AUDIO_DELTA) == []
+    assert socket.websocket.of_type(MSG_AUDIO_TRUNCATED)
+
+
+@pytest.mark.asyncio
+async def test_gap_repeat_is_bounded_to_one_attempt() -> None:
+    """A second consecutive gap truncates but does not spawn another repeat."""
+    hub = LessonRealtimeHub()
+    qwen = FakeQwen()
+    socket = _socket(qwen)
+
+    task = asyncio.create_task(hub._qwen_loop(socket, "lesson-1"))
+    qwen.push(_created())
+    qwen.push(_delta("A", 0))
+    qwen.push(_delta("C", 2))
+    qwen.push({"type": "response.audio.done", "response_id": "r1"})
+    qwen.push(_done())
+    qwen.push(_created("r2"))
+    qwen.push({"type": "response.audio.delta", "response_id": "r2", "delta": "A", "sequence": 0})
+    qwen.push({"type": "response.audio.delta", "response_id": "r2", "delta": "C", "sequence": 2})
+    qwen.push({"type": "response.audio.done", "response_id": "r2"})
+    qwen.push({"type": "response.done", "response": {"id": "r2", "status": "completed"}})
+    await qwen.queue.put(None)
+    await asyncio.wait_for(task, timeout=2)
+
+    assert len(qwen.prompt_texts) == 1
+    assert socket.audio_gap_repeats == 1
+    assert len(socket.websocket.of_type(MSG_AUDIO_TRUNCATED)) == 2

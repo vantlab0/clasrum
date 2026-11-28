@@ -84,6 +84,10 @@ class _LiveScreenState extends State<LiveScreen>
   late final AiAudioPlaybackController _audioPlayback;
 
   Size? _lastViewportSize;
+  bool _boundsSyncScheduled = false;
+  bool _boundsSyncFollow = false;
+  double _gestureBaseScale = 1.0;
+  bool _isScaling = false;
 
   StreamSubscription<ConnectionState>? _connSub;
   StreamSubscription<String>? _errSub;
@@ -102,26 +106,11 @@ class _LiveScreenState extends State<LiveScreen>
     // Track board content bounds so the viewport can clamp panning.
     _boardController.addListener(() {
       if (!mounted) return;
-      final extent = _viewportController.contentExtent;
-      final bounds = _boardController.measuredContentBounds(
-        verticalExtent: extent,
-      );
-      _viewportController.onContentBoundsChanged(bounds);
+      _syncBoardViewportBounds();
       // Measured bounds are written during paint; check after that frame.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        _recheckBoardFullness();
-        if (_viewportController.followLatest &&
-            !_viewportController.isManuallyInteracting) {
-          unawaited(
-            _viewportController.followLatestContent(
-              contentBounds: _viewportController.contentBounds,
-              animate: true,
-            ),
-          );
-        }
-      });
+      _scheduleBoardBoundsSync(follow: true);
     });
+    _boardController.renderCache.bounds.onChanged = _handleRenderBoundsChanged;
     _viewportController.addListener(_recheckBoardFullness);
     _boardController.onBackfillRequested = (afterSequence) {
       unawaited(widget.client.backfill(afterSequence: afterSequence));
@@ -202,6 +191,7 @@ class _LiveScreenState extends State<LiveScreen>
     _audioPlayback.dispose();
     _pulseController.dispose();
     _viewportController.removeListener(_recheckBoardFullness);
+    _boardController.renderCache.bounds.onChanged = null;
     _boardController.dispose();
     _viewportController.dispose();
     super.dispose();
@@ -336,6 +326,45 @@ class _LiveScreenState extends State<LiveScreen>
     }
   }
 
+  /// Recomputes the viewport extent from raw (unclamped) measured bounds.
+  /// Clamping here would make content below the current extent invisible to
+  /// the extent calculation, so auto-follow could never scroll down to it.
+  void _syncBoardViewportBounds() {
+    if (!mounted) return;
+    final extent = _viewportController.contentExtent;
+    final bounds = _boardController.measuredContentBounds(
+      verticalExtent: extent,
+      clampToExtent: false,
+    );
+    _viewportController.onContentBoundsChanged(bounds);
+  }
+
+  void _handleRenderBoundsChanged() => _scheduleBoardBoundsSync();
+
+  void _scheduleBoardBoundsSync({bool follow = false}) {
+    _boundsSyncFollow = _boundsSyncFollow || follow;
+    if (_boundsSyncScheduled) return;
+    _boundsSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _boundsSyncScheduled = false;
+      final shouldFollow = _boundsSyncFollow;
+      _boundsSyncFollow = false;
+      if (!mounted) return;
+      _syncBoardViewportBounds();
+      _recheckBoardFullness();
+      if (shouldFollow &&
+          _viewportController.followLatest &&
+          !_viewportController.isManuallyInteracting) {
+        unawaited(
+          _viewportController.followLatestContent(
+            contentBounds: _viewportController.contentBounds,
+            animate: true,
+          ),
+        );
+      }
+    });
+  }
+
   /// Uses the renderer's measured bounds to decide whether the student's
   /// visible board screen is full. A report is sent at most once per sequence;
   /// the server owns the actual wipe.
@@ -369,12 +398,15 @@ class _LiveScreenState extends State<LiveScreen>
       contentExtent: extent,
     );
     _lastBoardFullness = snapshot;
-    final extentMillis = (extent * 1000).round();
-    final sameExtentReport = snapshot.sequence <= _reportedFullSequence &&
-        extentMillis <= _reportedFullExtentMillis;
-    if (!snapshot.reachedBottom || sameExtentReport) return;
+    if (!shouldReportViewportFull(
+      snapshot,
+      reportedSequence: _reportedFullSequence,
+      reportedExtentMillis: _reportedFullExtentMillis,
+    )) {
+      return;
+    }
     _reportedFullSequence = snapshot.sequence;
-    _reportedFullExtentMillis = extentMillis;
+    _reportedFullExtentMillis = (extent * 1000).round();
     final narrow = BoardVerticalLayout.isNarrow(
       MediaQuery.sizeOf(context),
     );
@@ -531,6 +563,10 @@ class _LiveScreenState extends State<LiveScreen>
     try {
       final doc = BoardDocument.fromSnapshotEnvelope(envelope);
       _boardController.loadSnapshot(doc);
+      // A restored snapshot replaces element revisions at the same ids. Drop
+      // the old pan/zoom and stale measurements so the restored board starts
+      // from a truthful full view.
+      _recycleViewportAfterClear();
     } catch (e) {
       // Keep board stable on malformed snapshots, but surface the actual error.
       if (!mounted) return;
@@ -585,7 +621,8 @@ class _LiveScreenState extends State<LiveScreen>
   void _recycleViewportAfterClear() {
     _lastBoardFullness = null;
     _reportedFullSequence = -1;
-    _boardController.renderCache.bounds.clear();
+    _reportedFullExtentMillis = -1;
+    _boardController.renderCache.resetForSnapshot();
     _viewportController.onContentBoundsChanged(null);
     _viewportController.setViewport(Offset.zero, 1.0);
     _viewportController.resumeFollow();
@@ -631,6 +668,9 @@ class _LiveScreenState extends State<LiveScreen>
       unawaited(_viewportController.focusOnElements(
         targetIds,
         document: _boardController.document,
+        measuredBounds: Map<String, BoardRect>.fromEntries(
+          _boardController.renderCache.bounds.entries,
+        ),
         animate: animate,
       ));
     } else if (region != null) {
@@ -1206,6 +1246,7 @@ class _LiveScreenState extends State<LiveScreen>
     if (_lastViewportSize != viewportSize) {
       _lastViewportSize = viewportSize;
       _viewportController.onViewportSizeChanged(viewportSize);
+      _scheduleBoardBoundsSync();
     }
 
     return Scaffold(
@@ -1219,6 +1260,7 @@ class _LiveScreenState extends State<LiveScreen>
             child: GestureDetector(
               onPanStart: (_) => _viewportController.onManualInteractionStart(),
               onPanUpdate: (details) {
+                if (_isScaling) return;
                 final dxNorm = details.delta.dx / viewportSize.width;
                 final dyNorm = details.delta.dy / viewportSize.height;
                 _viewportController.setViewport(
@@ -1227,15 +1269,23 @@ class _LiveScreenState extends State<LiveScreen>
                 );
               },
               onPanEnd: (_) => _viewportController.onManualInteractionEnd(),
-              onScaleStart: (_) =>
-                  _viewportController.onManualInteractionStart(),
+              onScaleStart: (_) {
+                _isScaling = true;
+                _gestureBaseScale = _viewportController.scale;
+                _viewportController.onManualInteractionStart();
+              },
               onScaleUpdate: (details) {
+                // details.scale is cumulative from scale start. Multiplying it
+                // by the live scale on every update compounds zoom.
                 _viewportController.setViewport(
                   _viewportController.offset,
-                  (_viewportController.scale * details.scale).clamp(0.5, 2.0),
+                  (_gestureBaseScale * details.scale).clamp(0.5, 2.0),
                 );
               },
-              onScaleEnd: (_) => _viewportController.onManualInteractionEnd(),
+              onScaleEnd: (_) {
+                _isScaling = false;
+                _viewportController.onManualInteractionEnd();
+              },
               child: BlackboardView(
                 controller: _boardController,
                 viewportController: _viewportController,

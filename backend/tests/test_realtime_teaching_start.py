@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -199,7 +200,7 @@ async def test_completed_lesson_does_not_auto_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_visible_board_full_wipes_once_and_nudges_tutor() -> None:
+async def test_viewport_full_is_telemetry_only_and_never_clears() -> None:
     lesson_id = await _create_lesson()
     async with session_scope() as db:
         lesson = await db.get(Lesson, lesson_id)
@@ -232,33 +233,43 @@ async def test_visible_board_full_wipes_once_and_nudges_tutor() -> None:
     )
 
     await hub._handle_client_text(socket, lesson_id, report)
-    clears = [
+    assert not [
         m
         for m in ws.sent
         if m.get("type") == "board.event" and m["event"].get("type") == "clear"
     ]
-    assert len(clears) == 1
-    assert len(qwen.prompt_texts) == 1
-    assert "visible board was full" in qwen.prompt_texts[0]
+    assert qwen.prompt_texts == []
+    assert socket.last_viewport_report_sequence == 4
 
-    # Duplicate and stale reports must not wipe the freshly recycled board.
+    # Duplicate/stale reports are latched out and still cannot clear anything.
     await hub._handle_client_text(socket, lesson_id, report)
     stale = json.loads(report)
     stale.update(sequence=3, coverage=0.95)
     await hub._handle_client_text(socket, lesson_id, json.dumps(stale))
-    later_clears = [
+    assert not [
         m
         for m in ws.sent
         if m.get("type") == "board.event" and m["event"].get("type") == "clear"
     ]
-    assert len(later_clears) == 1
-    assert len(qwen.prompt_texts) == 1
+    assert qwen.prompt_texts == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("layout_mode", ["mobile", "compact_portrait", "narrow"])
-async def test_mobile_viewport_full_never_clears_the_board(layout_mode: str) -> None:
-    """Narrow boards scroll vertically: reaching the bottom is not a wipe."""
+@pytest.mark.parametrize(
+    "layout_mode",
+    [
+        None,
+        "",
+        "desktop",
+        "DESKTOP",
+        "desktop_mobile",
+        "mobile",
+        "compact_portrait",
+        "narrow",
+    ],
+)
+async def test_viewport_full_never_trusts_client_layout_mode(layout_mode: str | None) -> None:
+    """Viewport telemetry is advisory for every claimed layout, including none."""
     lesson_id = await _create_lesson()
     async with session_scope() as db:
         lesson = await db.get(Lesson, lesson_id)
@@ -280,17 +291,19 @@ async def test_mobile_viewport_full_never_clears_the_board(layout_mode: str) -> 
         hub._sockets[lesson_id] = socket
         hub._all.setdefault(lesson_id, set()).add(socket)
 
-    report = json.dumps(
-        {
-            "type": CLIENT_BOARD_VIEWPORT_FULL,
-            "sequence": 4,
-            "coverage": 0.97,
-            "scale": 2.0,
-            "layout_mode": layout_mode,
-            "visible_rect": {"x": 0, "y": 0, "w": 1, "h": 1},
-            "offset": {"x": 0, "y": 0},
-        }
-    )
+    payload: dict[str, Any] = {
+        "type": CLIENT_BOARD_VIEWPORT_FULL,
+        "sequence": 4,
+        "coverage": 1.0,
+        "scale": 2.0,
+        "content_extent": 1.0,
+        "reason": "scroll_bottom",
+        "visible_rect": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "offset": {"x": 0, "y": 0},
+    }
+    if layout_mode is not None:
+        payload["layout_mode"] = layout_mode
+    report = json.dumps(payload)
     await hub._handle_client_text(socket, lesson_id, report)
 
     assert not [
@@ -319,6 +332,48 @@ async def test_mobile_viewport_full_never_clears_the_board(layout_mode: str) -> 
             )
         ).scalar_one()
         assert clear_count == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_viewport_full_report_is_rejected_without_clear() -> None:
+    """Malformed telemetry cannot influence board state or the tutor."""
+    lesson_id = await _create_lesson()
+    hub = LessonRealtimeHub()
+    ws = FakeWs()
+    qwen = FakeQwen()
+    socket = LessonSocket(
+        websocket=ws,
+        lesson_id=lesson_id,
+        student_id="student-1",
+        lease_id="lease-1",
+        qwen=qwen,
+    )
+    async with hub._lock:
+        hub._sockets[lesson_id] = socket
+        hub._all.setdefault(lesson_id, set()).add(socket)
+
+    for coverage in (-0.1, 1.4, "bad"):
+        await hub._handle_client_text(
+            socket,
+            lesson_id,
+            json.dumps(
+                {
+                    "type": CLIENT_BOARD_VIEWPORT_FULL,
+                    "sequence": 4,
+                    "coverage": coverage,
+                    "scale": 1.0,
+                    "layout_mode": "desktop",
+                }
+            ),
+        )
+
+    assert socket.last_viewport_report_sequence == -1
+    assert qwen.prompt_texts == []
+    assert not [
+        m
+        for m in ws.sent
+        if m.get("type") == "board.event" and m["event"].get("type") == "clear"
+    ]
 
 
 @pytest.mark.asyncio
