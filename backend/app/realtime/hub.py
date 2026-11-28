@@ -235,12 +235,32 @@ class ResponseGate:
     audio_done_event: dict[str, Any] | None = None
     done_event: dict[str, Any] | None = None
     done_status: str | None = None
+    # Only the first response.done establishes the complete function-call
+    # manifest. Nothing may release speech before that boundary.
+    manifest_received: bool = False
+    manifest_call_ids: set[str] = field(default_factory=set)
     pending_mic_unlock: dict[str, Any] | None = None
     calls: dict[str, ToolCallState] = field(default_factory=dict)
     late_calls: set[str] = field(default_factory=set)
 
     def has_pending_calls(self) -> bool:
         return any(not call.settled for call in self.calls.values())
+
+    def calls_settled_successfully(self) -> bool:
+        return all(
+            call.settled and call.ok is True for call in self.calls.values()
+        )
+
+    def can_release_audio(self) -> bool:
+        """True only after a complete, successful response manifest is known."""
+        return (
+            self.manifest_received
+            and not self.discarded
+            and not self.audio_gap_confirmed
+            and not self.finalized
+            and not self.released
+            and self.calls_settled_successfully()
+        )
 
     def has_unresolved_audio(self) -> bool:
         return bool(self.buffer) or self.has_pending_calls()
@@ -1168,18 +1188,21 @@ class LessonRealtimeHub:
                     response_id = str(response.get("id") or event.get("response_id") or socket.active_response_id or "")
                     status = str(response.get("status") or "")
                     gate = self._response_gate(socket, response_id)
+                    first_done = gate is not None and not gate.manifest_received
                     if gate is not None:
                         # Qwen's response.done payload is the authoritative
                         # manifest: it can contain function_call items whose
                         # arguments.done events we never observed. Hold the done
                         # event until every such call has settled.
                         self._record_gate_done(gate, event, status)
+                        # A late duplicate done must not rewrite the first one.
+                        status = gate.done_status or status
                     if status in {"failed", "cancelled"}:
                         await self._cancel_buffered_audio(
                             socket, response_id=response_id or None,
                             reason=f"response_{status}",
                         )
-                    elif gate is not None:
+                    elif gate is not None and first_done:
                         for manifest_call in self._function_calls_from_done(event):
                             call_id = str(manifest_call.get("call_id") or "")
                             if not call_id:
@@ -1204,15 +1227,37 @@ class LessonRealtimeHub:
                                 response_id,
                                 call_id,
                             )
+                        # A call observed only as a delta but absent from the
+                        # manifest can never settle. Settle it as failed instead
+                        # of holding audio until a watchdog expires.
+                        stale_calls = [
+                            call_id
+                            for call_id, state in gate.calls.items()
+                            if not state.submitted
+                            and call_id not in gate.manifest_call_ids
+                        ]
+                        for call_id in stale_calls:
+                            state = gate.calls[call_id]
+                            state.settled = True
+                            state.ok = False
+                        if stale_calls:
+                            logger.warning(
+                                "unresolved function calls at response.done lesson=%s response_id=%s calls=%s",
+                                lesson_id, response_id, stale_calls,
+                            )
+                            await self._cancel_buffered_audio(
+                                socket, response_id=response_id,
+                                reason="unresolved_function_call",
+                            )
                     if gate is None:
                         await self._finalize_response(socket, event)
                     elif gate.discarded:
                         if gate.done_event is not None:
                             gate.done_event = None
                             await self._finalize_response(socket, event)
-                    elif not gate.has_pending_calls():
-                        # No tools left: response.done proves no more calls can
-                        # arrive, so release buffered speech immediately.
+                    elif gate.can_release_audio():
+                        # The manifest is complete and every call it required
+                        # settled successfully: buffered speech is now safe.
                         await self._flush_audio_buffer(socket, gate, reason="response_done")
                     continue
 
@@ -1434,6 +1479,9 @@ class LessonRealtimeHub:
         )
         registry.set_lesson_publisher(self)
         started = _time.perf_counter()
+        # A cancelled/timeout tool can leave the try before result is assigned;
+        # its finally block must still settle lifecycle bookkeeping cleanly.
+        result: dict[str, Any] | None = None
         try:
             async with session_scope() as db:
                 result = await registry.execute_structured(
@@ -1546,10 +1594,29 @@ class LessonRealtimeHub:
     def _record_gate_done(
         gate: ResponseGate, event: dict[str, Any], status: str
     ) -> None:
-        """Keep the first done; a late duplicate must not overwrite its status."""
+        """Keep the first done; only it establishes status and the call manifest."""
+        if gate.manifest_received:
+            return
+        gate.manifest_received = True
         if gate.done_event is None:
             gate.done_event = event
-            gate.done_status = status
+        gate.done_status = status
+        response = event.get("response") if isinstance(event.get("response"), dict) else {}
+        output = response.get("output")
+        if isinstance(output, list):
+            # response.done.output is authoritative and complete. No call may
+            # appear after it and change what audio is waiting for.
+            gate.manifest_call_ids = {
+                str(item.get("call_id"))
+                for item in output
+                if isinstance(item, dict)
+                and str(item.get("type") or "") == "function_call"
+                and item.get("call_id")
+            }
+        else:
+            # Older/fake transports omit output: the calls observed so far are
+            # the only ones this boundary can vouch for.
+            gate.manifest_call_ids = set(gate.calls)
 
     @staticmethod
     def _function_calls_from_done(event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1897,7 +1964,7 @@ class LessonRealtimeHub:
                         socket, reason="watchdog_tool_timeout", force=True
                     )
                     return
-                if gate.done_event is not None:
+                if gate.manifest_received and gate.can_release_audio():
                     logger.warning(
                         "response watchdog: resolving held done lesson=%s response_id=%s",
                         socket.lesson_id, response_id,
@@ -2051,8 +2118,10 @@ class LessonRealtimeHub:
     async def _flush_audio_buffer(
         self, socket: LessonSocket, gate: ResponseGate, *, reason: str
     ) -> None:
-        if gate.discarded or gate.audio_gap_confirmed:
-            # A confirmed source gap must never be played as a partial answer.
+        if not gate.can_release_audio():
+            # Never release speech before response.done proves the manifest is
+            # complete and every required call has settled successfully. A
+            # confirmed source gap or discarded response is also unplayable.
             return
         if gate.grace_task is not None:
             gate.grace_task.cancel()
@@ -2195,11 +2264,18 @@ class LessonRealtimeHub:
         key = self._tool_key(response_id, call_id)
         cached = socket.tool_call_results.get(key)
         gate = self._response_gate(socket, response_id)
-        if gate is None or gate.discarded or gate.finalized:
-            # A tool call after response.done is a protocol violation or a
-            # replay. Never execute new side effects after the turn was closed;
-            # acknowledge replays with their cached result and reject everything
-            # else so Qwen cannot wait forever for an output item.
+        late_after_manifest = (
+            gate is not None
+            and gate.manifest_received
+            and call_id not in gate.manifest_call_ids
+            and cached is None
+            and key not in socket.tool_tasks
+        )
+        if gate is None or gate.discarded or gate.finalized or late_after_manifest:
+            # A tool call after response.done (or absent from its manifest) is a
+            # protocol violation or a replay. Never execute new side effects
+            # after the manifest boundary; acknowledge replays with their cached
+            # result and reject everything else so Qwen cannot wait forever.
             if cached is not None:
                 output = json.dumps(cached)
                 reason = "late_replay_ack"
@@ -2211,7 +2287,11 @@ class LessonRealtimeHub:
                 }
                 socket.tool_call_results[key] = late_result
                 output = json.dumps(late_result)
-                reason = "late_tool_call_rejected"
+                reason = (
+                    "late_tool_call_after_manifest"
+                    if late_after_manifest
+                    else "late_tool_call_rejected"
+                )
             try:
                 await socket.qwen.function_call_output(call_id, output)
             except Exception:  # pragma: no cover - transport teardown
@@ -2252,6 +2332,9 @@ class LessonRealtimeHub:
             logger.info(
                 "audio-only recovery rejected tool %s lesson=%s response_id=%s",
                 state.name, lesson_id, response_id,
+            )
+            await self._cancel_buffered_audio(
+                socket, response_id=response_id, reason="gap_recovery_audio_only"
             )
             return
         state = gate.calls.setdefault(call_id, ToolCallState(call_id=call_id))
@@ -2368,9 +2451,11 @@ class LessonRealtimeHub:
                 gate.done_event = None
                 await self._finalize_response(socket, done_event)
             return
-        if gate.has_pending_calls():
+        if not gate.can_release_audio():
+            # A tool settling early only removes one blocker. response.done must
+            # still prove that no further function call belongs to this response.
             return
-        await self._flush_audio_buffer(socket, gate, reason="tool_calls_complete")
+        await self._flush_audio_buffer(socket, gate, reason="response_done_tools_settled")
 
     def _gate_has_flow_control_call(self, gate: ResponseGate | None) -> bool:
         if gate is None:
@@ -2546,7 +2631,7 @@ class LessonRealtimeHub:
             # persisted result. wait_for_student/lesson_finish stop here.
             if (
                 lifecycle.function_call_executed_ok is True
-                and (gate is None or not gate.has_pending_calls())
+                and (gate is None or gate.calls_settled_successfully())
                 and not self._gate_has_flow_control_call(gate)
             ):
                 await self._request_response(
